@@ -4,6 +4,7 @@ import { Sparkles, History as HistoryIcon, Trash2 } from 'lucide-react';
 import { useToast } from './Toast';
 
 import { parseError, sanitizeForLog } from '../utils';
+import { tr } from '../i18n';
 
 interface History {
   id: string;
@@ -25,7 +26,7 @@ const SaveSnippetForm = memo(({ sql, onCancel, onSuccess }: { sql: string, onCan
 
   const handleSaveSnippet = async () => {
     if (!saveTitle.trim()) {
-      toast("Title is required to save snippet.", "error");
+      toast(tr('保存片段需要标题。', 'Title is required to save snippet.'), "error");
       return;
     }
     try {
@@ -36,28 +37,33 @@ const SaveSnippetForm = memo(({ sql, onCancel, onSuccess }: { sql: string, onCan
         content: sql,
         is_golden: isTrainAI,
       });
-      toast(isTrainAI ? "AI trained successfully with new SQL!" : "Snippet saved successfully!", "success");
+      toast(
+        isTrainAI
+          ? tr('已用新 SQL 训练 AI！', 'AI trained successfully with new SQL!')
+          : tr('片段保存成功！', 'Snippet saved successfully!'),
+        "success"
+      );
       onSuccess();
     } catch (e: unknown) {
-        toast("Failed to save snippet: " + parseError(e).message, "error");
+        toast(tr('保存片段失败：', 'Failed to save snippet: ') + parseError(e).message, "error");
       }
   };
 
   return (
     <div className="mt-3 p-3 bg-[#0d1117] rounded border border-[#30363d]" onClick={e => e.stopPropagation()}>
       <h4 className="text-xs font-semibold text-purple-400 mb-2 flex items-center gap-1">
-        <Sparkles className="w-3 h-3" /> Save Smart Snippet
+        <Sparkles className="w-3 h-3" /> {tr('保存智能片段', 'Save Smart Snippet')}
       </h4>
       <input
         type="text"
-        placeholder="Title / Question"
+        placeholder={tr('标题 / 问题', 'Title / Question')}
         className="w-full mb-2 p-1.5 text-xs border rounded bg-[#161b22] border-[#30363d] text-gray-200 outline-none focus:border-purple-500"
         value={saveTitle}
         onChange={e => setSaveTitle(e.target.value)}
       />
       <input
         type="text"
-        placeholder="Description / Context (optional)"
+        placeholder={tr('描述 / 上下文（可选）', 'Description / Context (optional)')}
         className="w-full mb-2 p-1.5 text-xs border rounded bg-[#161b22] border-[#30363d] text-gray-200 outline-none focus:border-purple-500"
         value={saveDesc}
         onChange={e => setSaveDesc(e.target.value)}
@@ -71,12 +77,12 @@ const SaveSnippetForm = memo(({ sql, onCancel, onSuccess }: { sql: string, onCan
           className="w-3.5 h-3.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500 bg-[#161b22]"
         />
         <label htmlFor={`trainAI-${sql.length}`} className="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
-          Train AI with this snippet
+          {tr('使用该片段训练 AI', 'Train AI with this snippet')}
         </label>
       </div>
       <div className="flex justify-end gap-2">
-        <button onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-200 px-2 py-1">Cancel</button>
-        <button onClick={handleSaveSnippet} className="text-xs bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded transition-colors shadow-sm">Save</button>
+        <button onClick={onCancel} className="text-xs text-gray-400 hover:text-gray-200 px-2 py-1">{tr('取消', 'Cancel')}</button>
+        <button onClick={handleSaveSnippet} className="text-xs bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded transition-colors shadow-sm">{tr('保存', 'Save')}</button>
       </div>
     </div>
   );
@@ -122,20 +128,20 @@ export function SqlHistory({ onInsertSql }: SqlHistoryProps) {
     <div className="flex flex-col h-full bg-[#0d1117] border-l border-[#30363d] w-full text-sm">
       <div className="flex items-center border-b border-[#30363d] p-3 bg-[#0d1117]">
         <HistoryIcon className="w-4 h-4 text-gray-400 mr-2" />
-        <h2 className="font-semibold text-gray-200">Execution History</h2>
+        <h2 className="font-semibold text-gray-200">{tr('执行历史', 'Execution History')}</h2>
         <div className="flex-1"></div>
-        <button onClick={handleClearHistory} className="text-gray-400 hover:text-red-400 transition-colors" title="Clear All History">
+        <button onClick={handleClearHistory} className="text-gray-400 hover:text-red-400 transition-colors" title={tr('清空全部历史', 'Clear All History')}>
           <Trash2 className="w-4 h-4" />
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
         {loading ? (
-          <div className="text-center text-gray-500 mt-10">Loading...</div>
+          <div className="text-center text-gray-500 mt-10">{tr('加载中...', 'Loading...')}</div>
         ) : history.length === 0 ? (
           <div className="text-center text-gray-500 text-xs mt-10 flex flex-col items-center">
             <HistoryIcon className="w-8 h-8 mb-2 opacity-20" />
-            <p>No history found.</p>
+            <p>{tr('暂无历史记录。', 'No history found.')}</p>
           </div>
         ) : (
           <div className="space-y-3">
@@ -161,11 +167,11 @@ export function SqlHistory({ onInsertSql }: SqlHistoryProps) {
                         }} 
                         className="text-purple-400 hover:text-purple-300 text-xs flex items-center gap-1"
                       >
-                        <Sparkles className="w-3 h-3" /> Save as Smart Snippet
+                        <Sparkles className="w-3 h-3" /> {tr('保存为智能片段', 'Save as Smart Snippet')}
                       </button>
                     )}
                     <button onClick={(e) => { e.stopPropagation(); onInsertSql(h.sql); }} className="text-blue-400 hover:underline text-xs">
-                      Insert
+                      {tr('插入', 'Insert')}
                     </button>
                   </div>
                 </div>

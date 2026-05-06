@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Suspense, useCallback, useMemo } from 'react'
-import { Database, Table, Play, Settings, Command, Sparkles, BookMarked, Save, FileUp, AlignLeft, Keyboard, X, Trash2, RefreshCw } from 'lucide-react'
+import { Database, Table, Play, Settings, Command, Sparkles, BookMarked, Save, AlignLeft, Keyboard, X, Trash2, MoreHorizontal } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { format as formatSql } from 'sql-formatter'
 import { Onboarding } from './components/Onboarding'
@@ -15,14 +15,18 @@ import { ToolsNav } from './components/ToolsNav'
 import { WizardModal } from './components/WizardModal'
 import { GoLiveReportsTab } from './components/GoLiveReportsTab'
 import { GoLiveAuditTab } from './components/GoLiveAuditTab'
+import { AdvancedToolsHub } from './components/AdvancedToolsHub'
 import { SqlHistory } from './components/SqlHistory'
 import { AiTrainingPanel } from './components/AiTrainingPanel'
 import { DataCharts } from './components/DataCharts'
+import { DbExplorerSidebar } from './components/DbExplorerSidebar'
 import { api } from './api'
 
 import { parseError, formatErr, sanitizeForLog } from './utils'
 import type { AppError } from './utils'
 import { dbTypeDisplayName } from './utils/dbCapabilities'
+import { useAutoI18nDom } from './i18n'
+import { tr } from './i18n'
 
 import * as monaco from 'monaco-editor';
 import type { SchemaResponse, ConfigData, QueryExecutionResult, AiRule, DbConnection, TableWithDetails, ColumnInfo, MonacoEditor, Monaco } from './types';
@@ -33,7 +37,15 @@ const QueryBuilder = React.lazy(() => import('./components/QueryBuilder').then(m
 const TableWorkspace = React.lazy(() => import('./components/TableWorkspace').then(m => ({ default: m.TableWorkspace })));
 
 function App() {
+  useAutoI18nDom()
   const { toast } = useToast()
+  const RESULT_PANEL_HEIGHT_KEY = 'query_results_panel_height'
+  const SIDEBAR_WIDTH_KEY = 'sidebar_panel_width'
+  const MIN_EDITOR_HEIGHT = 220
+  const MIN_RESULTS_HEIGHT = 160
+  const SPLITTER_HEIGHT = 8
+  const MIN_SIDEBAR_WIDTH = 240
+  const MAX_SIDEBAR_WIDTH = 560
   const [showConfirmModal, setShowConfirmModal] = useState(false)
   const [pendingDangerousSql, setPendingDangerousSql] = useState('')
 
@@ -131,6 +143,22 @@ function App() {
     title: '',
     type: ''
   })
+  const [resultsPanelHeight, setResultsPanelHeight] = useState(() => {
+    const raw = window.localStorage.getItem(RESULT_PANEL_HEIGHT_KEY)
+    const parsed = raw ? Number(raw) : NaN
+    return Number.isFinite(parsed) && parsed >= MIN_RESULTS_HEIGHT ? parsed : 260
+  })
+  const [isResizingResults, setIsResizingResults] = useState(false)
+  const queryPaneRef = useRef<HTMLDivElement | null>(null)
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY)
+    const parsed = raw ? Number(raw) : NaN
+    return Number.isFinite(parsed) ? Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, parsed)) : 320
+  })
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false)
+  const appRootRef = useRef<HTMLDivElement | null>(null)
+  const [isCompactActionBar, setIsCompactActionBar] = useState(false)
+  const [showMoreActions, setShowMoreActions] = useState(false)
 
   const sqlRef = useRef(activeTabState.sql)
   const lastQueryRef = useRef(activeTabState.lastQuery)
@@ -206,6 +234,92 @@ function App() {
   }, [tabs])
 
   useEffect(() => {
+    window.localStorage.setItem(RESULT_PANEL_HEIGHT_KEY, String(resultsPanelHeight))
+  }, [resultsPanelHeight])
+
+  useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth))
+  }, [sidebarWidth])
+
+  useEffect(() => {
+    if (!isResizingResults) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const pane = queryPaneRef.current
+      if (!pane) return
+      const rect = pane.getBoundingClientRect()
+      const maxResultsHeight = Math.max(MIN_RESULTS_HEIGHT, rect.height - MIN_EDITOR_HEIGHT - SPLITTER_HEIGHT)
+      const rawHeight = rect.bottom - e.clientY - SPLITTER_HEIGHT / 2
+      const nextHeight = Math.round(Math.min(maxResultsHeight, Math.max(MIN_RESULTS_HEIGHT, rawHeight)))
+      setResultsPanelHeight(nextHeight)
+    }
+
+    const handleMouseUp = () => {
+      setIsResizingResults(false)
+    }
+
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isResizingResults])
+
+  useEffect(() => {
+    if (!isResizingSidebar) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const root = appRootRef.current
+      if (!root) return
+      const rect = root.getBoundingClientRect()
+      const raw = e.clientX - rect.left
+      const next = Math.round(Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, raw)))
+      setSidebarWidth(next)
+    }
+
+    const handleMouseUp = () => {
+      setIsResizingSidebar(false)
+    }
+
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+
+    return () => {
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isResizingSidebar])
+
+  useEffect(() => {
+    const updateActionBarMode = () => {
+      const width = queryPaneRef.current?.clientWidth ?? window.innerWidth
+      const compact = width < 1450
+      setIsCompactActionBar(compact)
+      if (!compact) setShowMoreActions(false)
+    }
+    updateActionBarMode()
+    window.addEventListener('resize', updateActionBarMode)
+    return () => window.removeEventListener('resize', updateActionBarMode)
+  }, [activeTabId, tabs.length, sidebarWidth])
+
+  useEffect(() => {
+    if (!showMoreActions) return
+    const close = () => setShowMoreActions(false)
+    window.addEventListener('click', close)
+    return () => window.removeEventListener('click', close)
+  }, [showMoreActions])
+
+  useEffect(() => {
     const saved = localStorage.getItem('recent_queries')
     if (saved) {
       try {
@@ -260,7 +374,7 @@ function App() {
       const aiConfigured = deriveAiConfigured(config)
 
       if (urlToUse) {
-        const schema = await api.getSchema()
+        const schema = await api.getSchema(config.active_db_id)
         setSchemaData(schema)
         setShowOnboarding(false)
       } else {
@@ -400,21 +514,190 @@ function App() {
     }
   }
 
-  const handleTableDoubleClick = (table: { table_name: string }) => {
-    const existingTab = tabs.find(t => t.id === `table-${table.table_name}`)
+  const handleTableDoubleClick = (table: { table_name: string }, forceDbId?: string, forceDbName?: string) => {
+    const dbKey = String(forceDbId || configData?.active_db_id || 'default')
+    const tabId = `table-${dbKey}-${table.table_name}`
+    const existingTab = tabs.find(t => t.id === tabId)
     if (existingTab) {
       setActiveTabId(existingTab.id)
     } else {
+      const titlePrefix = forceDbName ? `${forceDbName} · ` : ''
       const newTab: TabItem = {
-        id: `table-${table.table_name}`,
+        id: tabId,
         type: 'table',
-        title: table.table_name,
-        payload: { tableName: table.table_name }
+        title: `${titlePrefix}${table.table_name}`,
+        payload: { tableName: table.table_name, dbId: dbKey, dbName: forceDbName || '' }
       }
       setTabs([...tabs, newTab])
       setActiveTabId(newTab.id)
     }
   }
+
+  const switchActiveDbFromSidebar = useCallback(async (dbId: string) => {
+    if (!configData) return
+    if (dbId === String(configData.active_db_id || '')) return
+    try {
+      await api.updateConfig({ ...configData, active_db_id: dbId })
+      const selectedDb = (configData as any)?.db_connections?.find((c: DbConnection) => c.id === dbId)
+      const dbName = selectedDb ? (selectedDb.name || selectedDb.id) : dbId
+      await initData()
+      toast(`已切换至 ${dbName} 库`, "success")
+    } catch {
+      toast("Failed to switch database", "error")
+    }
+  }, [configData, initData, toast])
+
+  const addConnectionFromSidebar = useCallback(async (name: string, url: string) => {
+    if (!configData) return
+    if (!url.trim()) {
+      toast('Connection URL cannot be empty', 'error')
+      return
+    }
+    try {
+      const newConn = {
+        id: 'db-' + Date.now(),
+        name: name.trim() || 'Unnamed',
+        url: url.trim(),
+        group_name: null,
+        color: '#3b82f6',
+        is_favorite: false,
+        ssh: { enabled: false },
+        ssl: { enabled: false, mode: 'preferred' },
+        is_read_only: false
+      }
+      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      list.push(newConn)
+      await api.updateConfig({ ...(configData as any), db_connections: list, active_db_id: newConn.id })
+      await initData()
+      toast('New connection added.', 'success')
+    } catch (e: unknown) {
+      toast('Failed to add connection: ' + formatErr(e), 'error')
+    }
+  }, [configData, initData, toast])
+
+  const updateConnectionFromSidebar = useCallback(async (connId: string, patch: Record<string, unknown>) => {
+    if (!configData) return
+    try {
+      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const idx = list.findIndex((c: any) => c.id === connId)
+      if (idx < 0) return
+      list[idx] = { ...list[idx], ...patch }
+      await api.updateConfig({ ...(configData as any), db_connections: list })
+      await refreshConfigOnly()
+      toast(tr('连接已更新', 'Connection updated.'), 'success')
+    } catch (e: unknown) {
+      toast(tr('更新连接失败：', 'Failed to update connection: ') + formatErr(e), 'error')
+    }
+  }, [configData, refreshConfigOnly, toast])
+
+  const deleteConnectionFromSidebar = useCallback(async (dbId: string) => {
+    if (!configData) return
+    const currentList = Array.isArray((configData as any).db_connections) ? ((configData as any).db_connections as any[]) : []
+    const target = currentList.find((c: any) => c.id === dbId)
+    const label = target?.name || target?.id || dbId
+    if (!window.confirm(`Are you sure you want to delete the database connection "${label}"?`)) return
+    try {
+      const list = currentList.filter((c: any) => c.id !== dbId)
+      let nextActiveId: any = (configData as any).active_db_id
+      if (String(nextActiveId || '') === dbId) {
+        nextActiveId = list.length > 0 ? list[0].id : null
+      }
+      await api.updateConfig({ ...(configData as any), db_connections: list, active_db_id: nextActiveId })
+      await initData()
+      toast('Connection deleted.', 'success')
+    } catch (e: unknown) {
+      toast('Failed to delete connection: ' + formatErr(e), 'error')
+    }
+  }, [configData, initData, toast])
+
+  const duplicateConnectionFromSidebar = useCallback(async (dbId: string) => {
+    if (!configData) return
+    try {
+      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const target = list.find((c: any) => c.id === dbId)
+      if (!target) return
+      const copy = {
+        ...target,
+        id: 'db-' + Date.now(),
+        name: `${String(target.name || target.id)} Copy`,
+      }
+      list.push(copy)
+      await api.updateConfig({ ...(configData as any), db_connections: list })
+      await refreshConfigOnly()
+      toast(tr('连接已复制', 'Connection duplicated.'), 'success')
+    } catch (e: unknown) {
+      toast(tr('复制连接失败：', 'Failed to duplicate connection: ') + formatErr(e), 'error')
+    }
+  }, [configData, refreshConfigOnly, toast])
+
+  const disconnectConnectionFromSidebar = useCallback(async (dbId: string) => {
+    if (!configData) return
+    if (String((configData as any).active_db_id || '') !== dbId) return
+    try {
+      await api.updateConfig({ ...(configData as any), active_db_id: null })
+      await initData()
+      toast(tr('连接已断开', 'Connection disconnected.'), 'success')
+    } catch (e: unknown) {
+      toast(tr('断开连接失败：', 'Failed to disconnect connection: ') + formatErr(e), 'error')
+    }
+  }, [configData, initData, toast])
+
+  const renameGroupFromSidebar = useCallback(async (oldGroup: string, newGroup: string) => {
+    if (!configData) return
+    const trimmedOld = oldGroup.trim()
+    const trimmedNew = newGroup.trim()
+    if (!trimmedOld || !trimmedNew) return
+    try {
+      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const mapped = list.map((c: any) => {
+        const g = String(c.group_name || tr('未分组', 'Ungrouped'))
+        if (g === trimmedOld) return { ...c, group_name: trimmedNew }
+        return c
+      })
+      await api.updateConfig({ ...(configData as any), db_connections: mapped })
+      await refreshConfigOnly()
+      toast(tr('分组已重命名', 'Group renamed.'), 'success')
+    } catch (e: unknown) {
+      toast(tr('重命名分组失败：', 'Failed to rename group: ') + formatErr(e), 'error')
+    }
+  }, [configData, refreshConfigOnly, toast, tr])
+
+  const ungroupFromSidebar = useCallback(async (groupName: string) => {
+    if (!configData) return
+    const trimmed = groupName.trim()
+    if (!trimmed || trimmed === tr('未分组', 'Ungrouped')) return
+    try {
+      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const mapped = list.map((c: any) => {
+        const g = String(c.group_name || tr('未分组', 'Ungrouped'))
+        if (g === trimmed) return { ...c, group_name: null }
+        return c
+      })
+      await api.updateConfig({ ...(configData as any), db_connections: mapped })
+      await refreshConfigOnly()
+      toast(tr('分组已清空', 'Group cleared.'), 'success')
+    } catch (e: unknown) {
+      toast(tr('清空分组失败：', 'Failed to clear group: ') + formatErr(e), 'error')
+    }
+  }, [configData, refreshConfigOnly, toast, tr])
+
+  const batchMoveConnectionsFromSidebar = useCallback(async (connIds: string[], groupName: string | null) => {
+    if (!configData || connIds.length === 0) return
+    try {
+      const set = new Set(connIds)
+      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const mapped = list.map((c: any) => (
+        set.has(String(c.id))
+          ? { ...c, group_name: groupName && groupName.trim() ? groupName.trim() : null }
+          : c
+      ))
+      await api.updateConfig({ ...(configData as any), db_connections: mapped })
+      await refreshConfigOnly()
+      toast(tr('批量移动完成', 'Batch move completed.'), 'success')
+    } catch (e: unknown) {
+      toast(tr('批量移动失败：', 'Batch move failed: ') + formatErr(e), 'error')
+    }
+  }, [configData, refreshConfigOnly, toast, tr])
 
   const handleExplain = () => {
     const currentSql = sqlRef.current
@@ -423,7 +706,7 @@ function App() {
     setTabs([...tabs, {
       id: newTabId,
       type: 'explain',
-      title: 'Explain Plan',
+      title: tr('执行计划', 'Explain Plan'),
       payload: { sql: currentSql }
     }])
     setActiveTabId(newTabId)
@@ -626,12 +909,12 @@ function App() {
     updateActiveTabState({ isExecuting: true, errorObj: null })
     
     try {
-      const result = await api.executeSql(currentSql, force)
+      const result = await api.executeSql(currentSql, force, configData?.active_db_id)
       updateActiveTabState({ executeResult: result })
       setShowConfirmModal(false)
 
       if (/\b(CREATE|ALTER|DROP|TRUNCATE|RENAME|GRANT|REVOKE)\b/i.test(currentSql)) {
-        api.getSchema().then(setSchemaData).catch(console.error)
+        api.getSchema(configData?.active_db_id).then(setSchemaData).catch(console.error)
       }
     } catch (e: unknown) {
       const err = parseError(e)
@@ -877,7 +1160,7 @@ function App() {
   }
 
   return (
-    <div className="flex h-screen bg-dark-bg text-dark-text overflow-hidden">
+    <div ref={appRootRef} className="flex h-screen bg-dark-bg text-dark-text overflow-hidden">
       {showOnboarding && (
         <Onboarding
           onComplete={() => {
@@ -888,58 +1171,32 @@ function App() {
       )}
       
       {/* Sidebar */}
-      <div className="w-80 border-r border-dark-border bg-dark-panel flex flex-col z-10">
+      <div
+        className="border-r border-dark-border bg-dark-panel flex flex-col z-10 shrink-0"
+        style={{ width: `${sidebarWidth}px` }}
+      >
         <div className="p-4 border-b border-dark-border flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Database className="w-5 h-5 text-dark-accent" />
               <span className="font-semibold tracking-wide flex items-center gap-2">
-                Local AI SQL
+                {tr('本地 AI SQL', 'Local AI SQL')}
                 {configData?.db_connections?.find((c: DbConnection) => c.id === configData.active_db_id)?.is_read_only && (
                   <span className="text-[10px] bg-red-500/20 text-red-500 border border-red-500/30 px-1.5 py-0.5 rounded uppercase tracking-wider font-bold shadow-sm">
                     [只读]
                   </span>
                 )}
-                <button
-                  title="Refresh Schema"
-                  onClick={() => {
-                    setIsRefreshingSchema(true);
-                    api.getSchema().then(setSchemaData).finally(() => setIsRefreshingSchema(false));
-                  }}
-                  className="flex items-center justify-center p-0 m-0 border-none bg-transparent"
-                >
-                  <RefreshCw 
-                    className={`w-4 h-4 cursor-pointer transition-colors ${isRefreshingSchema ? 'animate-spin text-white' : 'text-gray-400 hover:text-white'}`}
-                  />
-                </button>
               </span>
             </div>
-            <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]" title={configData?.db_url || "Connected"}></div>
+            <div
+              className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]"
+              title={
+                configData?.active_db_id
+                  ? (configData?.db_connections || []).find((c: DbConnection) => c.id === configData.active_db_id)?.url || "Connected"
+                  : (configData?.db_url || tr('已连接', 'Connected'))
+              }
+            ></div>
           </div>
-          {configData?.db_connections && configData.db_connections.length > 0 && (
-            <select
-              className="mt-1 w-full bg-dark-bg border border-dark-border text-xs text-gray-300 rounded px-2 py-1 outline-none focus:border-blue-500 transition-colors"
-              value={configData.active_db_id || ''}
-              onChange={async (e) => {
-                try {
-                  const new_id = e.target.value;
-                  await api.updateConfig({ ...configData, active_db_id: new_id });
-                  const selectedDb = configData?.db_connections?.find((c: DbConnection) => c.id === new_id);
-                  const dbName = selectedDb ? (selectedDb.name || selectedDb.id) : new_id;
-                  await initData();
-                  toast(`已切换至 ${dbName} 库`, "success");
-                } catch {
-                  toast("Failed to switch database", "error");
-                }
-              }}
-            >
-              {configData?.db_connections?.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {String(c.name || c.id)} ({c.url.split('@')[1] || c.url})
-                </option>
-              ))}
-            </select>
-          )}
         </div>
         
         <div className="flex border-b border-dark-border">
@@ -947,106 +1204,109 @@ function App() {
             className={`flex-1 py-2 text-sm font-medium ${sidebarTab === 'schema' ? 'text-dark-accent border-b-2 border-dark-accent' : 'text-gray-400 hover:text-gray-200'}`}
             onClick={() => setSidebarTab('schema')}
           >
-            Schema
+            {tr('结构', 'Schema')}
           </button>
           <button 
             className={`flex-1 py-2 text-sm font-medium ${sidebarTab === 'smart_snippets' ? 'text-dark-accent border-b-2 border-dark-accent' : 'text-gray-400 hover:text-gray-200'}`}
             onClick={() => setSidebarTab('smart_snippets')}
           >
-            Smart Snippets
+            {tr('智能片段', 'Smart Snippets')}
           </button>
           <button 
             className={`flex-1 py-2 text-sm font-medium ${sidebarTab === 'history' ? 'text-dark-accent border-b-2 border-dark-accent' : 'text-gray-400 hover:text-gray-200'}`}
             onClick={() => setSidebarTab('history')}
           >
-            History
+            {tr('历史', 'History')}
           </button>
         </div>
 
         {sidebarTab === 'schema' ? (
-          <div className="p-2 flex-1 overflow-y-auto relative">
-            <div className="text-xs text-gray-500 uppercase font-bold tracking-wider mb-2 px-2 mt-2 flex items-center justify-between">
-              <span>Tables ({schemaData?.tables?.length || 0})</span>
-              {!configData?.db_url && (
-                <label className="cursor-pointer text-blue-400 hover:text-blue-300 flex items-center gap-1 bg-blue-500/10 px-2 py-1 rounded-md transition-colors border border-blue-500/20 shadow-sm" title="Upload offline .sql schema">
-                  <FileUp className="w-3.5 h-3.5" />
-                  <span className="text-[10px] font-medium tracking-normal capitalize">导入 DDL</span>
-                  <input type="file" accept=".sql" className="hidden" onChange={handleSqlUpload} />
-                </label>
-              )}
-            </div>
-            
-            {(!schemaData || !schemaData.tables || schemaData.tables.length === 0) && (
-              <div className="p-4 text-center text-gray-500 flex flex-col items-center mt-10">
-                <Database className="w-10 h-10 mb-3 opacity-30" />
-                <p className="text-sm font-medium mb-1">未连接数据库</p>
-                <p className="text-xs opacity-70 mb-4 px-2">您可以去设置中直连库，或点击上方导入 .sql 离线表结构。</p>
-              </div>
-            )}
-            {schemaData?.tables?.map((table: { table_name: string }) => (
-              <div 
-                key={table.table_name}
-                className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors duration-150 group hover:bg-[#21262d] text-gray-300`}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setContextMenu({ x: e.clientX, y: e.clientY, table });
-                }}
-              >
-                <div 
-                  className="flex items-center gap-2 flex-1 overflow-hidden" 
-                  onDoubleClick={() => handleTableDoubleClick(table)}
-                >
-                  <Table className="w-4 h-4 flex-shrink-0" />
-                  <span className="text-sm truncate">{table.table_name}</span>
-                </div>
-                <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    insertTextAtCursor(table.table_name);
-                    toast(`Inserted ${table.table_name}`, "success");
-                  }}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all"
-                  title="Insert table name into editor"
-                >
-                  <AlignLeft className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
-            {(!schemaData || !schemaData.tables) && (
-              <div className="px-2 py-4 text-sm text-gray-500 italic">No schema loaded</div>
-            )}
-          </div>
+          <DbExplorerSidebar
+            configData={configData}
+            schemaData={schemaData}
+            isRefreshingSchema={isRefreshingSchema}
+            onRefreshSchema={() => {
+              setIsRefreshingSchema(true)
+              api.getSchema(configData?.active_db_id).then(setSchemaData).finally(() => setIsRefreshingSchema(false))
+            }}
+            showSqlUpload={!configData?.db_url}
+            onSqlUpload={handleSqlUpload}
+            onSwitchActiveDb={(dbId) => {
+              switchActiveDbFromSidebar(dbId)
+            }}
+            onAddConnection={(name, url) => {
+              addConnectionFromSidebar(name, url)
+            }}
+            onUpdateConnection={(connId, patch) => {
+              updateConnectionFromSidebar(connId, patch)
+            }}
+            onDuplicateConnection={(connId) => {
+              duplicateConnectionFromSidebar(connId)
+            }}
+            onDisconnectConnection={(connId) => {
+              disconnectConnectionFromSidebar(connId)
+            }}
+            onRenameGroup={(oldGroup, newGroup) => {
+              renameGroupFromSidebar(oldGroup, newGroup)
+            }}
+            onClearGroup={(groupName) => {
+              ungroupFromSidebar(groupName)
+            }}
+            onBatchMoveConnections={(connIds, groupName) => {
+              batchMoveConnectionsFromSidebar(connIds, groupName)
+            }}
+            onDeleteConnection={(dbId) => {
+              deleteConnectionFromSidebar(dbId)
+            }}
+            onOpenTable={(dbId, dbName, tableName) => {
+              handleTableDoubleClick({ table_name: tableName }, dbId, dbName)
+            }}
+            onInsertTableName={(tableName) => {
+              insertTextAtCursor(tableName)
+              toast(tr(`已插入 ${tableName}`, `Inserted ${tableName}`), "success")
+            }}
+            onTableContextMenu={(x, y, table) => {
+              setContextMenu({ x, y, table })
+            }}
+          />
         ) : sidebarTab === 'smart_snippets' ? (
           <div className="flex-1 overflow-hidden border-t border-dark-border">
             <AiTrainingPanel onInsertSql={(text) => {
               insertTextAtCursor(text)
-              toast("Inserted SQL", "success")
+              toast(tr('已插入 SQL', 'Inserted SQL'), "success")
             }} />
           </div>
         ) : (
           <div className="flex-1 overflow-hidden border-t border-dark-border">
             <SqlHistory onInsertSql={(text) => {
               insertTextAtCursor(text)
-              toast("Inserted SQL", "success")
+              toast(tr('已插入 SQL', 'Inserted SQL'), "success")
             }} />
           </div>
         )}
         <div className="p-3 border-t border-dark-border flex items-center gap-2 hover:bg-[#21262d] cursor-pointer transition-colors duration-150" onClick={() => setShowRulesPanel(true)}>
           <BookMarked className="w-4 h-4 text-gray-400" />
-          <span className="text-sm text-gray-400 flex-1">Smart Rules</span>
+          <span className="text-sm text-gray-400 flex-1">{tr('智能规则', 'Smart Rules')}</span>
           {rules.length > 0 && (
             <span className="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 rounded">{rules.length}</span>
           )}
         </div>
         <div className="p-3 border-t border-dark-border flex items-center gap-2 hover:bg-[#21262d] cursor-pointer transition-colors duration-150" onClick={() => setShowSettings(true)}>
           <Settings className="w-4 h-4 text-gray-400" />
-          <span className="text-sm text-gray-400 flex-1">Settings</span>
+          <span className="text-sm text-gray-400 flex-1">{tr('设置', 'Settings')}</span>
         </div>
         <div className="p-3 border-t border-dark-border flex items-center gap-2 hover:bg-[#21262d] cursor-pointer transition-colors duration-150" onClick={() => setShowHelpModal(true)}>
           <Keyboard className="w-4 h-4 text-gray-400" />
-          <span className="text-sm text-gray-400 flex-1">Shortcuts Help</span>
+          <span className="text-sm text-gray-400 flex-1">{tr('快捷键帮助', 'Shortcuts Help')}</span>
         </div>
       </div>
+
+      {/* Sidebar Resizer */}
+      <div
+        className={`w-1.5 shrink-0 cursor-col-resize bg-[#0d1117] hover:bg-[#161b22] ${isResizingSidebar ? 'bg-[#161b22]' : ''}`}
+        onMouseDown={() => setIsResizingSidebar(true)}
+        title="拖动调整左侧栏宽度"
+      />
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col relative bg-[#0a0c10]">
@@ -1054,12 +1314,22 @@ function App() {
         <ToolsNav 
           onSelectTool={(toolId) => {
             let title = '';
-            if (toolId === 'schema-sync') title = '结构同步 (Schema Sync)';
-            if (toolId === 'data-sync') title = '数据同步 (Data Sync)';
-            if (toolId === 'perf-sync') title = '同步压测 (Perf Sync)';
-            if (toolId === 'go-live') title = '上线门禁 (Go-live Gate)';
-            if (toolId === 'data-transfer') title = '数据传输 (Data Transfer)';
-            if (toolId === 'data-analytics') title = '数据分析图表 (Data Analytics)';
+            if (toolId === 'schema-sync') title = tr('结构同步', 'Schema Sync');
+            if (toolId === 'data-sync') title = tr('数据同步', 'Data Sync');
+            if (toolId === 'perf-sync') title = tr('同步压测', 'Perf Sync');
+            if (toolId === 'go-live') title = tr('上线门禁', 'Go-live Gate');
+            if (toolId === 'db-security') title = tr('权限与用户管理', 'Permissions & Users');
+            if (toolId === 'db-events') title = tr('事件与触发器', 'Events & Triggers');
+            if (toolId === 'model-compare') title = tr('模型对比', 'Model Compare');
+            if (toolId === 'visual-sync') title = tr('可视化同步向导', 'Visual Sync Wizard');
+            if (toolId === 'data-transfer') title = tr('数据传输', 'Data Transfer');
+            if (toolId === 'data-analytics') title = tr('数据分析图表', 'Data Analytics');
+            if (toolId === 'advanced-center') {
+              const newTabId = `advanced-center-${Date.now()}`
+              setTabs([...tabs, { id: newTabId, type: 'advanced-center', title: tr('高级工具中心', 'Advanced Tools Hub') }])
+              setActiveTabId(newTabId)
+              return
+            }
             if (toolId === 'go-live-reports') {
               const newTabId = `go-live-reports-${Date.now()}`
               setTabs([...tabs, { id: newTabId, type: 'go-live-reports', title: '门禁报告' }])
@@ -1074,13 +1344,13 @@ function App() {
             }
             if (toolId === 'query-builder') {
               const newTabId = `builder-${Date.now()}`
-              setTabs([...tabs, { id: newTabId, type: 'query-builder', title: 'Query Builder' }])
+              setTabs([...tabs, { id: newTabId, type: 'query-builder', title: tr('查询构建器', 'Query Builder') }])
               setActiveTabId(newTabId)
               return;
             }
             if (toolId === 'ai-training') {
               const newTabId = `ai-training-${Date.now()}`
-              setTabs([...tabs, { id: newTabId, type: 'ai-training', title: 'AI Training' }])
+              setTabs([...tabs, { id: newTabId, type: 'ai-training', title: tr('AI 训练面板', 'AI Training') }])
               setActiveTabId(newTabId)
               return;
             }
@@ -1122,9 +1392,11 @@ function App() {
             return (
               <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? 'z-10 opacity-100 pointer-events-auto' : 'z-0 opacity-0 pointer-events-none'}`} style={{ display: isActive ? 'flex' : 'none' }}>
                 {tab.type === 'query' ? (
-                  <>
+                  <div ref={isActive ? queryPaneRef : undefined} className="flex flex-col h-full min-h-0">
                     {/* Editor Area */}
-                    <div className="flex-1 border-b border-dark-border relative group">
+                    <div
+                      className="flex-1 border-b border-dark-border relative group min-h-0"
+                    >
                       {/* Save Rule Floating Button */}
                       {tabState.lastQuery && tabState.sql && !tabState.isExecuting && (
                         <motion.button
@@ -1177,11 +1449,11 @@ function App() {
                         />
                       </Suspense>
 
-                        <div className="absolute bottom-4 right-4 flex gap-3 items-center">
-                          <span className="text-xs font-medium text-blue-400 bg-blue-500/10 px-2 py-1 rounded border border-blue-500/20 mr-2 shadow-sm">
+                        <div className="absolute bottom-4 right-4 flex gap-3 items-center whitespace-nowrap max-w-[calc(100%-2rem)] overflow-x-auto py-1">
+                          <span className="text-xs font-medium text-blue-400 bg-blue-500/10 px-2 py-1 rounded border border-blue-500/20 mr-2 shadow-sm whitespace-nowrap">
                             {dbType} Agent
                           </span>
-                        {resolveModelsList.length > 0 && (
+                        {!isCompactActionBar && resolveModelsList.length > 0 && (
                           <div className="flex items-center gap-2 mr-1">
                             <select
                               value={resolveActiveModelId}
@@ -1208,7 +1480,7 @@ function App() {
                             </select>
                           </div>
                         )}
-                        {tabState.lastExplanation && (
+                        {!isCompactActionBar && tabState.lastExplanation && (
                           <span className="text-xs text-blue-400 bg-blue-500/10 border border-blue-500/20 px-3 py-1.5 rounded-full mr-2 max-w-sm truncate" title={tabState.lastExplanation}>
                             <TypingEffect text={tabState.lastExplanation} />
                           </span>
@@ -1221,59 +1493,149 @@ function App() {
                         <motion.button 
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.98 }}
-                          className="flex items-center gap-2 px-3 py-2 bg-dark-panel border border-dark-border hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm ripple"
+                          className="flex items-center justify-center gap-2 px-3 py-2 bg-dark-panel border border-dark-border hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm ripple whitespace-nowrap leading-none"
                           onClick={() => setShowCommandPalette(true)}
                         >
                           <Command className="w-4 h-4" />
-                          <span>Ask AI <span className="opacity-50 ml-1 text-xs bg-dark-bg px-1 rounded border border-dark-border">Cmd K</span></span>
+                          <span className="whitespace-nowrap">{tr('询问 AI', 'Ask AI')} <span className="opacity-50 ml-1 text-xs bg-dark-bg px-1 rounded border border-dark-border">Cmd K</span></span>
                         </motion.button>
-                        <motion.button 
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                          className="flex items-center gap-2 px-3 py-2 bg-dark-panel border border-dark-border hover:border-blue-500 hover:text-blue-400 rounded text-sm text-gray-300 transition-colors shadow-sm ripple"
-                          onClick={handleAIOptimize}
-                          disabled={tabState.isGenerating || !tabState.sql.trim() || tabState.sql.trim() === '-- Generated SQL will appear here\n'}
-                        >
-                          <Sparkles className="w-4 h-4" />
-                          <span>AI 优化 (Optimize)</span>
-                        </motion.button>
-                        <motion.button 
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                          className="flex items-center gap-2 px-3 py-2 bg-dark-panel border border-dark-border hover:border-purple-500 hover:text-purple-400 rounded text-sm text-gray-300 transition-colors shadow-sm ripple"
-                          onClick={handleAIExplain}
-                          disabled={tabState.isGenerating || !tabState.sql.trim() || tabState.sql.trim() === '-- Generated SQL will appear here\n'}
-                        >
-                          <Sparkles className="w-4 h-4" />
-                          <span>AI 解释 (Explain)</span>
-                        </motion.button>
-                        <motion.button 
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                          className="flex items-center gap-2 px-3 py-2 bg-dark-panel border border-dark-border hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm ripple"
-                          onClick={handleExplain}
-                          title="Execution Plan"
-                          disabled={!tabState.sql.trim() || !configData?.db_url}
-                        >
-                          <span>Explain (执行计划)</span>
-                        </motion.button>
-                        <motion.button 
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                          className="flex items-center gap-2 px-3 py-2 bg-[#21262d] border border-dark-border hover:bg-[#30363d] hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm ripple"
-                          onClick={formatSqlEditor}
-                          title="Format SQL (Shift+Alt+F)"
-                        >
-                          <AlignLeft className="w-4 h-4" />
-                          <span>Format</span>
-                        </motion.button>
+                        {!isCompactActionBar && (
+                          <>
+                            <motion.button 
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              className="flex items-center justify-center gap-2 px-3 py-2 bg-dark-panel border border-dark-border hover:border-blue-500 hover:text-blue-400 rounded text-sm text-gray-300 transition-colors shadow-sm ripple whitespace-nowrap leading-none"
+                              onClick={handleAIOptimize}
+                              disabled={tabState.isGenerating || !tabState.sql.trim() || tabState.sql.trim() === '-- Generated SQL will appear here\n'}
+                            >
+                              <Sparkles className="w-4 h-4" />
+                              <span className="whitespace-nowrap">AI 优化 (Optimize)</span>
+                            </motion.button>
+                            <motion.button 
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              className="flex items-center justify-center gap-2 px-3 py-2 bg-dark-panel border border-dark-border hover:border-purple-500 hover:text-purple-400 rounded text-sm text-gray-300 transition-colors shadow-sm ripple whitespace-nowrap leading-none"
+                              onClick={handleAIExplain}
+                              disabled={tabState.isGenerating || !tabState.sql.trim() || tabState.sql.trim() === '-- Generated SQL will appear here\n'}
+                            >
+                              <Sparkles className="w-4 h-4" />
+                              <span className="whitespace-nowrap">AI 解释 (Explain)</span>
+                            </motion.button>
+                            <motion.button 
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              className="flex items-center justify-center gap-2 px-3 py-2 bg-dark-panel border border-dark-border hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm ripple whitespace-nowrap leading-none"
+                              onClick={handleExplain}
+                              title="Execution Plan"
+                              disabled={!tabState.sql.trim() || !configData?.db_url}
+                            >
+                              <span className="whitespace-nowrap">Explain (执行计划)</span>
+                            </motion.button>
+                            <motion.button 
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              className="flex items-center justify-center gap-2 px-3 py-2 bg-[#21262d] border border-dark-border hover:bg-[#30363d] hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm ripple whitespace-nowrap leading-none"
+                              onClick={formatSqlEditor}
+                              title="Format SQL (Shift+Alt+F)"
+                            >
+                              <AlignLeft className="w-4 h-4" />
+                              <span className="whitespace-nowrap">Format</span>
+                            </motion.button>
+                          </>
+                        )}
+                        {isCompactActionBar && (
+                          <div
+                            className="relative"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                            }}
+                          >
+                            <button
+                              className="flex items-center justify-center h-9 w-9 bg-[#21262d] border border-dark-border hover:bg-[#30363d] hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm"
+                              onClick={() => setShowMoreActions(v => !v)}
+                              title="更多操作"
+                            >
+                              <MoreHorizontal className="w-4 h-4" />
+                            </button>
+                            {showMoreActions && (
+                              <div className="absolute bottom-11 right-0 w-56 bg-[#161b22] border border-[#30363d] rounded-lg shadow-2xl overflow-hidden z-30">
+                                {resolveModelsList.length > 0 && (
+                                  <div className="px-3 py-2 border-b border-[#30363d] space-y-2">
+                                    <select
+                                      value={resolveActiveModelId}
+                                      onChange={(e) => updateAiRuntime({ active_model_id: e.target.value, model_name: e.target.value }, `已切换模型：${e.target.value}`)}
+                                      disabled={isAiSwitching}
+                                      className="h-8 w-full bg-dark-panel border border-dark-border hover:border-gray-500 text-gray-200 rounded px-2 text-xs transition-colors disabled:opacity-60"
+                                      title="快速切换模型"
+                                    >
+                                      {resolveModelsList.map((m: any) => (
+                                        <option key={m.id} value={m.id}>{m.display_name || m.id}</option>
+                                      ))}
+                                    </select>
+                                    <select
+                                      value={resolveActiveTier}
+                                      onChange={(e) => updateAiRuntime({ active_tier: e.target.value }, `已切换 Tier：${e.target.value}`)}
+                                      disabled={isAiSwitching || !activeModelSupportsTier}
+                                      className="h-8 w-full bg-dark-panel border border-dark-border hover:border-gray-500 text-gray-200 rounded px-2 text-xs transition-colors disabled:opacity-60"
+                                      title={activeModelSupportsTier ? "快速切换 tier" : "该模型不支持 tier"}
+                                    >
+                                      <option value="fast">fast</option>
+                                      <option value="balanced">balanced</option>
+                                      <option value="high">high</option>
+                                      <option value="ultra">ultra</option>
+                                    </select>
+                                  </div>
+                                )}
+                                <button
+                                  onClick={() => {
+                                    setShowMoreActions(false)
+                                    handleAIOptimize()
+                                  }}
+                                  disabled={tabState.isGenerating || !tabState.sql.trim() || tabState.sql.trim() === '-- Generated SQL will appear here\n'}
+                                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                                >
+                                  AI 优化 (Optimize)
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setShowMoreActions(false)
+                                    handleAIExplain()
+                                  }}
+                                  disabled={tabState.isGenerating || !tabState.sql.trim() || tabState.sql.trim() === '-- Generated SQL will appear here\n'}
+                                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                                >
+                                  AI 解释 (Explain)
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setShowMoreActions(false)
+                                    handleExplain()
+                                  }}
+                                  disabled={!tabState.sql.trim() || !configData?.db_url}
+                                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                                >
+                                  Explain (执行计划)
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setShowMoreActions(false)
+                                    formatSqlEditor()
+                                  }}
+                                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d]"
+                                >
+                                  Format
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <motion.button 
                           whileHover={{ scale: 1.02 }}
                           whileTap={{ scale: 0.95 }}
                           onClick={() => handleExecute(false)}
                           disabled={tabState.isExecuting || !tabState.sql.trim() || !configData?.db_url}
                           title={!configData?.db_url ? "Execute requires live database connection" : "Execute SQL (Cmd+Enter)"}
-                          className={`flex items-center gap-2 px-5 py-2 rounded text-sm font-medium text-white transition-all shadow-[0_0_15px_rgba(59,130,246,0.2)] ripple relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed ${
+                          className={`flex items-center justify-center gap-2 px-5 py-2 rounded text-sm font-medium text-white transition-all shadow-[0_0_15px_rgba(59,130,246,0.2)] ripple relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap leading-none ${
                             tabState.isExecuting ? 'bg-blue-700 cursor-wait' : 'bg-dark-accent hover:bg-blue-500 hover:shadow-[0_0_20px_rgba(59,130,246,0.4)]'
                           }`}
                         >
@@ -1281,13 +1643,21 @@ function App() {
                             <div className="absolute inset-0 shimmer-bg z-0"></div>
                           )}
                           <Play className="w-4 h-4 fill-current relative z-10" />
-                          <span className="relative z-10">{tabState.isExecuting ? 'Executing...' : 'Run'}</span>
+                          <span className="relative z-10 whitespace-nowrap">{tabState.isExecuting ? 'Executing...' : 'Run'}</span>
                         </motion.button>
                       </div>
                     </div>
 
+                    <div
+                      className={`h-2 shrink-0 cursor-row-resize bg-[#0d1117] border-y border-dark-border flex items-center justify-center ${isResizingResults ? 'bg-[#161b22]' : ''}`}
+                      onMouseDown={() => setIsResizingResults(true)}
+                      title="拖动调整结果区域高度"
+                    >
+                      <div className={`h-1 w-12 rounded-full transition-colors ${isResizingResults ? 'bg-blue-500/70' : 'bg-gray-600/70'}`} />
+                    </div>
+
                     {/* Results Area */}
-                    <div className="h-64 bg-dark-bg flex flex-col relative">
+                    <div className="bg-dark-bg flex flex-col relative shrink-0 min-h-0" style={{ height: `${resultsPanelHeight}px` }}>
                       <div className="h-8 border-b border-dark-border bg-dark-panel flex items-center justify-between px-4">
                         <div className="flex items-center gap-4">
                           <span className="text-xs font-bold tracking-wider text-gray-400 uppercase">Results</span>
@@ -1433,10 +1803,10 @@ function App() {
                         </div>
                       </div>
                     </div>
-                  </>
+                  </div>
                 ) : tab.type === 'table' ? (
                   <Suspense fallback={<SkeletonLoader />}>
-                    <TableWorkspace tableName={tab.payload?.tableName} isActive={isActive} />
+                    <TableWorkspace tableName={tab.payload?.tableName} dbId={tab.payload?.dbId} isActive={isActive} />
                   </Suspense>
                 ) : tab.type === 'explain' ? (
                   <Suspense fallback={<SkeletonLoader />}>
@@ -1446,6 +1816,17 @@ function App() {
                   <GoLiveReportsTab isActive={isActive} />
                 ) : tab.type === 'go-live-audit' ? (
                   <GoLiveAuditTab isActive={isActive} />
+                ) : tab.type === 'advanced-center' ? (
+                  <AdvancedToolsHub
+                    onOpenTool={(toolId) => {
+                      let title = '';
+                      if (toolId === 'db-security') title = tr('权限与用户管理', 'Permissions & Users');
+                      if (toolId === 'db-events') title = tr('事件与触发器', 'Events & Triggers');
+                      if (toolId === 'model-compare') title = tr('模型对比', 'Model Compare');
+                      if (toolId === 'visual-sync') title = tr('可视化同步向导', 'Visual Sync Wizard');
+                      setWizardConfig({ isOpen: true, title, type: toolId });
+                    }}
+                  />
                 ) : tab.type === 'query-builder' ? (
                   <Suspense fallback={<SkeletonLoader />}>
                     <QueryBuilder 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Sparkles, Clock, Table, Settings, Cpu, Zap, HeartPulse } from 'lucide-react'
+import { tr } from '../i18n'
 
 export interface CommandPaletteProps {
   isOpen: boolean
@@ -76,21 +77,21 @@ export function CommandPalette({
   }
 
   // Settings
-  if (fuzzyMatch('Settings', q)) {
-    items.push({ type: 'settings', label: 'Settings', icon: Settings, payload: null })
+  if (fuzzyMatch('Settings', q) || fuzzyMatch('设置', q)) {
+    items.push({ type: 'settings', label: tr('设置', 'Settings'), icon: Settings, payload: null })
   }
 
   // AI Health
-  if (fuzzyMatch('AI Health', q) || fuzzyMatch('Health Check', q) || fuzzyMatch('Health', q)) {
-    items.push({ type: 'ai_health', label: 'AI Health Check', icon: HeartPulse, payload: null })
+  if (fuzzyMatch('AI Health', q) || fuzzyMatch('Health Check', q) || fuzzyMatch('Health', q) || fuzzyMatch('健康检查', q)) {
+    items.push({ type: 'ai_health', label: tr('AI 健康检查', 'AI Health Check'), icon: HeartPulse, payload: null })
   }
 
   // AI Profile quick switch
   if (Array.isArray(aiProfiles)) {
     aiProfiles.forEach((p: any) => {
-      const label = `Profile: ${p?.name || p?.id || ''}`
+      const label = `${tr('配置', 'Profile')}: ${p?.name || p?.id || ''}`
       if (fuzzyMatch(label, q) || fuzzyMatch(p?.id || '', q)) {
-        const suffix = p?.id === activeAiProfileId ? ' (active)' : ''
+        const suffix = p?.id === activeAiProfileId ? tr('（当前）', ' (active)') : ''
         items.push({ type: 'ai_profile', label: `${label}${suffix}`, icon: Cpu, payload: p?.id })
       }
     })
@@ -99,9 +100,9 @@ export function CommandPalette({
   // AI Model quick switch
   if (Array.isArray(aiModels)) {
     aiModels.forEach((m: any) => {
-      const label = `Model: ${m?.display_name || m?.id || ''}`
+      const label = `${tr('模型', 'Model')}: ${m?.display_name || m?.id || ''}`
       if (fuzzyMatch(label, q) || fuzzyMatch(m?.id || '', q)) {
-        const suffix = m?.id === activeModelId ? ' (active)' : ''
+        const suffix = m?.id === activeModelId ? tr('（当前）', ' (active)') : ''
         items.push({ type: 'ai_model', label: `${label}${suffix}`, icon: Zap, payload: m?.id })
       }
     })
@@ -109,9 +110,9 @@ export function CommandPalette({
 
   // AI Tier quick switch
   ;['fast', 'balanced', 'high', 'ultra'].forEach((tier) => {
-    const label = `Tier: ${tier}`
+    const label = `${tr('等级', 'Tier')}: ${tier}`
     if (fuzzyMatch(label, q)) {
-      const suffix = tier === activeTier ? ' (active)' : ''
+      const suffix = tier === activeTier ? tr('（当前）', ' (active)') : ''
       items.push({ type: 'ai_tier', label: `${label}${suffix}`, icon: Cpu, payload: tier })
     }
   })
@@ -158,7 +159,7 @@ export function CommandPalette({
   }, [isOpen, setQuery])
 
   // Determine dialect
-  let dialect = "General SQL";
+  let dialect = tr('通用 SQL', 'General SQL');
   if (dbUrl) {
     if (dbUrl.startsWith('mysql')) dialect = "MySQL";
     else if (dbUrl.startsWith('postgres')) dialect = "PostgreSQL";
@@ -192,11 +193,11 @@ export function CommandPalette({
                 <div className="flex items-center gap-2">
                   <span className="text-lg">🤖</span>
                   <span className="text-xs font-bold text-blue-400 tracking-wide uppercase bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
-                    {dialect} Agent is ready
+                    {tr(`${dialect} 智能体已就绪`, `${dialect} Agent is ready`)}
                   </span>
                 </div>
                 <div className="text-[10px] text-gray-500 flex items-center gap-1">
-                  Context: <span className="text-gray-400">{schemaData?.tables?.length || 0} tables loaded</span>
+                  {tr('上下文', 'Context')}: <span className="text-gray-400">{tr(`${schemaData?.tables?.length || 0} 张表已加载`, `${schemaData?.tables?.length || 0} tables loaded`)}</span>
                 </div>
               </div>
               <div className="p-4 flex items-center gap-3">
@@ -208,7 +209,7 @@ export function CommandPalette({
                   <input 
                     ref={inputRef}
                     type="text"
-                    placeholder="Ask AI to write SQL, search tables, or commands..."
+                    placeholder={tr('让 AI 写 SQL、搜索表或执行命令...', 'Ask AI to write SQL, search tables, or commands...')}
                     className="flex-1 bg-transparent border-none outline-none text-gray-100 text-lg placeholder-gray-500 font-sans"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
@@ -217,7 +218,7 @@ export function CommandPalette({
                   />
                 </div>
                 {isGenerating && (
-                  <span className="text-xs text-dark-accent font-medium animate-pulse">Generating...</span>
+                  <span className="text-xs text-dark-accent font-medium animate-pulse">{tr('生成中...', 'Generating...')}</span>
                 )}
               </div>
 
@@ -252,14 +253,14 @@ export function CommandPalette({
                         onClick={() => handleGenerate()}
                       >
                         <Sparkles className={`w-4 h-4 ${selectedIndex === 0 ? 'text-blue-400' : 'text-gray-500'}`} />
-                        <span className="flex-1">Ask AI to generate SQL for: <span className="font-medium text-white">"{query}"</span></span>
-                        <span className="text-[10px] text-gray-500">↵ to generate</span>
+                        <span className="flex-1">{tr('让 AI 生成 SQL：', 'Ask AI to generate SQL for:')} <span className="font-medium text-white">"{query}"</span></span>
+                        <span className="text-[10px] text-gray-500">{tr('↵ 生成', '↵ to generate')}</span>
                       </div>
                     )}
                     
                     {items.length > 0 && (
                       <div className="px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider sticky top-0 bg-[#161b22]/90 backdrop-blur-sm">
-                        Results
+                        {tr('结果', 'Results')}
                       </div>
                     )}
                     
@@ -284,7 +285,7 @@ export function CommandPalette({
                     
                     {!showAskAI && items.length === 0 && (
                       <div className="px-4 py-6 text-center text-sm text-gray-500">
-                        No results found
+                        {tr('未找到结果', 'No results found')}
                       </div>
                     )}
                   </div>
@@ -294,16 +295,16 @@ export function CommandPalette({
                       <div className="flex items-center gap-1.5">
                         <span className="bg-dark-border px-1.5 py-0.5 rounded text-gray-300">↑</span>
                         <span className="bg-dark-border px-1.5 py-0.5 rounded text-gray-300">↓</span>
-                        <span>to navigate</span>
+                        <span>{tr('导航', 'to navigate')}</span>
                       </div>
                       <div className="flex items-center gap-1.5">
                         <span className="bg-dark-border px-1.5 py-0.5 rounded text-gray-300">↵</span>
-                        <span>to select</span>
+                        <span>{tr('选择', 'to select')}</span>
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <span className="bg-dark-border px-1.5 py-0.5 rounded text-gray-300">esc</span>
-                      <span>to close</span>
+                      <span>{tr('关闭', 'to close')}</span>
                     </div>
                   </div>
                 </>

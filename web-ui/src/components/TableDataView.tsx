@@ -3,6 +3,7 @@ import { api } from '../api'
 import { DataTable } from './DataTable'
 import { Skeleton } from './Skeleton'
 import { DataCharts } from './DataCharts'
+import { tr } from '../i18n'
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState<T>(value);
@@ -17,7 +18,7 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue;
 }
 
-export function TableDataView({ tableName, isActive }: { tableName: string, isActive: boolean }) {
+export function TableDataView({ tableName, isActive, dbId }: { tableName: string, isActive: boolean, dbId?: string }) {
   const [data, setData] = useState<any[]>([])
   const [schema, setSchema] = useState<any>(null)
   const [total, setTotal] = useState(0)
@@ -47,9 +48,10 @@ export function TableDataView({ tableName, isActive }: { tableName: string, isAc
           debouncedPage,
           debouncedPageSize,
           debouncedFilters.length > 0 ? JSON.stringify(debouncedFilters) : undefined,
-          debouncedSorts.length > 0 ? JSON.stringify(debouncedSorts) : undefined
+          debouncedSorts.length > 0 ? JSON.stringify(debouncedSorts) : undefined,
+          dbId
         ),
-        api.getTableSchema(tableName)
+        api.getTableSchema(tableName, dbId)
       ])
       setData(dataRes.data)
       setTotal(dataRes.total)
@@ -59,7 +61,7 @@ export function TableDataView({ tableName, isActive }: { tableName: string, isAc
     } finally {
       setLoading(false)
     }
-  }, [tableName, debouncedPage, debouncedPageSize, debouncedFilters, debouncedSorts])
+  }, [tableName, debouncedPage, debouncedPageSize, debouncedFilters, debouncedSorts, dbId])
 
   useEffect(() => {
     loadData()
@@ -85,7 +87,7 @@ export function TableDataView({ tableName, isActive }: { tableName: string, isAc
           </div>
         ) : error ? (
           <div className="text-red-400 p-4 bg-red-950/20 border border-red-500/20 rounded">
-            Error: {error}
+            {tr('错误', 'Error')}: {error}
           </div>
         ) : memoizedSchema ? (
           viewType === 'table' ? (
@@ -93,6 +95,7 @@ export function TableDataView({ tableName, isActive }: { tableName: string, isAc
               data={memoizedData} 
               schema={memoizedSchema} 
               tableName={tableName}
+              dbId={dbId}
               sorts={sorts}
               setSorts={setSorts}
               filters={filters}
@@ -105,27 +108,27 @@ export function TableDataView({ tableName, isActive }: { tableName: string, isAc
           )
         ) : (
           <div className="text-gray-500 flex justify-center items-center h-full">
-            No data found
+            {tr('未找到数据', 'No data found')}
           </div>
         )}
       </div>
       <div className="h-12 border-t border-dark-border bg-dark-panel flex items-center justify-between px-4 text-sm text-gray-400">
         <div className="flex items-center gap-4">
           <div>
-            Total: {total} rows
+            {tr(`总计：${total} 行`, `Total: ${total} rows`)}
           </div>
           <div className="flex items-center bg-[#21262d] rounded overflow-hidden border border-[#30363d]">
             <button
               onClick={() => setViewType('table')}
               className={`px-2 py-0.5 text-xs transition-colors ${viewType === 'table' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-[#30363d]'}`}
             >
-              Table
+              {tr('表格', 'Table')}
             </button>
             <button
               onClick={() => setViewType('chart')}
               className={`px-2 py-0.5 text-xs transition-colors ${viewType === 'chart' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-[#30363d]'}`}
             >
-              Chart
+              {tr('图表', 'Chart')}
             </button>
           </div>
         </div>
@@ -135,15 +138,15 @@ export function TableDataView({ tableName, isActive }: { tableName: string, isAc
             onClick={() => setPage(p => p - 1)}
             className="px-2 py-1 bg-[#21262d] hover:bg-[#30363d] rounded disabled:opacity-50"
           >
-            Prev
+            {tr('上一页', 'Prev')}
           </button>
-          <span>Page {page}</span>
+          <span>{tr(`第 ${page} 页`, `Page ${page}`)}</span>
           <button 
             disabled={page * pageSize >= total}
             onClick={() => setPage(p => p + 1)}
             className="px-2 py-1 bg-[#21262d] hover:bg-[#30363d] rounded disabled:opacity-50"
           >
-            Next
+            {tr('下一页', 'Next')}
           </button>
           <select 
             value={pageSize}
@@ -153,9 +156,9 @@ export function TableDataView({ tableName, isActive }: { tableName: string, isAc
             }}
             className="ml-4 bg-[#21262d] border border-dark-border rounded px-2 py-1"
           >
-            <option value={50}>50 / page</option>
-            <option value={100}>100 / page</option>
-            <option value={500}>500 / page</option>
+            <option value={50}>{tr('50 / 页', '50 / page')}</option>
+            <option value={100}>{tr('100 / 页', '100 / page')}</option>
+            <option value={500}>{tr('500 / 页', '500 / page')}</option>
           </select>
         </div>
       </div>

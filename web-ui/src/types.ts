@@ -129,11 +129,40 @@ export type DbConnectionSchema =
 
 export interface DbConnection {
   id: string;
+  name?: string;
   url: string;
+  group_name?: string | null;
+  color?: string | null;
+  is_favorite?: boolean;
+  ssh?: {
+    enabled?: boolean;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+  } | null;
+  ssl?: {
+    enabled?: boolean;
+    mode?: string;
+  } | null;
   db_type?: DbType;
   capability_level?: DbCapabilityLevel;
   schema?: DbConnectionSchema;
   is_read_only?: boolean;
+  security_profile?: {
+    users?: Array<{
+      username: string;
+      host: string;
+      role: string;
+      status: 'active' | 'disabled';
+    }>;
+    object_permissions?: Array<{
+      object_type: 'table' | 'view' | 'procedure';
+      object_name: string;
+      username: string;
+      privileges: string[];
+    }>;
+  };
   [key: string]: unknown;
 }
 

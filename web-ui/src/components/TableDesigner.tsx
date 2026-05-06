@@ -2,10 +2,11 @@ import { useState, useEffect, useCallback } from 'react'
 import { api } from '../api'
 import { Save, Plus, Trash2, Sparkles } from 'lucide-react'
 import { useToast } from './Toast'
+import { tr } from '../i18n'
 
 import type { TableWithDetails, ColumnInfo, IndexInfo, ForeignKeyInfo } from '../types';
 
-export function TableDesigner({ tableName, isActive }: { tableName: string, isActive: boolean }) {
+export function TableDesigner({ tableName, isActive, dbId }: { tableName: string, isActive: boolean, dbId?: string }) {
   const [loading, setLoading] = useState(false)
   const [activeTab, setActiveTab] = useState<'columns' | 'indexes' | 'foreignKeys'>('columns')
   const [originalSchema, setOriginalSchema] = useState<TableWithDetails | null>(null)
@@ -23,7 +24,7 @@ export function TableDesigner({ tableName, isActive }: { tableName: string, isAc
   const loadSchema = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await api.getTableSchema(tableName)
+      const res = await api.getTableSchema(tableName, dbId)
       setOriginalSchema(res)
       setColumns(res.columns || [])
       setIndexes(res.indexes || [])
@@ -33,7 +34,7 @@ export function TableDesigner({ tableName, isActive }: { tableName: string, isAc
     } finally {
       setLoading(false)
     }
-  }, [tableName, toast])
+  }, [tableName, dbId, toast])
 
   useEffect(() => {
     loadSchema()
@@ -59,7 +60,7 @@ export function TableDesigner({ tableName, isActive }: { tableName: string, isAc
     if (!previewSql) return
     setExecuting(true)
     try {
-      await api.executeDdl(previewSql)
+      await api.executeDdl(previewSql, dbId)
       toast('Table updated successfully', 'success')
       setPreviewSql(null)
       loadSchema()
@@ -469,7 +470,7 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-[#161b22] border border-[#30363d] rounded-lg shadow-xl w-[600px] flex flex-col max-h-[80vh]">
             <div className="p-4 border-b border-[#30363d] flex justify-between items-center">
-              <h3 className="text-lg font-semibold text-gray-200">Preview DDL</h3>
+              <h3 className="text-lg font-semibold text-gray-200">{tr('预览 DDL', 'Preview DDL')}</h3>
               <button onClick={() => setPreviewSql(null)} className="text-gray-400 hover:text-white">&times;</button>
             </div>
             <div className="p-4 overflow-auto flex-1">
@@ -482,14 +483,14 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                 onClick={() => setPreviewSql(null)}
                 className="px-4 py-2 rounded text-sm text-gray-300 hover:bg-[#30363d] transition-colors"
               >
-                Cancel
+                {tr('取消', 'Cancel')}
               </button>
               <button 
                 onClick={confirmSave}
                 disabled={executing || previewSql.includes('No changes detected')}
                 className="px-4 py-2 rounded text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                {executing ? 'Executing...' : 'Apply Changes'}
+                {executing ? tr('执行中...', 'Executing...') : tr('应用变更', 'Apply Changes')}
               </button>
             </div>
           </div>

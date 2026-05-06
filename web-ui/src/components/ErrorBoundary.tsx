@@ -2,6 +2,7 @@ import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { AlertTriangle, RefreshCcw } from 'lucide-react';
 import { sanitizeForLog } from '../utils'
+import { tr } from '../i18n'
 
 interface Props {
   children: ReactNode;
@@ -40,10 +41,13 @@ export class ErrorBoundary extends Component<Props, State> {
               <AlertTriangle className="w-10 h-10 text-red-500" />
             </div>
             
-            <h1 className="text-xl font-semibold text-gray-100">页面出错了</h1>
+            <h1 className="text-xl font-semibold text-gray-100">{tr('页面出错了', 'Something went wrong')}</h1>
             
             <p className="text-sm text-gray-400">
-              很抱歉，应用在渲染时遇到了意外的错误。这可能是由不稳定的网络或异常数据引起的。
+              {tr(
+                '很抱歉，应用在渲染时遇到了意外的错误。这可能是由不稳定的网络或异常数据引起的。',
+                'Sorry, the app hit an unexpected render error. This could be caused by unstable network or unexpected data.'
+              )}
             </p>
 
             {this.state.error && (
@@ -59,7 +63,7 @@ export class ErrorBoundary extends Component<Props, State> {
               className="mt-6 flex items-center space-x-2 px-4 py-2 bg-[#238636] hover:bg-[#2ea043] text-white rounded-md transition-colors text-sm font-medium"
             >
               <RefreshCcw className="w-4 h-4" />
-              <span>刷新页面重试</span>
+              <span>{tr('刷新页面重试', 'Reload')}</span>
             </button>
           </div>
         </div>

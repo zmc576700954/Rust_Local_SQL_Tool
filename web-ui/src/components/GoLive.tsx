@@ -4,6 +4,7 @@ import type { WizardStep } from './StepWizard'
 import { api, JOB_POLL_INTERVAL_MS } from '../api'
 import { useToast } from './Toast'
 import { parseError } from '../utils'
+import { tr } from '../i18n'
 
 interface GoLiveProps {
   onCancel: () => void
@@ -490,7 +491,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
                   disabled={!canCancel || isLoading}
                   className="px-3 py-2 rounded text-sm font-medium bg-[#21262d] hover:bg-[#30363d] text-red-300 border border-[#30363d] disabled:opacity-50"
                 >
-                  Cancel Job
+                  {tr('取消任务', 'Cancel Job')}
                 </button>
               </div>
             </div>

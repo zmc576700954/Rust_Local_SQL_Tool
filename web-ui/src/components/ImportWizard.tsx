@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Upload, ArrowRight, Check, AlertCircle } from 'lucide-react';
 import { api, JOB_POLL_INTERVAL_MS } from '../api';
 import { useToast } from './Toast';
+import { tr } from '../i18n';
 
 interface ImportWizardProps {
   tableName: string;
@@ -176,20 +177,20 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
         if (!alive) return;
         setJob(j);
         if (j?.status === 'completed') {
-          toast('Import completed successfully', 'success');
+          toast(tr('导入成功', 'Import completed successfully'), 'success');
           onComplete();
           setLoading(false);
           setPollInterrupted(null);
           alive = false;
         } else if (j?.status === 'error' || j?.status === 'canceled') {
-          setError(j?.error || 'Import failed');
+          setError(j?.error || tr('导入失败', 'Import failed'));
           setLoading(false);
           setPollInterrupted(null);
           alive = false;
         }
       } catch (e: any) {
         if (!alive) return;
-        setPollInterrupted({ job_id: jobId, message: e?.response?.data?.message || e?.message || 'Failed to fetch job status' });
+        setPollInterrupted({ job_id: jobId, message: e?.response?.data?.message || e?.message || tr('获取任务状态失败', 'Failed to fetch job status') });
         setLoading(false);
         alive = false;
       }
@@ -213,7 +214,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
       setJobId(res.job_id);
       setResumeJobId(res.job_id);
     } catch (err: any) {
-      const msg = err?.response?.data?.message || err?.response?.data?.error || err?.message || 'Import failed';
+      const msg = err?.response?.data?.message || err?.response?.data?.error || err?.message || tr('导入失败', 'Import failed');
       setError(msg);
       toast(msg, 'error');
       setLoading(false);
@@ -253,7 +254,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
   return (
     <div className="flex flex-col gap-6 text-sm text-gray-300">
       <div className="bg-[#0d1117] border border-[#30363d] rounded p-3">
-        <div className="text-xs text-gray-400">恢复 Import Job</div>
+        <div className="text-xs text-gray-400">{tr('恢复导入任务', 'Resume Import Job')}</div>
         <div className="mt-2 flex items-center gap-2">
           <input
             value={resumeJobId}
@@ -289,17 +290,17 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
       <div className="flex items-center justify-between border-b border-[#30363d] pb-4">
         <div className={`flex items-center gap-2 ${step >= 1 ? 'text-blue-400' : 'text-gray-500'}`}>
           <div className="w-6 h-6 rounded-full flex items-center justify-center border border-current">1</div>
-          <span>Upload</span>
+          <span>{tr('上传', 'Upload')}</span>
         </div>
         <div className={`w-12 h-[1px] ${step >= 2 ? 'bg-blue-400' : 'bg-gray-600'}`}></div>
         <div className={`flex items-center gap-2 ${step >= 2 ? 'text-blue-400' : 'text-gray-500'}`}>
           <div className="w-6 h-6 rounded-full flex items-center justify-center border border-current">2</div>
-          <span>Map Fields</span>
+          <span>{tr('字段映射', 'Map Fields')}</span>
         </div>
         <div className={`w-12 h-[1px] ${step >= 3 ? 'bg-blue-400' : 'bg-gray-600'}`}></div>
         <div className={`flex items-center gap-2 ${step >= 3 ? 'text-blue-400' : 'text-gray-500'}`}>
           <div className="w-6 h-6 rounded-full flex items-center justify-center border border-current">3</div>
-          <span>Import</span>
+          <span>{tr('导入', 'Import')}</span>
         </div>
       </div>
 
@@ -313,8 +314,8 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
       {step === 1 && (
         <div className="flex flex-col items-center justify-center py-12 border-2 border-dashed border-[#30363d] rounded-lg hover:border-blue-500/50 transition-colors">
           <Upload className="w-8 h-8 mb-4 text-gray-400" />
-          <p className="mb-2">Drag and drop or click to upload</p>
-          <p className="text-xs text-gray-500 mb-6">Supports TXT / CSV / JSON / XML / SQL / XLS / XLSX (compat mode)</p>
+          <p className="mb-2">{tr('拖拽文件到此处或点击上传', 'Drag and drop or click to upload')}</p>
+          <p className="text-xs text-gray-500 mb-6">{tr('支持 TXT / CSV / JSON / XML / SQL / XLS / XLSX（兼容模式）', 'Supports TXT / CSV / JSON / XML / SQL / XLS / XLSX (compat mode)')}</p>
           <input 
             type="file" 
             accept=".txt,.csv,.json,.xml,.sql,.xls,.xlsx"
@@ -327,8 +328,8 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
       {step === 2 && (
         <div className="flex flex-col gap-4">
           <div className="grid grid-cols-2 gap-4 font-semibold text-gray-400 mb-2">
-            <div>Target Column (DB)</div>
-            <div>Source Field (File)</div>
+            <div>{tr('目标列（数据库）', 'Target Column (DB)')}</div>
+            <div>{tr('源字段（文件）', 'Source Field (File)')}</div>
           </div>
           <div className="max-h-[300px] overflow-y-auto pr-2 flex flex-col gap-3">
             {columns.map(col => (
@@ -336,14 +337,14 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-blue-300">{col.column_name}</span>
                   <span className="text-xs text-gray-500">{col.column_type}</span>
-                  {col.is_nullable === 'NO' && <span className="text-xs text-red-400" title="Required">*</span>}
+                  {col.is_nullable === 'NO' && <span className="text-xs text-red-400" title={tr('必填', 'Required')}>*</span>}
                 </div>
                 <select 
                   value={mapping[col.column_name] || ''}
                   onChange={e => setMapping({ ...mapping, [col.column_name]: e.target.value })}
                   className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
                 >
-                  <option value="">-- Skip / Default --</option>
+                  <option value="">{tr('-- 跳过 / 默认 --', '-- Skip / Default --')}</option>
                   {sourceHeaders.map(h => (
                     <option key={h} value={h}>{h}</option>
                   ))}
@@ -356,7 +357,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
               className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded flex items-center gap-2"
               onClick={() => setStep(3)}
             >
-              Next <ArrowRight className="w-4 h-4" />
+              {tr('下一步', 'Next')} <ArrowRight className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -365,17 +366,17 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
       {step === 3 && (
         <div className="flex flex-col gap-6">
           <div className="bg-[#0d1117] border border-[#30363d] rounded p-4">
-            <h3 className="font-semibold text-white mb-2">Import Summary</h3>
+            <h3 className="font-semibold text-white mb-2">{tr('导入摘要', 'Import Summary')}</h3>
             <ul className="space-y-2">
-              <li>File: <span className="text-white">{file?.name}</span></li>
+              <li>{tr('文件', 'File')}: <span className="text-white">{file?.name}</span></li>
               {!isSqlFile && (
                 <>
-                  <li>Rows to import: <span className="text-white">{parsedData.length}</span></li>
-                  <li>Mapped columns: <span className="text-white">{Object.values(mapping).filter(Boolean).length} / {columns.length}</span></li>
+                  <li>{tr('待导入行数', 'Rows to import')}: <span className="text-white">{parsedData.length}</span></li>
+                  <li>{tr('已映射列数', 'Mapped columns')}: <span className="text-white">{Object.values(mapping).filter(Boolean).length} / {columns.length}</span></li>
                 </>
               )}
               {isSqlFile && (
-                <li>Mode: <span className="text-white">Execute SQL script</span></li>
+                <li>{tr('模式', 'Mode')}: <span className="text-white">{tr('执行 SQL 脚本', 'Execute SQL script')}</span></li>
               )}
             </ul>
           </div>
@@ -388,14 +389,14 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
                 onChange={e => setSkipErrors(e.target.checked)}
                 className="rounded bg-[#0d1117] border-[#30363d] text-blue-500 focus:ring-blue-500 focus:ring-offset-[#161b22]"
               />
-              <span>Skip rows with errors (continue on error)</span>
+              <span>{tr('跳过错误行（发生错误时继续）', 'Skip rows with errors (continue on error)')}</span>
             </label>
           )}
 
           {jobId && (
             <div className="bg-[#0d1117] border border-[#30363d] rounded p-4 text-xs text-gray-300">
               <div className="flex items-center justify-between">
-                <div>Job: <span className="text-white">{jobId}</span></div>
+                <div>{tr('任务', 'Job')}: <span className="text-white">{jobId}</span></div>
                 <div className="text-gray-400">{job?.status}</div>
               </div>
               <div className="mt-2 text-gray-400">
@@ -410,7 +411,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
               onClick={() => setStep(2)}
               disabled={loading || isSqlFile || !!jobId}
             >
-              Back
+              {tr('上一步', 'Back')}
             </button>
             {jobId && (
               <button
@@ -418,7 +419,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
                 onClick={handleCancelJob}
                 disabled={loading}
               >
-                Cancel Job
+                {tr('取消任务', 'Cancel Job')}
               </button>
             )}
             <button 
@@ -426,7 +427,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
               onClick={handleImport}
               disabled={loading || !!jobId}
             >
-              {loading ? 'Starting...' : 'Start Import'}
+              {loading ? tr('启动中...', 'Starting...') : tr('开始导入', 'Start Import')}
               {!loading && <Check className="w-4 h-4" />}
             </button>
           </div>

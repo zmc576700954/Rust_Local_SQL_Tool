@@ -5,9 +5,11 @@ import { api } from '../api'
 import { parseError, sanitizeForLog } from '../utils'
 import { useToast } from './Toast'
 import { dbLevelDisplayName, dbTypeDisplayName } from '../utils/dbCapabilities'
+import { useI18n } from '../i18n'
 
 export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onClose: () => void, onPolicyChange: () => void, onConfigChange?: () => void }) {
   const { toast } = useToast()
+  const { locale, setLocale, tr } = useI18n()
   const [activeTab, setActiveTab] = useState<'agents' | 'ai' | 'db'>('agents')
   const [policy, setPolicy] = useState<any>(null)
   const [config, setConfig] = useState<any>(null)
@@ -47,7 +49,7 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
       const data = await api.getConfig()
       setConfig(data)
     } catch (e) {
-      toast('加载配置失败：' + parseError(e).message, 'error')
+      toast(tr('加载配置失败：', 'Failed to load config: ') + parseError(e).message, 'error')
     } finally {
       setIsConfigLoading(false)
     }
@@ -59,7 +61,7 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
       const data = await api.getAiModels()
       setAiModels(data)
     } catch (e) {
-      toast('加载模型列表失败：' + parseError(e).message, 'error')
+      toast(tr('加载模型列表失败：', 'Failed to load model list: ') + parseError(e).message, 'error')
     } finally {
       setIsAiModelsLoading(false)
     }
@@ -122,22 +124,22 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
       onConfigChange?.()
       if (successMessage) toast(successMessage, 'success')
     } catch (e) {
-      toast('保存配置失败：' + parseError(e).message, 'error')
+      toast(tr('保存配置失败：', 'Failed to save config: ') + parseError(e).message, 'error')
     } finally {
       setIsLoading(false)
     }
   }
 
   const handleReset = async () => {
-    if (!confirm('Are you sure you want to reset the agent policy to default? All local learning will be lost.')) return
+    if (!confirm(tr('确认要将本地策略重置为默认吗？所有本地学习将丢失。', 'Reset the agent policy to default? All local learning will be lost.'))) return
     setIsLoading(true)
     try {
       await api.resetPolicy()
       await loadPolicy()
       onPolicyChange()
-      toast('Policy reset to default.', 'success')
+      toast(tr('策略已重置为默认。', 'Policy reset to default.'), 'success')
     } catch (e) {
-      toast('Failed to reset: ' + parseError(e).message, 'error')
+      toast(tr('重置失败：', 'Failed to reset: ') + parseError(e).message, 'error')
     } finally {
       setIsLoading(false)
     }
@@ -147,25 +149,25 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
     setIsLoading(true)
     try {
       const res = await api.snapshotPolicy()
-      toast(`Snapshot created: ${res.name}`, 'success')
+      toast(tr(`快照已创建：${res.name}`, `Snapshot created: ${res.name}`), 'success')
     } catch (e) {
-      toast('Failed to create snapshot: ' + parseError(e).message, 'error')
+      toast(tr('创建快照失败：', 'Failed to create snapshot: ') + parseError(e).message, 'error')
     } finally {
       setIsLoading(false)
     }
   }
 
   const handleRollback = async () => {
-    const name = prompt('Enter snapshot name to rollback (e.g. policy_20240101_120000.json):')
+    const name = prompt(tr('请输入要回滚的快照名（例如 policy_20240101_120000.json）：', 'Enter snapshot name to rollback (e.g. policy_20240101_120000.json):'))
     if (!name) return
     setIsLoading(true)
     try {
       await api.rollbackPolicy(name)
       await loadPolicy()
       onPolicyChange()
-      toast('Policy rolled back successfully.', 'success')
+      toast(tr('策略回滚成功。', 'Policy rolled back successfully.'), 'success')
     } catch (e) {
-      toast('Failed to rollback: ' + parseError(e).message, 'error')
+      toast(tr('回滚失败：', 'Failed to rollback: ') + parseError(e).message, 'error')
     } finally {
       setIsLoading(false)
     }
@@ -224,7 +226,7 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
     const id = String(profileDraft.id || '').trim()
     const name = String(profileDraft.name || '').trim()
     if (!id || !name) {
-      toast('Profile 的 ID 与名称不能为空。', 'error')
+      toast(tr('Profile 的 ID 与名称不能为空。', 'Profile ID and name cannot be empty.'), 'error')
       return
     }
 
@@ -256,11 +258,11 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
       const saved = await api.updateConfig({ ...config, ...patch })
       setConfig(saved)
       onConfigChange?.()
-      toast('Profile 已保存。', 'success')
+      toast(tr('Profile 已保存。', 'Profile saved.'), 'success')
       setIsProfileEditorOpen(false)
       setProfileDraft(null)
     } catch (e) {
-      toast('保存 Profile 失败：' + parseError(e).message, 'error')
+      toast(tr('保存 Profile 失败：', 'Failed to save profile: ') + parseError(e).message, 'error')
     } finally {
       setIsSavingProfile(false)
     }
@@ -270,7 +272,7 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
     if (!config) return
     const list = Array.isArray(config.ai_profiles) ? [...config.ai_profiles] : []
     if (list.length <= 1) {
-      toast('至少需要保留 1 个 Profile。', 'error')
+      toast(tr('至少需要保留 1 个 Profile。', 'At least one profile is required.'), 'error')
       return
     }
     const nextProfiles = list.filter((p: any) => p?.id !== profileId)
@@ -279,7 +281,7 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
 
     await patchAndSaveConfig(
       { ai_profiles: nextProfiles, active_ai_profile_id: nextActiveId },
-      'Profile 已删除。'
+      tr('Profile 已删除。', 'Profile deleted.')
     )
   }
 
@@ -307,7 +309,7 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
       model_name: modelId,
       active_tier: tier
     }
-    await patchAndSaveConfig(patch, 'AI 运行态已更新。')
+    await patchAndSaveConfig(patch, tr('AI 运行态已更新。', 'AI runtime updated.'))
   }
 
   const runHealthCheck = async () => {
@@ -317,14 +319,14 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
     try {
       const res = await api.getAiHealth()
       setHealthReport(res)
-      toast('Health 检测通过。', 'success')
+      toast(tr('Health 检测通过。', 'Health check passed.'), 'success')
     } catch (e) {
       const err = parseError(e)
       const status = (e as any)?.response?.status as number | undefined
       const code = (e as any)?.response?.data?.code as string | undefined
       const details = (e as any)?.response?.data?.details as string | undefined
       setHealthError({ status, code, details, ...err })
-      toast('Health 检测失败：' + err.title, 'error')
+      toast(tr('Health 检测失败：', 'Health check failed: ') + err.title, 'error')
     } finally {
       setIsHealthLoading(false)
     }
@@ -361,7 +363,18 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
         className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-[600px] overflow-hidden flex flex-col"
       >
         <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117]">
-          <h3 className="text-gray-200 font-bold text-lg">Settings</h3>
+          <div className="flex items-center gap-3">
+            <h3 className="text-gray-200 font-bold text-lg">{tr('设置', 'Settings')}</h3>
+            <select
+              value={locale}
+              onChange={(e) => setLocale(e.target.value as any)}
+              className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-gray-200"
+              aria-label="Language"
+            >
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+          </div>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-300">
             <X className="w-5 h-5" />
           </button>
@@ -372,19 +385,19 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
             className={`px-6 py-3 text-sm font-medium transition-colors ${activeTab === 'agents' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-gray-200'}`}
             onClick={() => setActiveTab('agents')}
           >
-            Agents & Policy
+            {tr('策略与规则', 'Agents & Policy')}
           </button>
           <button 
             className={`px-6 py-3 text-sm font-medium transition-colors ${activeTab === 'ai' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-gray-200'}`}
             onClick={() => setActiveTab('ai')}
           >
-            AI Profiles
+            {tr('AI 配置', 'AI Profiles')}
           </button>
           <button 
             className={`px-6 py-3 text-sm font-medium transition-colors ${activeTab === 'db' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-gray-200'}`}
             onClick={() => setActiveTab('db')}
           >
-            Database & API
+            {tr('数据库与接口', 'Database & API')}
           </button>
         </div>
 
@@ -1011,7 +1024,7 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
                 onClick={() => { setIsProfileEditorOpen(false); setProfileDraft(null) }}
                 className="px-4 py-2 rounded-lg text-sm font-medium text-gray-300 hover:bg-[#30363d] transition-colors"
               >
-                Cancel
+                {tr('取消', 'Cancel')}
               </button>
               <button
                 onClick={saveProfile}
@@ -1019,7 +1032,7 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
                 className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/30 text-blue-300 transition-colors disabled:opacity-60"
               >
                 <Save className="w-4 h-4" />
-                {isSavingProfile ? 'Saving...' : 'Save'}
+                {isSavingProfile ? tr('保存中...', 'Saving...') : tr('保存', 'Save')}
               </button>
             </div>
           </motion.div>

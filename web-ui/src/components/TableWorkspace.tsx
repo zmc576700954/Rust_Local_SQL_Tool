@@ -2,7 +2,15 @@ import { useState } from 'react'
 import { TableDataView } from './TableDataView'
 import { TableDesigner } from './TableDesigner'
 
-export function TableWorkspace({ tableName, isActive }: { tableName: string, isActive: boolean }) {
+export function TableWorkspace({
+  tableName,
+  isActive,
+  dbId,
+}: {
+  tableName: string
+  isActive: boolean
+  dbId?: string
+}) {
   const [view, setView] = useState<'data' | 'designer'>('data')
 
   return (
@@ -22,7 +30,9 @@ export function TableWorkspace({ tableName, isActive }: { tableName: string, isA
         </button>
       </div>
       <div className="flex-1 overflow-hidden">
-        {view === 'data' ? <TableDataView tableName={tableName} isActive={isActive} /> : <TableDesigner tableName={tableName} isActive={isActive} />}
+        {view === 'data'
+          ? <TableDataView tableName={tableName} isActive={isActive} dbId={dbId} />
+          : <TableDesigner tableName={tableName} isActive={isActive} dbId={dbId} />}
       </div>
     </div>
   )

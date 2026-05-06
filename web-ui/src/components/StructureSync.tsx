@@ -4,6 +4,7 @@ import type { WizardStep } from './StepWizard';
 import { api } from '../api';
 import { useToast } from './Toast';
 import { dbLevelDisplayName, dbTypeDisplayName } from '../utils/dbCapabilities'
+import { tr } from '../i18n';
 
 interface StructureSyncProps {
   onCancel: () => void;
@@ -18,6 +19,14 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
   const [selectedTables, setSelectedTables] = useState<string[]>([]);
   const [ddl, setDdl] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
+  const diffSummary = diff
+    ? diff.tables.reduce((acc: any, t: any) => {
+        if (t.status === 'added') acc.added += 1;
+        else if (t.status === 'removed') acc.removed += 1;
+        else if (t.status === 'modified') acc.modified += 1;
+        return acc;
+      }, { added: 0, removed: 0, modified: 0 })
+    : null;
 
   useEffect(() => {
     const fetchConfig = async () => {
@@ -28,7 +37,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
           setTargetDbId(config.active_db_id);
         }
       } catch (e: any) {
-        toast('Failed to load db connections: ' + e.message, 'error');
+        toast(tr('加载数据库连接失败：', 'Failed to load db connections: ') + e.message, 'error');
       }
     };
     fetchConfig();
@@ -36,7 +45,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
 
   const handleCompare = async () => {
     if (!sourceDbId || !targetDbId) {
-      toast('Please select both source and target databases', 'error');
+      toast(tr('请选择源库和目标库', 'Please select both source and target databases'), 'error');
       return false;
     }
     setIsLoading(true);
@@ -50,7 +59,8 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
       setSelectedTables(defaultSelected);
       return true;
     } catch (e: any) {
-      toast('Failed to compare: ' + e.message, 'error');
+      const msg = e?.response?.data?.message || e?.message || '';
+      toast(tr('对比失败：', 'Failed to compare: ') + msg, 'error');
       return false;
     } finally {
       setIsLoading(false);
@@ -64,7 +74,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
       setDdl(ddlResult);
       return true;
     } catch (e: any) {
-      toast('Failed to generate DDL: ' + e.message, 'error');
+      toast(tr('生成 DDL 失败：', 'Failed to generate DDL: ') + e.message, 'error');
       return false;
     } finally {
       setIsLoading(false);
@@ -74,14 +84,14 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
   const handleExecute = async () => {
     try {
       if (!ddl || ddl === '-- No changes detected') {
-        toast('No DDL to execute', 'info');
+        toast(tr('没有可执行的 DDL', 'No DDL to execute'), 'info');
         return;
       }
-      await api.executeDdl(ddl);
-      toast('Schema synced successfully', 'success');
+      await api.executeDdl(ddl, targetDbId);
+      toast(tr('结构同步成功', 'Schema synced successfully'), 'success');
       onCancel();
     } catch (e: any) {
-      toast('Failed to execute DDL: ' + e.message, 'error');
+      toast(tr('执行 DDL 失败：', 'Failed to execute DDL: ') + e.message, 'error');
       throw e;
     }
   };
@@ -89,13 +99,13 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
   const steps: WizardStep[] = [
     {
       id: 'source',
-      title: 'Select Databases',
+      title: tr('选择数据库', 'Select Databases'),
       isValid: sourceDbId.length > 0 && targetDbId.length > 0,
       content: (
         <div className="flex flex-col gap-4 h-full">
-          <div className="text-sm text-gray-300 font-bold">Step 1: Select Source and Target Databases</div>
+          <div className="text-sm text-gray-300 font-bold">{tr('步骤 1：选择源库和目标库', 'Step 1: Select Source and Target Databases')}</div>
           <div className="flex flex-col gap-2">
-            <label className="text-sm text-gray-400">Source Database</label>
+            <label className="text-sm text-gray-400">{tr('源数据库', 'Source Database')}</label>
             <select
               value={sourceDbId}
               onChange={(e) => {
@@ -105,7 +115,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
               }}
               className="bg-[#0d1117] border border-[#30363d] rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
-              <option value="">-- Select Source --</option>
+              <option value="">{tr('-- 选择源库 --', '-- Select Source --')}</option>
               {dbConnections.map(conn => (
                 <option key={conn.id} value={conn.id}>
                   {conn.name} ({dbTypeDisplayName(conn.db_type)}/{dbLevelDisplayName(conn.capability_level)}) ({conn.url})
@@ -114,7 +124,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
             </select>
           </div>
           <div className="flex flex-col gap-2">
-            <label className="text-sm text-gray-400">Target Database</label>
+            <label className="text-sm text-gray-400">{tr('目标数据库', 'Target Database')}</label>
             <select
               value={targetDbId}
               onChange={(e) => {
@@ -124,7 +134,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
               }}
               className="bg-[#0d1117] border border-[#30363d] rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
-              <option value="">-- Select Target --</option>
+              <option value="">{tr('-- 选择目标库 --', '-- Select Target --')}</option>
               {dbConnections.map(conn => (
                 <option key={conn.id} value={conn.id}>
                   {conn.name} ({dbTypeDisplayName(conn.db_type)}/{dbLevelDisplayName(conn.capability_level)}) ({conn.url})
@@ -135,28 +145,36 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
           <button
             onClick={async () => {
               if (await handleCompare()) {
-                toast('Comparison complete. Click Next.', 'success');
+                toast(tr('对比完成，请点击下一步。', 'Comparison complete. Click Next.'), 'success');
               }
             }}
             disabled={!sourceDbId || !targetDbId}
             className="self-start mt-4 px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white disabled:opacity-50"
           >
-            Compare Databases
+            {tr('开始对比', 'Compare Databases')}
           </button>
         </div>
       )
     },
     {
       id: 'diff',
-      title: 'Select Differences',
+      title: tr('选择差异', 'Select Differences'),
       isValid: diff !== null && selectedTables.length > 0,
       content: (
         <div className="flex flex-col gap-4 h-full">
-          <div className="text-sm text-gray-300 font-bold">Step 2: Select Tables to Sync</div>
+          <div className="text-sm text-gray-300 font-bold">{tr('步骤 2：选择要同步的表', 'Step 2: Select Tables to Sync')}</div>
           {diff ? (
             <div className="flex-1 overflow-y-auto bg-[#0d1117] border border-[#30363d] rounded p-4">
+              {diffSummary && (
+                <div className="mb-3 text-xs text-gray-400">
+                  {tr(
+                    `结构变更统计：新增表 ${diffSummary.added}，删除表 ${diffSummary.removed}，修改表 ${diffSummary.modified}`,
+                    `Summary: added ${diffSummary.added}, removed ${diffSummary.removed}, modified ${diffSummary.modified}`
+                  )}
+                </div>
+              )}
               {diff.tables.filter((t: any) => t.status !== 'unchanged').length === 0 ? (
-                <div className="text-gray-500 text-sm">No differences found.</div>
+                <div className="text-gray-500 text-sm">{tr('未发现差异。', 'No differences found.')}</div>
               ) : (
                 <div className="flex flex-col gap-2">
                   {diff.tables.filter((t: any) => t.status !== 'unchanged').map((t: any) => (
@@ -179,37 +197,49 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
                         t.status === 'removed' ? 'bg-red-500/20 text-red-400' :
                         'bg-yellow-500/20 text-yellow-400'
                       }`}>
-                        {t.status.toUpperCase()}
+                        {t.status === 'added'
+                          ? tr('新增', 'ADDED')
+                          : t.status === 'removed'
+                          ? tr('删除', 'REMOVED')
+                          : tr('变更', 'MODIFIED')}
                       </span>
+                      {t.status === 'modified' && (
+                        <span className="text-[11px] text-gray-500">
+                          {tr(
+                            `列 +${t.columns_added?.length || 0}/-${t.columns_removed?.length || 0}/~${t.columns_modified?.length || 0}，索引 +${t.indexes_added?.length || 0}/-${t.indexes_removed?.length || 0}/~${t.indexes_modified?.length || 0}，外键 +${t.fks_added?.length || 0}/-${t.fks_removed?.length || 0}/~${t.fks_modified?.length || 0}`,
+                            `Cols +${t.columns_added?.length || 0}/-${t.columns_removed?.length || 0}/~${t.columns_modified?.length || 0}, Idx +${t.indexes_added?.length || 0}/-${t.indexes_removed?.length || 0}/~${t.indexes_modified?.length || 0}, FK +${t.fks_added?.length || 0}/-${t.fks_removed?.length || 0}/~${t.fks_modified?.length || 0}`
+                          )}
+                        </span>
+                      )}
                     </label>
                   ))}
                 </div>
               )}
             </div>
           ) : (
-            <div className="text-gray-500 text-sm">Please go back and run comparison.</div>
+            <div className="text-gray-500 text-sm">{tr('请返回上一步执行对比。', 'Please go back and run comparison.')}</div>
           )}
           <button
             onClick={async () => {
               if (await handleGenerateDdl()) {
-                toast('DDL generated. Click Next.', 'success');
+                toast(tr('DDL 已生成，请点击下一步。', 'DDL generated. Click Next.'), 'success');
               }
             }}
             disabled={selectedTables.length === 0}
             className="self-start px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white disabled:opacity-50"
           >
-            Generate DDL
+            {tr('生成 DDL', 'Generate DDL')}
           </button>
         </div>
       )
     },
     {
       id: 'preview',
-      title: 'Preview & Execute',
+      title: tr('预览与执行', 'Preview & Execute'),
       isValid: ddl.length > 0,
       content: (
         <div className="flex flex-col gap-4 h-full">
-          <div className="text-sm text-gray-300 font-bold">Step 3: Preview DDL Script</div>
+          <div className="text-sm text-gray-300 font-bold">{tr('步骤 3：预览 DDL 脚本', 'Step 3: Preview DDL Script')}</div>
           <textarea
             readOnly
             value={ddl}
@@ -222,11 +252,11 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
 
   return (
     <StepWizard
-      title="Structure Sync"
+      title={tr('结构同步', 'Structure Sync')}
       steps={steps}
       onCancel={onCancel}
       onFinish={handleExecute}
-      finalWarningMessage="You are about to execute DDL statements on the active database. This cannot be undone."
+      finalWarningMessage={tr('你即将在目标数据库执行 DDL，操作不可撤销。', 'You are about to execute DDL statements on target database. This cannot be undone.')}
       isLoading={isLoading}
     />
   );

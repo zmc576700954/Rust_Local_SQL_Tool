@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { getErrorMessage } from './utils/ErrorDictionary'
 import { redactSensitiveText } from './utils'
+import { getLocale, tr } from './i18n'
 
 export const HTTP_TIMEOUT_MS = 120000
 export const JOB_POLL_REQUEST_TIMEOUT_MS = 10000
@@ -11,28 +12,37 @@ const client = axios.create({
   timeout: HTTP_TIMEOUT_MS,
 })
 
+client.interceptors.request.use((config) => {
+  const locale = getLocale()
+  config.headers = config.headers || {}
+  ;(config.headers as any)['Accept-Language'] = locale
+  ;(config.headers as any)['x-locale'] = locale
+  return config
+})
+
 client.interceptors.response.use(
   (response) => {
     return response;
   },
   (error) => {
     const silent = error?.config?.headers?.['x-silent-error'] === '1';
-    let message = "网络错误，请稍后重试。";
+    let message = tr('网络错误，请稍后重试。', 'Network error, please try again later.');
     const status = error?.response?.status as number | undefined;
     const data = error?.response?.data as any | undefined;
 
     if (data) {
       const { code, message: serverMessage, details } = data;
       if (code) {
-        const merged = details ? `${serverMessage || "发生未知错误"}（${details}）` : (serverMessage || "发生未知错误");
+        const fallback = tr('发生未知错误', 'Unknown error')
+        const merged = details ? `${serverMessage || fallback}（${details}）` : (serverMessage || fallback);
         message = getErrorMessage(code, merged);
       } else if (serverMessage) {
         message = details ? `${serverMessage}（${details}）` : serverMessage;
       }
     } else if (status) {
-      if (status === 401) message = "未授权（401）：请检查登录状态或 API Key。";
-      if (status === 403) message = "禁止访问（403）：请检查权限或服务商风控。";
-      if (status === 404) message = "接口不存在（404）：请确认后端已更新并重启。";
+      if (status === 401) message = tr('未授权（401）：请检查登录状态或 API Key。', 'Unauthorized (401): please check login status or API key.');
+      if (status === 403) message = tr('禁止访问（403）：请检查权限或服务商风控。', 'Forbidden (403): please check permissions or provider restriction.');
+      if (status === 404) message = tr('接口不存在（404）：请确认后端已更新并重启。', 'Not found (404): please confirm backend is updated and restarted.');
     }
     
     if (!silent) {
@@ -48,12 +58,24 @@ client.interceptors.response.use(
 export const api = {
   getConfig: () => client.get('/config').then(res => res.data),
   updateConfig: (config: any) => client.post('/config', config).then(res => res.data),
-  dbTest: (payload: { host: string; port?: number; username: string; password: string }) =>
+  dbTest: (payload: {
+    host?: string
+    port?: number
+    username?: string
+    password?: string
+    db_url?: string
+    ssl_mode?: string
+    ssh_enabled?: boolean
+    ssh_host?: string
+    ssh_port?: number
+    ssh_username?: string
+    ssh_password?: string
+  }) =>
     client.post('/db/test', payload).then(res => res.data),
-  getSchema: () => client.get('/schema').then(res => res.data),
+  getSchema: (db_id?: string) => client.get('/schema', { params: { db_id } }).then(res => res.data),
   parseSchema: (sqlContent: string) => client.post('/schema/parse', { sql_content: sqlContent }).then(res => res.data),
   chatToSql: (query: string, chatHistory?: any[]) => client.post('/chat', { query, chat_history: chatHistory }).then(res => res.data),
-  executeSql: (sql: string, force?: boolean) => client.post('/execute', { sql, force }).then(res => res.data),
+  executeSql: (sql: string, force?: boolean, db_id?: string) => client.post('/execute', { sql, force, db_id }).then(res => res.data),
   parseNavicat: (xmlContent: string) => client.post('/navicat/parse', { xml_content: xmlContent }).then(res => res.data),
   // Rules
   getRules: () => client.get('/rules').then(res => res.data),
@@ -65,20 +87,20 @@ export const api = {
   snapshotPolicy: () => client.post('/policy/snapshot').then(res => res.data),
   rollbackPolicy: (name: string) => client.post('/policy/rollback', { name }).then(res => res.data),
   // Tables
-  getTableData: (tableName: string, page: number, pageSize: number, filters?: string, orders?: string) => 
-    client.get(`/table/data`, { params: { table_name: tableName, page, page_size: pageSize, filters, orders } }).then(res => res.data),
-  getTableSchema: (tableName: string) => 
-    client.get(`/table/schema?table_name=${tableName}`).then(res => res.data),
+  getTableData: (tableName: string, page: number, pageSize: number, filters?: string, orders?: string, db_id?: string) => 
+    client.get(`/table/data`, { params: { table_name: tableName, page, page_size: pageSize, filters, orders, db_id } }).then(res => res.data),
+  getTableSchema: (tableName: string, db_id?: string) => 
+    client.get(`/table/schema`, { params: { table_name: tableName, db_id } }).then(res => res.data),
   previewDdl: (oldTable: any | null, newTable: any | null) =>
     client.post('/table/ddl/preview', { old_table: oldTable, new_table: newTable }).then(res => res.data),
-  executeDdl: (sql: string) => 
-    client.post('/table/ddl', { sql }).then(res => res.data),
-  crudInsert: (tableName: string, data: any) => 
-    client.post('/crud/insert', { table_name: tableName, data }).then(res => res.data),
-  crudUpdate: (tableName: string, data: any, condition: Record<string, any>) => 
-    client.post('/crud/update', { table_name: tableName, data, condition }).then(res => res.data),
-  crudDelete: (tableName: string, condition: Record<string, any>) => 
-    client.post('/crud/delete', { table_name: tableName, condition }).then(res => res.data),
+  executeDdl: (sql: string, db_id?: string) => 
+    client.post('/table/ddl', { sql, db_id }).then(res => res.data),
+  crudInsert: (tableName: string, data: any, db_id?: string) => 
+    client.post('/crud/insert', { table_name: tableName, data, db_id }).then(res => res.data),
+  crudUpdate: (tableName: string, data: any, condition: Record<string, any>, db_id?: string) => 
+    client.post('/crud/update', { table_name: tableName, data, condition, db_id }).then(res => res.data),
+  crudDelete: (tableName: string, condition: Record<string, any>, db_id?: string) => 
+    client.post('/crud/delete', { table_name: tableName, condition, db_id }).then(res => res.data),
   generateMockData: (tableName: string, rowCount: number, rules?: Record<string, string>) => 
     client.post('/tools/mock-data', { table_name: tableName, row_count: rowCount, rules }).then(res => res.data),
   exportData: (tableName: string, exportType: string) => 
@@ -155,7 +177,7 @@ export const api = {
   transferUpload: (formData: FormData) =>
     client.post('/tools/data-transfer/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } }).then(res => res.data),
   transferExecute: (config: any) =>
-    client.post('/tools/data-transfer/execute', config).then(res => res.data.dml),
+    client.post('/tools/data-transfer/execute', config).then(res => res.data),
   // History
   getHistory: () => client.get('/sql/history').then(res => res.data),
   clearHistory: () => client.post('/sql/history').then(res => res.data),

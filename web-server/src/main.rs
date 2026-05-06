@@ -1,10 +1,12 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, Request, StatusCode},
+    middleware::Next,
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
-use core_lib::error::AppError;
+use core_lib::error::{with_locale, AppError};
 
 use axum::extract::Multipart;
 use core_lib::transfer::{TransferConfig, TransferEngine};
@@ -17,6 +19,36 @@ struct UploadResponse {
     columns: Vec<String>,
     preview_data: Vec<Vec<String>>,
     source_path: String,
+}
+
+fn normalize_locale(headers: &HeaderMap) -> String {
+    if let Some(v) = headers.get("x-locale").and_then(|v| v.to_str().ok()) {
+        let v = v.trim().to_lowercase();
+        if v.starts_with("zh") {
+            return "zh".to_string();
+        }
+        if v.starts_with("en") {
+            return "en".to_string();
+        }
+    }
+    if let Some(v) = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+    {
+        let v = v.trim().to_lowercase();
+        if v.starts_with("zh") {
+            return "zh".to_string();
+        }
+        if v.starts_with("en") {
+            return "en".to_string();
+        }
+    }
+    "en".to_string()
+}
+
+async fn set_request_locale(req: Request<axum::body::Body>, next: Next) -> Response {
+    let locale = normalize_locale(req.headers());
+    with_locale(locale, async move { next.run(req).await }).await
 }
 
 async fn transfer_upload(
@@ -126,15 +158,43 @@ async fn transfer_execute(
         }
     }
 
-    let dml = TransferEngine::execute_transfer(&config)
+    if let Some(ref target_db_id) = config.target_db_id {
+        let app_config = state.config.read().await.clone();
+        if let Some(conn) = app_config.db_connections.iter().find(|c| &c.id == target_db_id) {
+            config.target_url = conn.url.clone();
+        } else {
+            return Err(AppError::BadRequest(
+                "Target DB connection not found".into(),
+            ));
+        }
+    }
+
+    let report = TransferEngine::execute_transfer_with_report(&config)
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let compared = report.insert_count + report.update_count + report.unchanged_count;
+    let changed = report.insert_count + report.update_count;
+    if report.compare_based && compared >= 200 && changed.saturating_mul(100) / compared >= 85 {
+        return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+    }
+
     if config.source_type == "local_file" {
         if let Some(p) = config.source_path.as_ref() {
             let _ = tokio::fs::remove_file(p).await;
         }
     }
-    Ok(Json(serde_json::json!({ "dml": dml })))
+    let dml = report.dml;
+    let insert_count = report.insert_count;
+    let update_count = report.update_count;
+    let unchanged_count = report.unchanged_count;
+    let compare_based = report.compare_based;
+    Ok(Json(serde_json::json!({
+        "dml": dml,
+        "insert_count": insert_count,
+        "update_count": update_count,
+        "unchanged_count": unchanged_count,
+        "compare_based": compare_based
+    })))
 }
 
 // ----------------- Rule Management Handlers -----------------
@@ -350,75 +410,603 @@ async fn parse_navicat(
 
 #[derive(Deserialize)]
 struct DbTestRequest {
-    host: String,
+    host: Option<String>,
     port: Option<u16>,
-    username: String,
-    password: String,
+    username: Option<String>,
+    password: Option<String>,
+    db_url: Option<String>,
+    ssl_mode: Option<String>,
+    ssh_enabled: Option<bool>,
+    ssh_host: Option<String>,
+    ssh_port: Option<u16>,
+    ssh_username: Option<String>,
+    ssh_password: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DbTestDiagnostic {
+    status: String,
+    category: String,
+    code: String,
+    message: String,
+    hint: Option<String>,
+    detail: Option<String>,
 }
 
 #[derive(Serialize)]
 struct DbTestResponse {
+    success: bool,
     databases: Vec<String>,
+    diagnostic: DbTestDiagnostic,
+}
+
+fn db_test_diagnostic(
+    status: &str,
+    category: &str,
+    code: &str,
+    message: &str,
+    hint: Option<&str>,
+    detail: Option<String>,
+) -> DbTestDiagnostic {
+    DbTestDiagnostic {
+        status: status.to_string(),
+        category: category.to_string(),
+        code: code.to_string(),
+        message: message.to_string(),
+        hint: hint.map(|v| v.to_string()),
+        detail,
+    }
+}
+
+fn db_test_failed(
+    category: &str,
+    code: &str,
+    message: &str,
+    hint: Option<&str>,
+    detail: Option<String>,
+) -> DbTestResponse {
+    DbTestResponse {
+        success: false,
+        databases: vec![],
+        diagnostic: db_test_diagnostic("error", category, code, message, hint, detail),
+    }
+}
+
+fn classify_db_test_connect_error(msg: &str) -> DbTestResponse {
+    let lower = msg.to_lowercase();
+    if lower.contains("access denied")
+        || lower.contains("authentication failed")
+        || lower.contains("using password")
+    {
+        return db_test_failed(
+            "auth",
+            "DB_TEST_AUTH_FAILED",
+            "数据库账号或密码错误，请检查后重试。",
+            Some("请核对用户名、密码及账号来源主机权限。"),
+            Some(msg.to_string()),
+        );
+    }
+    if lower.contains("ssl")
+        || lower.contains("tls")
+        || lower.contains("certificate")
+        || lower.contains("handshake")
+        || lower.contains("verify")
+    {
+        return db_test_failed(
+            "ssl",
+            "DB_TEST_SSL_FAILED",
+            "SSL 连接失败，请检查 SSL 模式与证书配置。",
+            Some("可先切换为 preferred/disabled 验证是否为证书问题。"),
+            Some(msg.to_string()),
+        );
+    }
+    if lower.contains("connection refused")
+        || lower.contains("can't connect")
+        || lower.contains("could not connect")
+        || lower.contains("unknown host")
+        || lower.contains("no route to host")
+        || lower.contains("timed out")
+    {
+        return db_test_failed(
+            "network",
+            "DB_TEST_NETWORK_FAILED",
+            "无法连接到数据库服务器，请检查地址/端口/网络后重试。",
+            Some("请确认数据库服务已启动、防火墙放行、IP 白名单可访问。"),
+            Some(msg.to_string()),
+        );
+    }
+    db_test_failed(
+        "unknown",
+        "DB_TEST_CONNECT_FAILED",
+        "数据库连接失败，请检查连接参数后重试。",
+        None,
+        Some(msg.to_string()),
+    )
+}
+
+#[derive(Clone)]
+struct SshTunnelConfig {
+    ssh_host: String,
+    ssh_port: u16,
+    ssh_username: String,
+    ssh_password: String,
+    remote_host: String,
+    remote_port: u16,
+}
+
+struct SshTunnelHandle {
+    local_port: u16,
+    stop_tx: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for SshTunnelHandle {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn classify_ssh_setup_error(msg: &str) -> DbTestResponse {
+    let lower = msg.to_lowercase();
+    if lower.contains("init timeout") || lower.contains("timed out") {
+        return db_test_failed(
+            "ssh",
+            "DB_TEST_SSH_INIT_TIMEOUT",
+            "SSH 隧道初始化超时，请检查 SSH 网络连通性。",
+            Some("请检查 SSH 地址、端口、防火墙及网络质量后重试。"),
+            Some(msg.to_string()),
+        );
+    }
+    if lower.contains("handshake failed") {
+        return db_test_failed(
+            "ssh",
+            "DB_TEST_SSH_HANDSHAKE_FAILED",
+            "SSH 握手失败，请检查 SSH 服务端协议与安全配置。",
+            Some("请确认服务端允许当前认证方式，并检查 SSH 服务状态。"),
+            Some(msg.to_string()),
+        );
+    }
+    if lower.contains("host key")
+        || lower.contains("fingerprint")
+        || lower.contains("known hosts")
+    {
+        return db_test_failed(
+            "ssh",
+            "DB_TEST_SSH_HOSTKEY_FAILED",
+            "SSH 主机密钥校验失败，请确认目标主机身份。",
+            Some("请核对 SSH 主机指纹，避免连接到错误主机。"),
+            Some(msg.to_string()),
+        );
+    }
+    if lower.contains("auth")
+        || lower.contains("password")
+        || lower.contains("userauth")
+        || lower.contains("permission denied")
+    {
+        return db_test_failed(
+            "ssh",
+            "DB_TEST_SSH_AUTH_FAILED",
+            "SSH 认证失败，请检查 SSH 用户名或密码。",
+            Some("请确认 SSH 账号可登录，并校验密码是否正确。"),
+            Some(msg.to_string()),
+        );
+    }
+    if lower.contains("timeout")
+        || lower.contains("refused")
+        || lower.contains("unreachable")
+        || lower.contains("could not resolve")
+    {
+        return db_test_failed(
+            "ssh",
+            "DB_TEST_SSH_CONNECT_FAILED",
+            "SSH 连接失败，请检查 SSH 地址、端口及网络连通性。",
+            Some("请确认 SSH 服务已启动，且安全组/防火墙放行对应端口。"),
+            Some(msg.to_string()),
+        );
+    }
+    if lower.contains("open ssh channel failed")
+        || lower.contains("channel")
+        || lower.contains("direct-tcpip")
+    {
+        return db_test_failed(
+            "ssh",
+            "DB_TEST_SSH_CHANNEL_FAILED",
+            "SSH 隧道通道创建失败，请检查目标数据库地址与端口。",
+            Some("请确认 SSH 服务器可访问目标数据库主机和端口。"),
+            Some(msg.to_string()),
+        );
+    }
+    db_test_failed(
+        "ssh",
+        "DB_TEST_SSH_TUNNEL_FAILED",
+        "SSH 隧道建立失败，请检查 SSH 配置后重试。",
+        None,
+        Some(msg.to_string()),
+    )
+}
+
+fn extract_target_host_port_from_url(db_url: &str) -> Result<(String, u16), String> {
+    let parsed = url::Url::parse(db_url).map_err(|e| format!("invalid db_url: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "db_url missing host".to_string())?
+        .to_string();
+    let port = parsed.port().unwrap_or(3306);
+    Ok((host, port))
+}
+
+fn rewrite_db_url_with_local_tunnel(db_url: &str, local_port: u16) -> Result<String, String> {
+    let mut parsed = url::Url::parse(db_url).map_err(|e| format!("invalid db_url: {e}"))?;
+    parsed
+        .set_host(Some("127.0.0.1"))
+        .map_err(|_| "failed to set tunnel host".to_string())?;
+    parsed
+        .set_port(Some(local_port))
+        .map_err(|_| "failed to set tunnel port".to_string())?;
+    Ok(parsed.to_string())
+}
+
+fn write_all_to_stream_nonblocking(
+    stream: &mut std::net::TcpStream,
+    data: &[u8],
+) -> Result<(), String> {
+    let mut written = 0usize;
+    while written < data.len() {
+        match std::io::Write::write(stream, &data[written..]) {
+            Ok(0) => return Err("local stream closed".to_string()),
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(e) => return Err(format!("write local stream failed: {e}")),
+        }
+    }
+    Ok(())
+}
+
+fn write_all_to_channel_nonblocking(channel: &mut ssh2::Channel, data: &[u8]) -> Result<(), String> {
+    let mut written = 0usize;
+    while written < data.len() {
+        match std::io::Write::write(channel, &data[written..]) {
+            Ok(0) => return Err("ssh channel closed".to_string()),
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(e) => return Err(format!("write ssh channel failed: {e}")),
+        }
+    }
+    Ok(())
+}
+
+fn proxy_one_connection(
+    session: &ssh2::Session,
+    mut local_stream: std::net::TcpStream,
+    remote_host: &str,
+    remote_port: u16,
+    stop_rx: &std::sync::mpsc::Receiver<()>,
+) -> Result<(), String> {
+    let mut channel = session
+        .channel_direct_tcpip(remote_host, remote_port, None)
+        .map_err(|e| format!("open ssh channel failed: {e}"))?;
+    local_stream
+        .set_nonblocking(true)
+        .map_err(|e| format!("set local nonblocking failed: {e}"))?;
+    channel.set_blocking(false);
+
+    let mut uplink_buf = [0u8; 16 * 1024];
+    let mut downlink_buf = [0u8; 16 * 1024];
+
+    loop {
+        if stop_rx.try_recv().is_ok() {
+            break;
+        }
+        let mut progressed = false;
+
+        match std::io::Read::read(&mut local_stream, &mut uplink_buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                write_all_to_channel_nonblocking(&mut channel, &uplink_buf[..n])?;
+                progressed = true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(format!("read local stream failed: {e}")),
+        }
+
+        match std::io::Read::read(&mut channel, &mut downlink_buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                write_all_to_stream_nonblocking(&mut local_stream, &downlink_buf[..n])?;
+                progressed = true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(format!("read ssh channel failed: {e}")),
+        }
+
+        if !progressed {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    let _ = channel.close();
+    let _ = channel.wait_close();
+    Ok(())
+}
+
+fn start_ssh_tunnel(cfg: SshTunnelConfig) -> Result<SshTunnelHandle, String> {
+    let listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("bind local tunnel failed: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("set listener nonblocking failed: {e}"))?;
+    let local_port = listener
+        .local_addr()
+        .map_err(|e| format!("read local tunnel addr failed: {e}"))?
+        .port();
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+
+    let worker = std::thread::spawn(move || {
+        let ssh_tcp = match std::net::TcpStream::connect((cfg.ssh_host.as_str(), cfg.ssh_port)) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = ready_tx.send(Err(format!("ssh tcp connect failed: {e}")));
+                return;
+            }
+        };
+        let _ = ssh_tcp.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let _ = ssh_tcp.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+
+        let mut session = match ssh2::Session::new() {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = ready_tx.send(Err(format!("create ssh session failed: {e}")));
+                return;
+            }
+        };
+        session.set_tcp_stream(ssh_tcp);
+        if let Err(e) = session.handshake() {
+            let _ = ready_tx.send(Err(format!("ssh handshake failed: {e}")));
+            return;
+        }
+        if let Err(e) = session.userauth_password(&cfg.ssh_username, &cfg.ssh_password) {
+            let _ = ready_tx.send(Err(format!("ssh auth failed: {e}")));
+            return;
+        }
+        if !session.authenticated() {
+            let _ = ready_tx.send(Err("ssh auth failed: unauthenticated".to_string()));
+            return;
+        }
+        let _ = ready_tx.send(Ok(()));
+
+        loop {
+            if stop_rx.try_recv().is_ok() {
+                break;
+            }
+            match listener.accept() {
+                Ok((local_stream, _)) => {
+                    let _ = proxy_one_connection(
+                        &session,
+                        local_stream,
+                        &cfg.remote_host,
+                        cfg.remote_port,
+                        &stop_rx,
+                    );
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let ready = ready_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "ssh tunnel init timeout".to_string())?;
+    ready?;
+
+    Ok(SshTunnelHandle {
+        local_port,
+        stop_tx,
+        worker: Some(worker),
+    })
 }
 
 async fn db_test(Json(req): Json<DbTestRequest>) -> Result<Json<DbTestResponse>, AppError> {
     let policy = TimeoutPolicy::default();
-    let port = req.port.unwrap_or(3306);
+    let mut db_url_for_connect = req.db_url.clone();
+    let mut host_override: Option<String> = None;
+    let mut port_override: Option<u16> = None;
+    let _ssh_tunnel = if req.ssh_enabled.unwrap_or(false) {
+        let ssh_host = req
+            .ssh_host
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string());
+        let ssh_username = req
+            .ssh_username
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string());
+        let ssh_password = req.ssh_password.clone().filter(|s| !s.is_empty());
+        if ssh_host.is_none() || ssh_username.is_none() || ssh_password.is_none() {
+            return Ok(Json(db_test_failed(
+                "validation",
+                "DB_TEST_SSH_MISSING_FIELDS",
+                "SSH 参数不完整，请检查 SSH Host、用户名、密码。",
+                Some("启用 SSH 时，Host/Username/Password 均为必填。"),
+                None,
+            )));
+        }
+        let ssh_port = req.ssh_port.unwrap_or(22);
+        let (remote_host, remote_port) = if let Some(db_url) =
+            req.db_url.as_deref().filter(|s| !s.trim().is_empty())
+        {
+            match extract_target_host_port_from_url(db_url) {
+                Ok(v) => v,
+                Err(e) => return Ok(Json(classify_ssh_setup_error(&e))),
+            }
+        } else {
+            let host = req
+                .host
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_default()
+                .to_string();
+            let port = req.port.unwrap_or(3306);
+            if host.is_empty() {
+                return Ok(Json(db_test_failed(
+                    "validation",
+                    "DB_TEST_MISSING_FIELDS",
+                    "连接参数不完整，host 和 username 为必填项。",
+                    Some("请填写主机地址和用户名后重试。"),
+                    None,
+                )));
+            }
+            (host, port)
+        };
+
+        let tunnel_cfg = SshTunnelConfig {
+            ssh_host: ssh_host.unwrap_or_default(),
+            ssh_port,
+            ssh_username: ssh_username.unwrap_or_default(),
+            ssh_password: ssh_password.unwrap_or_default(),
+            remote_host,
+            remote_port,
+        };
+        let tunnel = match start_ssh_tunnel(tunnel_cfg) {
+            Ok(v) => v,
+            Err(e) => return Ok(Json(classify_ssh_setup_error(&e))),
+        };
+        if let Some(db_url) = req.db_url.as_deref().filter(|s| !s.trim().is_empty()) {
+            db_url_for_connect = match rewrite_db_url_with_local_tunnel(db_url, tunnel.local_port) {
+                Ok(v) => Some(v),
+                Err(e) => return Ok(Json(classify_ssh_setup_error(&e))),
+            };
+        } else {
+            host_override = Some("127.0.0.1".to_string());
+            port_override = Some(tunnel.local_port);
+        }
+        Some(tunnel)
+    } else {
+        None
+    };
 
     use sqlx::mysql::MySqlConnectOptions;
+    use sqlx::mysql::MySqlSslMode;
     use sqlx::Row;
+    use std::str::FromStr;
 
-    let mut options = MySqlConnectOptions::new()
-        .host(&req.host)
-        .port(port)
-        .username(&req.username)
-        .database("mysql");
+    let mut options = if let Some(db_url) = db_url_for_connect.as_deref().filter(|s| !s.trim().is_empty()) {
+        match MySqlConnectOptions::from_str(db_url) {
+            Ok(opts) => opts,
+            Err(e) => {
+                return Ok(Json(db_test_failed(
+                    "validation",
+                    "DB_TEST_INVALID_URL",
+                    "连接地址格式错误，请检查 db_url。",
+                    Some("示例：mysql://user:password@host:3306/dbname"),
+                    Some(e.to_string()),
+                )));
+            }
+        }
+    } else {
+        let host = req
+            .host
+            .as_deref()
+            .filter(|s| !s.trim().is_empty());
+        let username = req
+            .username
+            .as_deref()
+            .filter(|s| !s.trim().is_empty());
+        if host.is_none() || username.is_none() {
+            return Ok(Json(db_test_failed(
+                "validation",
+                "DB_TEST_MISSING_FIELDS",
+                "连接参数不完整，host 和 username 为必填项。",
+                Some("请填写主机地址和用户名后重试。"),
+                None,
+            )));
+        }
+        let host = host_override.unwrap_or_else(|| host.unwrap_or_default().to_string());
+        let username = username.unwrap_or_default();
+        let port = port_override.unwrap_or(req.port.unwrap_or(3306));
 
-    if !req.password.is_empty() {
-        options = options.password(&req.password);
+        let mut opts = MySqlConnectOptions::new()
+            .host(&host)
+            .port(port)
+            .username(username)
+            .database("mysql");
+        if let Some(password) = req.password.as_deref() {
+            if !password.is_empty() {
+                opts = opts.password(password);
+            }
+        }
+        opts
+    };
+
+    if let Some(mode) = req.ssl_mode.as_deref() {
+        options = match mode.to_lowercase().as_str() {
+            "disabled" => options.ssl_mode(MySqlSslMode::Disabled),
+            "required" => options.ssl_mode(MySqlSslMode::Required),
+            "verify_ca" => options.ssl_mode(MySqlSslMode::VerifyCa),
+            "verify_identity" => options.ssl_mode(MySqlSslMode::VerifyIdentity),
+            _ => options,
+        };
     }
 
     let pool_future = sqlx::mysql::MySqlPoolOptions::new()
         .max_connections(1)
         .connect_with(options);
 
-    let pool = tokio::time::timeout(policy.db_connect, pool_future)
-        .await
-        .map_err(|_| {
-            AppError::Timeout(
-                "连接数据库超时（已超过 10 秒），请检查网络、IP 或防火墙配置是否正确。".to_string(),
-            )
-        })?
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.to_lowercase().contains("access denied") {
-                let body = serde_json::json!({
-                    "error": "db_auth_failed",
-                    "message": "数据库账号或密码错误，请检查后重试。",
-                    "detail": msg
-                })
-                .to_string();
-                AppError::Unauthorized(body)
-            } else {
-                let body = serde_json::json!({
-                    "error": "db_connect_failed",
-                    "message": "无法连接到数据库服务器，请检查地址/端口/网络后重试。",
-                    "detail": msg
-                })
-                .to_string();
-                AppError::BadRequest(body)
-            }
-        })?;
+    let pool = match tokio::time::timeout(policy.db_connect, pool_future).await {
+        Ok(pool) => pool,
+        Err(_) => {
+            return Ok(Json(db_test_failed(
+                "timeout",
+                "DB_TEST_CONNECT_TIMEOUT",
+                "连接数据库超时（已超过 10 秒），请检查网络、IP 或防火墙配置是否正确。",
+                Some("若是云数据库，请确认白名单及安全组规则已放行。"),
+                None,
+            )));
+        }
+    };
+    let pool = match pool {
+        Ok(pool) => pool,
+        Err(e) => return Ok(Json(classify_db_test_connect_error(&e.to_string()))),
+    };
 
     let rows_future = sqlx::query("SHOW DATABASES").fetch_all(&pool);
-    let rows = tokio::time::timeout(policy.db_query, rows_future)
-        .await
-        .map_err(|_| {
-            AppError::Timeout(
-                "连接数据库超时（已超过 10 秒），请检查网络、IP 或防火墙配置是否正确。".to_string(),
-            )
-        })?
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let rows = match tokio::time::timeout(policy.db_query, rows_future).await {
+        Ok(rows) => rows,
+        Err(_) => {
+            return Ok(Json(db_test_failed(
+                "timeout",
+                "DB_TEST_QUERY_TIMEOUT",
+                "读取数据库列表超时，请稍后重试。",
+                Some("若数据库负载较高，可稍后重试或检查实例性能。"),
+                None,
+            )));
+        }
+    };
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Ok(Json(db_test_failed(
+                "query",
+                "DB_TEST_QUERY_FAILED",
+                "连接成功，但读取数据库列表失败。",
+                Some("请检查账号是否具备 SHOW DATABASES 权限。"),
+                Some(e.to_string()),
+            )));
+        }
+    };
 
     let mut databases = Vec::new();
     for row in rows {
@@ -428,7 +1016,18 @@ async fn db_test(Json(req): Json<DbTestRequest>) -> Result<Json<DbTestResponse>,
         }
     }
 
-    Ok(Json(DbTestResponse { databases }))
+    Ok(Json(DbTestResponse {
+        success: true,
+        databases,
+        diagnostic: db_test_diagnostic(
+            "success",
+            "success",
+            "DB_TEST_OK",
+            "连接成功",
+            None,
+            None,
+        ),
+    }))
 }
 use core_lib::{
     ai::{
@@ -913,7 +1512,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ai/knowledge/delete", post(delete_knowledge))
         .layer(axum::extract::DefaultBodyLimit::max(
             (limits.max_file_bytes.min(usize::MAX as u64)) as usize,
-        ));
+        ))
+        .layer(axum::middleware::from_fn(set_request_locale));
 
     let dist_dir =
         std::env::var("WEB_UI_DIST_DIR").unwrap_or_else(|_| "web-ui/dist".to_string());
@@ -1233,37 +1833,34 @@ async fn delete_knowledge(
 
 // ----------------- CRUD API Handlers -----------------
 
+#[derive(Deserialize)]
+struct CrudMutationRequest {
+    table_name: String,
+    data: serde_json::Value,
+    condition: Option<serde_json::Map<String, serde_json::Value>>,
+    db_id: Option<String>,
+}
+
 async fn crud_insert(
     State(state): State<AppState>,
-    Json(req): Json<CrudRequest>,
+    Json(req): Json<CrudMutationRequest>,
 ) -> Result<Json<ExecuteResponse>, AppError> {
-    let is_read_only = {
-        let config = state.config.read().await;
-        if let Some(active_id) = &config.active_db_id {
-            config
-                .db_connections
-                .iter()
-                .find(|c| &c.id == active_id)
-                .map(|c| c.is_read_only)
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    };
+    let is_read_only = is_read_only_connection(&state, req.db_id.as_deref()).await;
     if is_read_only {
         return Err(AppError::Forbidden(
             "当前连接为只读模式，禁止执行非查询操作！".to_string(),
         ));
     }
 
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
-    let affected_rows = CrudManager::insert(&db_client, &req)
+    let crud_req = CrudRequest {
+        table_name: req.table_name,
+        data: req.data,
+        condition: req.condition,
+    };
+
+    let affected_rows = CrudManager::insert(&db_client, &crud_req)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
@@ -1276,35 +1873,24 @@ async fn crud_insert(
 
 async fn crud_update(
     State(state): State<AppState>,
-    Json(req): Json<CrudRequest>,
+    Json(req): Json<CrudMutationRequest>,
 ) -> Result<Json<ExecuteResponse>, AppError> {
-    let is_read_only = {
-        let config = state.config.read().await;
-        if let Some(active_id) = &config.active_db_id {
-            config
-                .db_connections
-                .iter()
-                .find(|c| &c.id == active_id)
-                .map(|c| c.is_read_only)
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    };
+    let is_read_only = is_read_only_connection(&state, req.db_id.as_deref()).await;
     if is_read_only {
         return Err(AppError::Forbidden(
             "当前连接为只读模式，禁止执行非查询操作！".to_string(),
         ));
     }
 
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
-    let affected_rows = CrudManager::update(&db_client, &req)
+    let crud_req = CrudRequest {
+        table_name: req.table_name,
+        data: req.data,
+        condition: req.condition,
+    };
+
+    let affected_rows = CrudManager::update(&db_client, &crud_req)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
@@ -1319,37 +1905,21 @@ async fn crud_update(
 struct DeleteRequest {
     table_name: String,
     condition: serde_json::Map<String, serde_json::Value>,
+    db_id: Option<String>,
 }
 
 async fn crud_delete(
     State(state): State<AppState>,
     Json(req): Json<DeleteRequest>,
 ) -> Result<Json<ExecuteResponse>, AppError> {
-    let is_read_only = {
-        let config = state.config.read().await;
-        if let Some(active_id) = &config.active_db_id {
-            config
-                .db_connections
-                .iter()
-                .find(|c| &c.id == active_id)
-                .map(|c| c.is_read_only)
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    };
+    let is_read_only = is_read_only_connection(&state, req.db_id.as_deref()).await;
     if is_read_only {
         return Err(AppError::Forbidden(
             "当前连接为只读模式，禁止执行非查询操作！".to_string(),
         ));
     }
 
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
     let affected_rows = CrudManager::delete(&db_client, &req.table_name, &req.condition)
         .await
@@ -1569,7 +2139,69 @@ async fn get_schema_internal(state: &AppState) -> Option<SchemaResponse> {
     fetch_schema_for_db(&db_client, &db_name).await
 }
 
-async fn get_schema(State(state): State<AppState>) -> Result<Json<SchemaResponse>, AppError> {
+async fn get_schema_for_db_id(state: &AppState, db_id: &str) -> Result<SchemaResponse, AppError> {
+    let (db_client, db_name) = get_temp_db_client(state, db_id).await?;
+    fetch_schema_for_db(&db_client, &db_name)
+        .await
+        .ok_or_else(|| AppError::InternalError("Failed to fetch schema".to_string()))
+}
+
+async fn resolve_db_client_for_request(
+    state: &AppState,
+    db_id: Option<&str>,
+) -> Result<(DbClient, String), AppError> {
+    if let Some(id) = db_id {
+        return get_temp_db_client(state, id).await;
+    }
+    let db_client = state
+        .db_client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let url = state
+        .config
+        .read()
+        .await
+        .get_active_db_url()
+        .unwrap_or_default();
+    let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
+    Ok((db_client, db_name))
+}
+
+async fn is_read_only_connection(state: &AppState, db_id: Option<&str>) -> bool {
+    let config = state.config.read().await;
+    if let Some(id) = db_id {
+        return config
+            .db_connections
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.is_read_only)
+            .unwrap_or(false);
+    }
+    if let Some(active_id) = &config.active_db_id {
+        return config
+            .db_connections
+            .iter()
+            .find(|c| &c.id == active_id)
+            .map(|c| c.is_read_only)
+            .unwrap_or(false);
+    }
+    false
+}
+
+#[derive(Deserialize)]
+struct DbContextQuery {
+    db_id: Option<String>,
+}
+
+async fn get_schema(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DbContextQuery>,
+) -> Result<Json<SchemaResponse>, AppError> {
+    if let Some(db_id) = query.db_id.as_deref() {
+        return Ok(Json(get_schema_for_db_id(&state, db_id).await?));
+    }
     if let Some(schema) = get_schema_internal(&state).await {
         Ok(Json(schema))
     } else {
@@ -1765,6 +2397,7 @@ async fn chat_to_sql(
 struct ExecuteRequest {
     sql: String,
     force: Option<bool>,
+    db_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1789,26 +2422,8 @@ async fn execute_sql(
     State(state): State<AppState>,
     Json(mut req): Json<ExecuteRequest>,
 ) -> Result<Json<ExecuteResponse>, AppError> {
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
-
-    let is_read_only = {
-        let config = state.config.read().await;
-        if let Some(active_id) = &config.active_db_id {
-            config
-                .db_connections
-                .iter()
-                .find(|c| &c.id == active_id)
-                .map(|c| c.is_read_only)
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    };
+    let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
+    let is_read_only = is_read_only_connection(&state, req.db_id.as_deref()).await;
 
     use sqlx::Column;
     use sqlx::Row;
@@ -2005,6 +2620,7 @@ struct GetTableDataRequest {
     page_size: Option<u32>,
     filters: Option<String>,
     orders: Option<String>,
+    db_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2030,16 +2646,16 @@ async fn get_table_data(
     State(state): State<AppState>,
     axum::extract::Query(req): axum::extract::Query<GetTableDataRequest>,
 ) -> Result<Json<GetTableDataResponse>, AppError> {
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let (db_client, db_name) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
     let page = req.page.unwrap_or(1);
     let page_size = req.page_size.unwrap_or(50);
     let offset = (page - 1) * page_size;
+
+    let preferred_column_names = SchemaExtractor::get_columns(&db_client, &db_name, &req.table_name)
+        .await
+        .map(|cols| cols.into_iter().map(|c| c.column_name).collect::<Vec<_>>())
+        .unwrap_or_default();
 
     let mut where_clause = String::new();
     let mut bindings = Vec::new();
@@ -2138,7 +2754,10 @@ async fn get_table_data(
     for row in result_rows {
         let mut map = serde_json::Map::new();
         for col in row.columns() {
-            let col_name = col.name().to_string();
+            let col_name = preferred_column_names
+                .get(col.ordinal())
+                .cloned()
+                .unwrap_or_else(|| col.name().to_string());
             if let Ok(val) = row.try_get::<Option<i64>, _>(col.ordinal()) {
                 map.insert(col_name, serde_json::json!(val));
             } else if let Ok(val) = row.try_get::<Option<f64>, _>(col.ordinal()) {
@@ -2172,25 +2791,14 @@ async fn get_table_data(
 #[derive(Deserialize)]
 struct GetTableSchemaRequest {
     table_name: String,
+    db_id: Option<String>,
 }
 
 async fn get_table_schema(
     State(state): State<AppState>,
     axum::extract::Query(req): axum::extract::Query<GetTableSchemaRequest>,
 ) -> Result<Json<TableWithDetails>, AppError> {
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
-    let url = state
-        .config
-        .read()
-        .await
-        .get_active_db_url()
-        .unwrap_or_default();
-    let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
+    let (db_client, db_name) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
     let columns = SchemaExtractor::get_columns(&db_client, &db_name, &req.table_name)
         .await
@@ -2215,6 +2823,7 @@ async fn get_table_schema(
 #[derive(Deserialize)]
 struct ExecuteDdlRequest {
     sql: String,
+    db_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2239,31 +2848,14 @@ async fn execute_ddl(
     State(state): State<AppState>,
     Json(req): Json<ExecuteDdlRequest>,
 ) -> Result<Json<ExecuteResponse>, AppError> {
-    let is_read_only = {
-        let config = state.config.read().await;
-        if let Some(active_id) = &config.active_db_id {
-            config
-                .db_connections
-                .iter()
-                .find(|c| &c.id == active_id)
-                .map(|c| c.is_read_only)
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    };
+    let is_read_only = is_read_only_connection(&state, req.db_id.as_deref()).await;
     if is_read_only {
         return Err(AppError::Forbidden(
             "当前连接为只读模式，禁止执行非查询操作！".to_string(),
         ));
     }
 
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
     let result = sqlx::query(&req.sql)
         .execute(&db_client.pool)
@@ -2534,6 +3126,7 @@ struct ImportJobStartRequest {
 struct ImportSqlJobStartRequest {
     sql: String,
     force: Option<bool>,
+    db_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2990,12 +3583,16 @@ async fn import_sql_job_start(
                 state.limits.max_job_concurrency
             ))
         })?;
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let db_client = if let Some(db_id) = req.db_id.clone() {
+        get_temp_db_client(&state, &db_id).await?.0
+    } else {
+        state
+            .db_client
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
+    };
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -4670,7 +5267,8 @@ async fn run_import_sql_job(
 ) -> Result<serde_json::Value, AppError> {
     let is_read_only = {
         let config = state.config.read().await;
-        if let Some(active_id) = &config.active_db_id {
+        let selected_db_id = req.db_id.clone().or_else(|| config.active_db_id.clone());
+        if let Some(active_id) = &selected_db_id {
             config
                 .db_connections
                 .iter()
@@ -4757,6 +5355,23 @@ async fn get_temp_db_client(state: &AppState, db_id: &str) -> Result<(DbClient, 
     Ok((client, db_name))
 }
 
+const GAP_TOO_LARGE_MSG: &str = "当前对比数据库差距过大，不符合结构/数据同步规范/数据传输规范";
+
+fn schema_gap_too_large(diff: &core_lib::tools::SchemaDiff) -> bool {
+    let total = diff.tables.len();
+    if total == 0 {
+        return false;
+    }
+    let changed = diff.tables.iter().filter(|t| t.status != "unchanged").count();
+    changed >= 120 || (total >= 20 && changed.saturating_mul(100) / total >= 85)
+}
+
+fn data_gap_too_large(diff: &core_lib::sync::DataDiff, source_rows: usize, target_rows: usize) -> bool {
+    let changed = diff.insert_count + diff.update_count + diff.delete_count;
+    let compared = source_rows.max(target_rows);
+    changed >= 50_000 || (compared >= 500 && changed.saturating_mul(100) / compared >= 85)
+}
+
 #[derive(Deserialize)]
 struct SyncSchemaDiffRequest {
     source_db_id: String,
@@ -4783,6 +5398,9 @@ async fn sync_schema_diff(
         .ok_or_else(|| AppError::InternalError("Failed to fetch target schema".to_string()))?;
 
     let (diff, _) = SyncEngine::schema_sync(&source, &target);
+    if schema_gap_too_large(&diff) {
+        return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+    }
     Ok(Json(SyncSchemaDiffResponse { diff }))
 }
 
@@ -4811,6 +5429,10 @@ async fn sync_schema_ddl(
     let target = fetch_schema_for_db(&target_client, &target_db_name)
         .await
         .ok_or_else(|| AppError::InternalError("Failed to fetch target schema".to_string()))?;
+    let (diff, _) = SyncEngine::schema_sync(&source, &target);
+    if schema_gap_too_large(&diff) {
+        return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+    }
 
     let ddl = core_lib::sync::SchemaSyncEngine::generate_ddl_for_selection(
         &source,
@@ -4898,6 +5520,9 @@ async fn sync_data_diff(
         &target_data,
         &req.primary_key,
     );
+    if data_gap_too_large(&diff, source_data.len(), target_data.len()) {
+        return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+    }
     Ok(Json(SyncDataDiffResponse { diff }))
 }
 
@@ -5069,6 +5694,15 @@ async fn mysql_sync_compare(
                 chunk_size,
             )
             .await?;
+            let total_chunks = compare.chunks.len();
+            if total_chunks >= 20
+                && compare.different_chunks.saturating_mul(100) / total_chunks >= 85
+            {
+                return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+            }
+            if compare.different_chunks >= 500 {
+                return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+            }
 
             Ok(compare)
         }
@@ -6363,6 +6997,11 @@ mod tests {
                 id: "ro".to_string(),
                 name: "ro".to_string(),
                 url: "mysql://root@127.0.0.1:1/test".to_string(),
+                group_name: None,
+                color: None,
+                is_favorite: false,
+                ssh: None,
+                ssl: None,
                 db_type: Some(DbType::MySQL),
                 capability_level: None,
                 schema: None,

@@ -8,6 +8,7 @@ interface DataTableProps {
   data: any[];
   schema: any;
   tableName: string;
+  dbId?: string;
   sorts: { column: string; desc: boolean }[];
   setSorts: (sorts: { column: string; desc: boolean }[]) => void;
   filters: { column: string; operator: string; value: string }[];
@@ -20,6 +21,7 @@ export function DataTable({
   data, 
   schema, 
   tableName, 
+  dbId,
   sorts, 
   setSorts, 
   filters, 
@@ -189,19 +191,19 @@ export function DataTable({
       // 1. Delete rows
       for (const idx of deletedRowIdxs) {
         const condition = getConditionForOriginalRow(idx);
-        await api.crudDelete(tableName, condition);
+        await api.crudDelete(tableName, condition, dbId);
       }
       
       // 2. Update rows
       for (const [idx, updatedRow] of Object.entries(modifiedRows)) {
         if (deletedRowIdxs.has(Number(idx))) continue;
         const condition = getConditionForOriginalRow(Number(idx));
-        await api.crudUpdate(tableName, updatedRow, condition);
+        await api.crudUpdate(tableName, updatedRow, condition, dbId);
       }
 
       // 3. Insert new rows
       for (const row of newRows) {
-        await api.crudInsert(tableName, row);
+        await api.crudInsert(tableName, row, dbId);
       }
 
     } catch (e: any) {
@@ -213,7 +215,7 @@ export function DataTable({
       setNewRows([]);
       onRefresh();
     }
-  }, [deletedRowIdxs, modifiedRows, newRows, tableName, onRefresh, getConditionForOriginalRow]);
+  }, [deletedRowIdxs, modifiedRows, newRows, tableName, dbId, onRefresh, getConditionForOriginalRow]);
 
   const handleUndo = () => {
     setModifiedRows({});
@@ -318,7 +320,7 @@ export function DataTable({
 
       <div ref={parentRef} className="flex-1 overflow-auto rounded border border-dark-border bg-[#0d1117]">
         <table className="w-full text-left text-sm whitespace-nowrap">
-          <thead className="bg-[#161b22] sticky top-0 shadow-sm text-gray-400 text-xs uppercase tracking-wider z-20">
+          <thead className="bg-[#161b22] sticky top-0 shadow-sm text-gray-400 text-xs tracking-wider z-20">
             <tr>
               {columns.map((k: string) => {
                 const sortItem = sorts.find(s => s.column === k);

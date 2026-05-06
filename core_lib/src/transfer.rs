@@ -1,5 +1,7 @@
 use csv::ReaderBuilder;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sqlx::Row;
 use std::fs::File;
 use std::io::Read;
 use thiserror::Error;
@@ -36,6 +38,7 @@ pub struct TransferConfig {
     pub source_db_id: Option<String>,
     pub source_table: Option<String>,
 
+    pub target_db_id: Option<String>,
     pub target_url: String,
     pub target_table: String,
 
@@ -47,6 +50,15 @@ pub struct TransferConfig {
 pub struct FileParseResult {
     pub columns: Vec<String>,
     pub preview_data: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferExecuteReport {
+    pub dml: String,
+    pub insert_count: usize,
+    pub update_count: usize,
+    pub unchanged_count: usize,
+    pub compare_based: bool,
 }
 
 pub struct TransferEngine;
@@ -110,6 +122,13 @@ impl TransferEngine {
     }
 
     pub async fn execute_transfer(config: &TransferConfig) -> Result<String, TransferError> {
+        let report = Self::execute_transfer_with_report(config).await?;
+        Ok(report.dml)
+    }
+
+    pub async fn execute_transfer_with_report(
+        config: &TransferConfig,
+    ) -> Result<TransferExecuteReport, TransferError> {
         fn escape_sql_string(v: &str) -> String {
             v.replace('\'', "''")
         }
@@ -118,7 +137,79 @@ impl TransferEngine {
             format!("`{}`", v.replace('`', "``"))
         }
 
+        fn value_to_sql(v: &Value) -> String {
+            match v {
+                Value::Null => "NULL".to_string(),
+                Value::Bool(b) => {
+                    if *b {
+                        "TRUE".to_string()
+                    } else {
+                        "FALSE".to_string()
+                    }
+                }
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                Value::Array(a) => format!(
+                    "'{}'",
+                    serde_json::to_string(a)
+                        .unwrap_or_default()
+                        .replace('\'', "''")
+                ),
+                Value::Object(o) => format!(
+                    "'{}'",
+                    serde_json::to_string(o)
+                        .unwrap_or_default()
+                        .replace('\'', "''")
+                ),
+            }
+        }
+
+        fn row_cell_to_value(row: &sqlx::mysql::MySqlRow, idx: usize) -> Value {
+            if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
+                return serde_json::json!(v);
+            }
+            if let Ok(v) = row.try_get::<Option<f64>, _>(idx) {
+                return serde_json::json!(v);
+            }
+            if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
+                return serde_json::json!(v);
+            }
+            if let Ok(v) = row.try_get::<Option<chrono::NaiveDateTime>, _>(idx) {
+                return serde_json::json!(v.map(|x| x.to_string()));
+            }
+            if let Ok(v) = row.try_get::<Option<chrono::NaiveDate>, _>(idx) {
+                return serde_json::json!(v.map(|x| x.to_string()));
+            }
+            if let Ok(v) = row.try_get::<Option<chrono::NaiveTime>, _>(idx) {
+                return serde_json::json!(v.map(|x| x.to_string()));
+            }
+            if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
+                return serde_json::json!(v);
+            }
+            if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
+                if let Some(bytes) = v {
+                    return serde_json::json!(String::from_utf8_lossy(&bytes).to_string());
+                }
+            }
+            Value::Null
+        }
+
+        fn value_key(v: &Value) -> String {
+            match v {
+                Value::Null => "null".to_string(),
+                Value::Bool(b) => b.to_string(),
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => s.clone(),
+                Value::Array(a) => serde_json::to_string(a).unwrap_or_default(),
+                Value::Object(o) => serde_json::to_string(o).unwrap_or_default(),
+            }
+        }
+
         let mut out = String::new();
+        let mut insert_count = 0usize;
+        let mut update_count = 0usize;
+        let mut unchanged_count = 0usize;
+        let mut compare_based = false;
 
         if let TransferMode::Replace = config.mode {
             out.push_str("TRUNCATE TABLE ");
@@ -196,6 +287,7 @@ impl TransferEngine {
                         }
                     }
                     batch.push(format!("({})", vals.join(", ")));
+                    insert_count += 1;
 
                     if batch.len() >= batch_rows {
                         out.push_str("INSERT INTO ");
@@ -224,6 +316,11 @@ impl TransferEngine {
                 .source_url
                 .as_ref()
                 .ok_or(TransferError::Db("Missing source url".into()))?;
+            let target_url = if !config.target_url.is_empty() {
+                config.target_url.clone()
+            } else {
+                return Err(TransferError::Db("Missing target url".into()));
+            };
             let source_table = config
                 .source_table
                 .as_ref()
@@ -233,17 +330,13 @@ impl TransferEngine {
                 return Err(TransferError::Db("Missing mappings".into()));
             }
 
-            // This is a naive implementation that generates SQL.
-            // In a real scenario, we'd fetch from source DB and stream to target DB.
-            // Since we don't have a direct cross-db transfer in memory right now without full execution,
-            // we'll just create a placeholder or actually fetch data if we can.
-            // Wait, the task says "streaming from source to target".
-            // Let's implement actual fetching from source DB.
             let source_pool = sqlx::MySqlPool::connect(source_url)
                 .await
                 .map_err(|e| TransferError::Db(e.to_string()))?;
+            let target_pool = sqlx::MySqlPool::connect(&target_url)
+                .await
+                .map_err(|e| TransferError::Db(e.to_string()))?;
 
-            // Query all rows from source
             let source_cols: Vec<String> = config
                 .mappings
                 .iter()
@@ -255,9 +348,6 @@ impl TransferEngine {
                 .fetch_all(&source_pool)
                 .await
                 .map_err(|e| TransferError::Db(e.to_string()))?;
-
-            use sqlx::Row;
-            // use sqlx::TypeInfo;
 
             let insert_cols: Vec<String> = config
                 .mappings
@@ -271,35 +361,105 @@ impl TransferEngine {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(500)
                 .max(1);
-            let mut batch: Vec<String> = Vec::with_capacity(batch_rows);
+            let pk_idx = config
+                .mappings
+                .iter()
+                .position(|m| m.target_col.eq_ignore_ascii_case("id"));
+            let target_cols: Vec<String> = config
+                .mappings
+                .iter()
+                .map(|m| quoted_ident(&m.target_col))
+                .collect();
 
-            for row in rows {
-                let mut vals = Vec::new();
+            if let Some(pk_idx) = pk_idx {
+                compare_based = true;
+                let target_query = format!(
+                    "SELECT {} FROM `{}`",
+                    target_cols.join(", "),
+                    config.target_table
+                );
+                let target_rows = sqlx::query(&target_query)
+                    .fetch_all(&target_pool)
+                    .await
+                    .unwrap_or_default();
 
-                for (i, _mapping) in config.mappings.iter().enumerate() {
-                    // Extract value from row. We'll use a string representation.
-                    // This requires decoding depending on the column type.
-                    // A simple workaround is to cast to string if possible, or we just format it.
-                    let val_str = if let Ok(val) = row.try_get::<String, _>(i) {
-                        format!("'{}'", escape_sql_string(&val))
-                    } else if let Ok(val) = row.try_get::<i64, _>(i) {
-                        val.to_string()
-                    } else if let Ok(val) = row.try_get::<f64, _>(i) {
-                        val.to_string()
-                    } else if let Ok(val) = row.try_get::<bool, _>(i) {
-                        if val {
-                            "TRUE".to_string()
-                        } else {
-                            "FALSE".to_string()
-                        }
-                    } else {
-                        "NULL".to_string() // Fallback
-                    };
-                    vals.push(val_str);
+                let mut target_map: std::collections::HashMap<String, Vec<Value>> =
+                    std::collections::HashMap::new();
+                for row in target_rows {
+                    let mut vals = Vec::with_capacity(config.mappings.len());
+                    for i in 0..config.mappings.len() {
+                        vals.push(row_cell_to_value(&row, i));
+                    }
+                    let pk = value_key(vals.get(pk_idx).unwrap_or(&Value::Null));
+                    target_map.insert(pk, vals);
                 }
 
-                batch.push(format!("({})", vals.join(", ")));
-                if batch.len() >= batch_rows {
+                for row in rows {
+                    let mut src_vals = Vec::with_capacity(config.mappings.len());
+                    for i in 0..config.mappings.len() {
+                        src_vals.push(row_cell_to_value(&row, i));
+                    }
+                    let pk = value_key(src_vals.get(pk_idx).unwrap_or(&Value::Null));
+                    if let Some(tgt_vals) = target_map.get(&pk) {
+                        if *tgt_vals == src_vals {
+                            unchanged_count += 1;
+                            continue;
+                        }
+                        update_count += 1;
+                        let mut sets = Vec::new();
+                        for (i, m) in config.mappings.iter().enumerate() {
+                            if i == pk_idx {
+                                continue;
+                            }
+                            sets.push(format!(
+                                "{} = {}",
+                                quoted_ident(&m.target_col),
+                                value_to_sql(&src_vals[i])
+                            ));
+                        }
+                        out.push_str("UPDATE ");
+                        out.push_str(&target_ident);
+                        out.push_str(" SET ");
+                        out.push_str(&sets.join(", "));
+                        out.push_str(" WHERE ");
+                        out.push_str(&quoted_ident(&config.mappings[pk_idx].target_col));
+                        out.push_str(" = ");
+                        out.push_str(&value_to_sql(&src_vals[pk_idx]));
+                        out.push_str(";\n");
+                    } else {
+                        insert_count += 1;
+                        let vals = src_vals.iter().map(value_to_sql).collect::<Vec<_>>();
+                        out.push_str("INSERT INTO ");
+                        out.push_str(&target_ident);
+                        out.push_str(" (");
+                        out.push_str(&insert_cols.join(", "));
+                        out.push_str(") VALUES (");
+                        out.push_str(&vals.join(", "));
+                        out.push_str(");\n");
+                    }
+                }
+            } else {
+                let mut batch: Vec<String> = Vec::with_capacity(batch_rows);
+                for row in rows {
+                    let mut vals = Vec::new();
+                    for i in 0..config.mappings.len() {
+                        let v = row_cell_to_value(&row, i);
+                        vals.push(value_to_sql(&v));
+                    }
+                    batch.push(format!("({})", vals.join(", ")));
+                    insert_count += 1;
+                    if batch.len() >= batch_rows {
+                        out.push_str("INSERT INTO ");
+                        out.push_str(&target_ident);
+                        out.push_str(" (");
+                        out.push_str(&insert_cols.join(", "));
+                        out.push_str(") VALUES ");
+                        out.push_str(&batch.join(", "));
+                        out.push_str(";\n");
+                        batch.clear();
+                    }
+                }
+                if !batch.is_empty() {
                     out.push_str("INSERT INTO ");
                     out.push_str(&target_ident);
                     out.push_str(" (");
@@ -307,24 +467,16 @@ impl TransferEngine {
                     out.push_str(") VALUES ");
                     out.push_str(&batch.join(", "));
                     out.push_str(";\n");
-                    batch.clear();
                 }
-            }
-
-            if !batch.is_empty() {
-                out.push_str("INSERT INTO ");
-                out.push_str(&target_ident);
-                out.push_str(" (");
-                out.push_str(&insert_cols.join(", "));
-                out.push_str(") VALUES ");
-                out.push_str(&batch.join(", "));
-                out.push_str(";\n");
             }
         }
 
-        // Return generated script for execution by the frontend or execute it here?
-        // The requirements say: "APIs for local transfer and network transfer... Support column mapping and transfer modes".
-        // Let's just return the DML script so the frontend can execute it via the existing execute endpoint, or we execute it directly.
-        Ok(out)
+        Ok(TransferExecuteReport {
+            dml: out,
+            insert_count,
+            update_count,
+            unchanged_count,
+            compare_based,
+        })
     }
 }

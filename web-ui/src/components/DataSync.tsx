@@ -6,6 +6,7 @@ import { useToast } from './Toast';
 import { parseError } from '../utils';
 import type { DataDiff, DataSyncJobStatus, DataSyncStrategy } from '../types';
 import { dbLevelDisplayName, dbTypeDisplayName } from '../utils/dbCapabilities'
+import { tr } from '../i18n';
 
 interface DataSyncProps {
   onCancel: () => void;
@@ -30,6 +31,13 @@ export function DataSync({ onCancel }: DataSyncProps) {
   const [errorObj, setErrorObj] = useState<{ title: string; message: string } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
+  const recordPreview = diffs[0]
+    ? {
+        inserts: (diffs[0].inserts || []).slice(0, 5),
+        updates: (diffs[0].updates || []).slice(0, 5),
+        deletes: (diffs[0].deletes || []).slice(0, 5),
+      }
+    : null;
 
   useEffect(() => {
     const fetchConfig = async () => {
@@ -40,7 +48,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
           setTargetDbId(config.active_db_id);
         }
       } catch (e: any) {
-        toast('Failed to load db connections: ' + e.message, 'error');
+        toast(tr('加载数据库连接失败：', 'Failed to load db connections: ') + e.message, 'error');
       }
     };
     fetchConfig();
@@ -269,7 +277,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
         throw e;
       }
     } catch (e: any) {
-      const msg = e?.error?.message || e?.error_message || e?.message;
+      const msg = e?.response?.data?.message || e?.error?.message || e?.error_message || e?.message;
       if (msg) {
         setErrorObj({ title: 'Compare 作业失败', message: String(msg) });
         toast('对比失败：' + String(msg), 'error');
@@ -345,7 +353,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
         throw e;
       }
     } catch (e: any) {
-      const msg = e?.error?.message || e?.error_message || e?.message;
+      const msg = e?.response?.data?.message || e?.error?.message || e?.error_message || e?.message;
       if (msg) {
         setErrorObj({ title: 'Preview 作业失败', message: String(msg) });
         toast('预览生成失败：' + String(msg), 'error');
@@ -386,14 +394,14 @@ export function DataSync({ onCancel }: DataSyncProps) {
           onCancel();
           return;
         }
-        await api.executeSql(dml);
+        await api.executeSql(dml, true, targetDbId);
         setDeployJob({ job_id: 'inline', phase: 'deploy', status: 'succeeded', progress: 100 });
         toast('部署完成，数据已同步。', 'success');
         onCancel();
         return;
       } catch (e: any) {
         if (isNotFound(e)) {
-          await api.executeSql(dml);
+          await api.executeSql(dml, true, targetDbId);
           setDeployJob({ job_id: 'inline', phase: 'deploy', status: 'succeeded', progress: 100 });
           toast('部署完成，数据已同步。', 'success');
           onCancel();
@@ -402,7 +410,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
         throw e;
       }
     } catch (e: any) {
-      const msg = e?.error?.message || e?.error_message || e?.message;
+      const msg = e?.response?.data?.message || e?.error?.message || e?.error_message || e?.message;
       if (msg) {
         setErrorObj({ title: 'Deploy 作业失败', message: String(msg) });
         toast('部署失败：' + String(msg), 'error');
@@ -429,11 +437,11 @@ export function DataSync({ onCancel }: DataSyncProps) {
   const steps: WizardStep[] = [
     {
       id: 'source',
-      title: '配置 & 对比',
+      title: tr('配置与对比', 'Config & Compare'),
       isValid: !!compareJob && compareJob.status === 'succeeded' && diffs.length > 0,
       content: (
         <div className="flex flex-col gap-4 h-full">
-          <div className="text-sm text-gray-300 font-bold">Step 1：选择源库/目标库与同步策略，然后发起对比</div>
+          <div className="text-sm text-gray-300 font-bold">{tr('步骤 1：选择源库/目标库与同步策略，然后发起对比', 'Step 1: Choose source/target and strategy, then compare')}</div>
           {errorObj && (
             <div className="bg-red-500/10 border border-red-500/30 text-red-200 p-4 rounded-lg">
               <div className="font-bold mb-1">{errorObj.title}</div>
@@ -442,26 +450,26 @@ export function DataSync({ onCancel }: DataSyncProps) {
           )}
           <div className="flex gap-4">
             <div className="flex-1">
-              <label className="block text-xs text-gray-400 mb-1">目标表名</label>
+              <label className="block text-xs text-gray-400 mb-1">{tr('目标表名', 'Target Table')}</label>
               <input
                 value={tableName}
                 onChange={(e) => setTableName(e.target.value)}
                 className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
-                placeholder="e.g. users"
+                placeholder={tr('例如 users', 'e.g. users')}
               />
             </div>
             <div className="flex-1">
-              <label className="block text-xs text-gray-400 mb-1">主键列</label>
+              <label className="block text-xs text-gray-400 mb-1">{tr('主键列', 'Primary Key')}</label>
               <input
                 value={primaryKey}
                 onChange={(e) => setPrimaryKey(e.target.value)}
                 className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
-                placeholder="e.g. id"
+                placeholder={tr('例如 id', 'e.g. id')}
               />
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            <label className="text-sm text-gray-400">同步策略</label>
+            <label className="text-sm text-gray-400">{tr('同步策略', 'Strategy')}</label>
             <div className="flex flex-wrap gap-3">
               <label className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer transition-colors ${strategy === 'mirror' ? 'border-blue-500/60 bg-blue-500/10 text-blue-300' : 'border-[#30363d] bg-[#0d1117] text-gray-300 hover:bg-[#21262d]'}`}>
                 <input
@@ -473,7 +481,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
                   }}
                 />
                 <div className="flex flex-col">
-                  <span className="text-sm font-medium">镜像（Mirror）</span>
+                  <span className="text-sm font-medium">{tr('镜像（同步删除）', 'Mirror (with deletes)')}</span>
                   <span className="text-xs opacity-80">INSERT / UPDATE / DELETE</span>
                 </div>
               </label>
@@ -487,14 +495,14 @@ export function DataSync({ onCancel }: DataSyncProps) {
                   }}
                 />
                 <div className="flex flex-col">
-                  <span className="text-sm font-medium">仅 Upsert</span>
+                  <span className="text-sm font-medium">{tr('仅 Upsert（不删除）', 'Upsert Only (no deletes)')}</span>
                   <span className="text-xs opacity-80">只做 INSERT / UPDATE，不删除</span>
                 </div>
               </label>
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            <label className="text-sm text-gray-400">源库（Source）</label>
+            <label className="text-sm text-gray-400">{tr('源库', 'Source')}</label>
             <select
               value={sourceDbId}
               onChange={(e) => {
@@ -503,7 +511,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
               }}
               className="bg-[#0d1117] border border-[#30363d] rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
-              <option value="">-- Select Source --</option>
+              <option value="">{tr('-- 选择源库 --', '-- Select Source --')}</option>
               {dbConnections.map(conn => (
                 <option key={conn.id} value={conn.id}>
                   {conn.name} ({dbTypeDisplayName(conn.db_type)}/{dbLevelDisplayName(conn.capability_level)}) ({conn.url})
@@ -512,7 +520,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
             </select>
           </div>
           <div className="flex flex-col gap-2">
-            <label className="text-sm text-gray-400">目标库（Target）</label>
+            <label className="text-sm text-gray-400">{tr('目标库', 'Target')}</label>
             <select
               value={targetDbId}
               onChange={(e) => {
@@ -521,7 +529,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
               }}
               className="bg-[#0d1117] border border-[#30363d] rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
-              <option value="">-- Select Target --</option>
+              <option value="">{tr('-- 选择目标库 --', '-- Select Target --')}</option>
               {dbConnections.map(conn => (
                 <option key={conn.id} value={conn.id}>
                   {conn.name} ({dbTypeDisplayName(conn.db_type)}/{dbLevelDisplayName(conn.capability_level)}) ({conn.url})
@@ -529,38 +537,46 @@ export function DataSync({ onCancel }: DataSyncProps) {
               ))}
             </select>
           </div>
-          {renderJobCard(compareJob, 'Compare 作业')}
+          {renderJobCard(compareJob, tr('对比作业', 'Compare Job'))}
           <button
             onClick={async () => {
               if (await handleCompare()) {
-                toast('对比完成，请点击下一步。', 'success');
+                toast(tr('对比完成，请点击下一步。', 'Comparison complete. Click Next.'), 'success');
               }
             }}
             disabled={isLoading}
             className="self-start mt-4 px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white disabled:opacity-50"
           >
-            开始对比（Compare）
+            {tr('开始对比', 'Compare')}
           </button>
         </div>
       )
     },
     {
       id: 'diff',
-      title: '选择 & 预览',
+      title: tr('选择与预览', 'Select & Preview'),
       isValid: !!previewJob && previewJob.status === 'succeeded' && dml.length > 0,
       content: (
         <div className="flex flex-col gap-4 h-full">
-          <div className="text-sm text-gray-300 font-bold">Step 2：选择本次要应用的变更，然后生成预览</div>
+          <div className="text-sm text-gray-300 font-bold">{tr('步骤 2：选择本次要应用的变更，然后生成预览', 'Step 2: Select changes and generate preview')}</div>
           {errorObj && (
             <div className="bg-red-500/10 border border-red-500/30 text-red-200 p-4 rounded-lg">
               <div className="font-bold mb-1">{errorObj.title}</div>
               <div className="text-sm opacity-90 whitespace-pre-wrap">{errorObj.message}</div>
             </div>
           )}
-          {renderJobCard(previewJob, 'Preview 作业')}
+          {renderJobCard(previewJob, tr('预览作业', 'Preview Job'))}
+          {recordPreview && (
+            <div className="text-xs text-gray-500 border border-[#30363d] rounded p-3 bg-[#0d1117]">
+              {tr('记录变更样本：', 'Record change samples:')}
+              <div>{tr(`新增样本 ${recordPreview.inserts.length} 条`, `${recordPreview.inserts.length} insert samples`)}</div>
+              <div>{tr(`修改样本 ${recordPreview.updates.length} 条`, `${recordPreview.updates.length} update samples`)}</div>
+              <div>{tr(`删除样本 ${recordPreview.deletes.length} 条`, `${recordPreview.deletes.length} delete samples`)}</div>
+            </div>
+          )}
           <div className="flex-1 overflow-y-auto bg-[#0d1117] border border-[#30363d] rounded p-4">
             {diffs.length === 0 ? (
-              <div className="text-gray-500 text-sm">暂无对比结果，请返回上一步先执行 Compare。</div>
+              <div className="text-gray-500 text-sm">{tr('暂无对比结果，请返回上一步先执行对比。', 'No compare result, please go back and run compare.')}</div>
             ) : (
               <div className="flex flex-col gap-6">
                 {diffs.map((diff) => (
@@ -578,9 +594,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
                             className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-800"
                           />
                           <span className="text-sm text-gray-300 font-medium w-24">INSERT</span>
-                          <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">
-                            {diff.insert_count} rows
-                          </span>
+                          <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">{tr(`${diff.insert_count} 行`, `${diff.insert_count} rows`)}</span>
                         </label>
                       )}
                       {diff.update_count > 0 && (
@@ -592,9 +606,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
                             className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-800"
                           />
                           <span className="text-sm text-gray-300 font-medium w-24">UPDATE</span>
-                          <span className="text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded">
-                            {diff.update_count} rows
-                          </span>
+                          <span className="text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded">{tr(`${diff.update_count} 行`, `${diff.update_count} rows`)}</span>
                         </label>
                       )}
                       {(diff.delete_count > 0 || strategy === 'upsert_only') && (
@@ -610,16 +622,14 @@ export function DataSync({ onCancel }: DataSyncProps) {
                             className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-gray-800 disabled:opacity-60"
                           />
                           <span className="text-sm text-gray-300 font-medium w-24">DELETE</span>
-                          <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">
-                            {diff.delete_count} rows
-                          </span>
+                          <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">{tr(`${diff.delete_count} 行`, `${diff.delete_count} rows`)}</span>
                           {strategy === 'upsert_only' && (
-                            <span className="text-xs text-gray-500 ml-2">仅 Upsert 策略下不允许删除</span>
+                            <span className="text-xs text-gray-500 ml-2">{tr('仅 Upsert 策略下不允许删除', 'Delete is not allowed in upsert-only mode')}</span>
                           )}
                         </label>
                       )}
                       {diff.insert_count === 0 && diff.update_count === 0 && diff.delete_count === 0 && (
-                        <div className="text-gray-500 text-sm italic">数据已一致，无需同步。</div>
+                        <div className="text-gray-500 text-sm italic">{tr('数据已一致，无需同步。', 'Data is already consistent.')}</div>
                       )}
                     </div>
                   </div>
@@ -630,31 +640,31 @@ export function DataSync({ onCancel }: DataSyncProps) {
           <button
             onClick={async () => {
               if (await handleGenerateDml()) {
-                toast('预览已生成，请点击下一步。', 'success');
+                toast(tr('预览已生成，请点击下一步。', 'Preview generated. Click Next.'), 'success');
               }
             }}
             disabled={Object.values(selections).every(ops => ops.length === 0)}
             className="self-start px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white disabled:opacity-50"
           >
-            生成预览（Preview）
+            {tr('生成预览', 'Generate Preview')}
           </button>
         </div>
       )
     },
     {
       id: 'preview',
-      title: '预览 & 部署',
+      title: tr('预览与部署', 'Preview & Deploy'),
       isValid: dml.length > 0,
       content: (
         <div className="flex flex-col gap-4 h-full">
-          <div className="text-sm text-gray-300 font-bold">Step 3：确认预览 SQL，点击 Execute 发起 Deploy 作业</div>
+          <div className="text-sm text-gray-300 font-bold">{tr('步骤 3：确认预览 SQL，点击执行发起部署作业', 'Step 3: Confirm SQL and execute deploy')}</div>
           {errorObj && (
             <div className="bg-red-500/10 border border-red-500/30 text-red-200 p-4 rounded-lg">
               <div className="font-bold mb-1">{errorObj.title}</div>
               <div className="text-sm opacity-90 whitespace-pre-wrap">{errorObj.message}</div>
             </div>
           )}
-          {renderJobCard(deployJob, 'Deploy 作业')}
+          {renderJobCard(deployJob, tr('部署作业', 'Deploy Job'))}
           <textarea
             readOnly
             value={dml}
@@ -667,11 +677,11 @@ export function DataSync({ onCancel }: DataSyncProps) {
 
   return (
     <StepWizard
-      title="Data Sync"
+      title={tr('数据同步', 'Data Sync')}
       steps={steps}
       onCancel={onCancel}
       onFinish={handleExecute}
-      finalWarningMessage="即将对目标数据库执行 Deploy 作业并应用上述变更。该操作会修改数据且不可撤销，请确认目标库选择无误。"
+      finalWarningMessage={tr('即将对目标数据库执行部署作业并应用上述变更。该操作会修改数据且不可撤销，请确认目标库选择无误。', 'You are about to deploy changes to target database. This action is irreversible.')}
       isLoading={isLoading}
     />
   );

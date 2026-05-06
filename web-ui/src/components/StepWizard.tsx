@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ArrowRight, ArrowLeft, Check, AlertTriangle, X, Loader2 } from 'lucide-react';
+import { tr } from '../i18n';
 
 export interface WizardStep {
   id: string;
@@ -21,7 +22,7 @@ export function StepWizard({
   steps,
   onFinish,
   onCancel,
-  finalWarningMessage = 'Are you sure you want to proceed? This action may modify your database.',
+  finalWarningMessage = tr('确认继续吗？此操作可能修改数据库。', 'Are you sure you want to proceed? This action may modify your database.'),
   title,
   isLoading = false
 }: StepWizardProps) {
@@ -100,9 +101,9 @@ export function StepWizard({
           <div className="mb-6 bg-yellow-500/10 border border-yellow-500/50 text-yellow-200 p-4 rounded-lg flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0 text-yellow-500" />
             <div>
-              <h4 className="font-bold mb-1">Safety Warning</h4>
+              <h4 className="font-bold mb-1">{tr('安全警告', 'Safety Warning')}</h4>
               <p className="text-sm opacity-90">{finalWarningMessage}</p>
-              <p className="text-xs mt-2 opacity-75 italic">Note: This is a deterministic operation and does not involve AI.</p>
+              <p className="text-xs mt-2 opacity-75 italic">{tr('说明：这是确定性操作，不涉及 AI 推理。', 'Note: This is a deterministic operation and does not involve AI.')}</p>
             </div>
           </div>
         )}
@@ -121,7 +122,7 @@ export function StepWizard({
               className="px-4 py-2 rounded border border-[#30363d] hover:bg-[#30363d] text-gray-300 flex items-center gap-2 transition-colors disabled:opacity-50"
             >
               <ArrowLeft className="w-4 h-4" />
-              Previous
+              {tr('上一步', 'Previous')}
             </button>
           )}
         </div>
@@ -133,7 +134,7 @@ export function StepWizard({
               disabled={isFinishing || isLoading}
               className="px-4 py-2 rounded text-gray-400 hover:text-white transition-colors disabled:opacity-50"
             >
-              Cancel
+              {tr('取消', 'Cancel')}
             </button>
           )}
           
@@ -146,11 +147,11 @@ export function StepWizard({
               {isFinishing || isLoading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>{isFinishing ? 'Executing...' : 'Loading...'}</span>
+                  <span>{isFinishing ? tr('执行中...', 'Executing...') : tr('加载中...', 'Loading...')}</span>
                 </>
               ) : (
                 <>
-                  Execute <Check className="w-4 h-4" />
+                  {tr('执行', 'Execute')} <Check className="w-4 h-4" />
                 </>
               )}
             </button>
@@ -163,11 +164,11 @@ export function StepWizard({
               {isLoading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Loading...</span>
+                  <span>{tr('加载中...', 'Loading...')}</span>
                 </>
               ) : (
                 <>
-                  Next <ArrowRight className="w-4 h-4" />
+                  {tr('下一步', 'Next')} <ArrowRight className="w-4 h-4" />
                 </>
               )}
             </button>

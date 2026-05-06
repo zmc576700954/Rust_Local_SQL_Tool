@@ -10,6 +10,11 @@ import { DataSync } from './DataSync';
 import { PerfSync } from './PerfSync';
 import { GoLive } from './GoLive';
 import { DataTransfer } from './DataTransfer';
+import { DbSecurityManager } from './DbSecurityManager';
+import { DbEventsTriggers } from './DbEventsTriggers';
+import { ModelCompare } from './ModelCompare';
+import { VisualSyncWizard } from './VisualSyncWizard';
+import { tr } from '../i18n';
 
 interface WizardModalProps {
   isOpen: boolean;
@@ -272,6 +277,74 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
     );
   }
 
+  if (type === 'db-security') {
+    return (
+      <AnimatePresence>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            className="w-full max-w-5xl h-[85vh]"
+          >
+            <DbSecurityManager onCancel={onClose} />
+          </motion.div>
+        </div>
+      </AnimatePresence>
+    );
+  }
+
+  if (type === 'db-events') {
+    return (
+      <AnimatePresence>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            className="w-full max-w-6xl h-[85vh]"
+          >
+            <DbEventsTriggers onCancel={onClose} />
+          </motion.div>
+        </div>
+      </AnimatePresence>
+    );
+  }
+
+  if (type === 'model-compare') {
+    return (
+      <AnimatePresence>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            className="w-full max-w-6xl h-[85vh]"
+          >
+            <ModelCompare onCancel={onClose} />
+          </motion.div>
+        </div>
+      </AnimatePresence>
+    );
+  }
+
+  if (type === 'visual-sync') {
+    return (
+      <AnimatePresence>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            className="w-full max-w-6xl h-[85vh]"
+          >
+            <VisualSyncWizard onCancel={onClose} />
+          </motion.div>
+        </div>
+      </AnimatePresence>
+    );
+  }
+
   return (
     <AnimatePresence>
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center">
@@ -449,21 +522,21 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                         onClick={() => downloadExportArtifact('data')}
                         disabled={exportJob?.status !== 'completed'}
                       >
-                        Download Data
+                        {tr('下载数据', 'Download Data')}
                       </button>
                       <button
                         className="px-3 py-1 rounded border border-[#30363d] hover:bg-[#30363d]"
                         onClick={() => downloadExportArtifact('manifest')}
                         disabled={exportJob?.status !== 'completed'}
                       >
-                        Download Manifest
+                        {tr('下载清单', 'Download Manifest')}
                       </button>
                       <button
                         className="px-3 py-1 rounded border border-[#30363d] hover:bg-[#30363d] text-red-300"
                         onClick={cancelExportJob}
                         disabled={exportJob?.status !== 'running'}
                       >
-                        Cancel Job
+                        {tr('取消任务', 'Cancel Job')}
                       </button>
                     </div>
                   </div>
@@ -475,7 +548,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                 tableName={payload.tableName} 
                 columns={payload.columns} 
                 onComplete={() => {
-                  toast('Import completed successfully', 'success');
+                  toast(tr('导入成功', 'Import completed successfully'), 'success');
                   onClose();
                 }} 
               />

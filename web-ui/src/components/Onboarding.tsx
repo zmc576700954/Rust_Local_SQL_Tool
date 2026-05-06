@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { Database, Server, CheckCircle2, ChevronRight, Key, FileUp } from 'lucide-react'
 import { api } from '../api'
 import { parseError, type AppError } from '../utils'
+import { tr } from '../i18n'
 
 export function Onboarding({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState(1)
@@ -22,6 +23,31 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
   const [errorObj, setErrorObj] = useState<AppError | null>(null)
   const [parsedConnections, setParsedConnections] = useState<any[]>([])
 
+  type DbTestResponse = {
+    success?: boolean
+    databases?: string[]
+    diagnostic?: {
+      message?: string
+      hint?: string
+      code?: string
+      detail?: string
+    }
+  }
+
+  const getDbTestSolutionByCode = (code?: string, fallback?: string) => {
+    const normalized = String(code || '').toUpperCase()
+    const map: Record<string, string> = {
+      DB_TEST_AUTH_FAILED: tr('请核对数据库用户名密码及账号来源主机权限。', 'Verify DB username/password and account host privilege.'),
+      DB_TEST_NETWORK_FAILED: tr('请检查数据库地址、端口、防火墙和白名单。', 'Check DB host/port, firewall, and whitelist.'),
+      DB_TEST_SSL_FAILED: tr('请调整 SSL 模式并校验证书配置。', 'Adjust SSL mode and verify certificate settings.'),
+      DB_TEST_CONNECT_TIMEOUT: tr('数据库连接超时，请检查网络与安全组策略。', 'Connection timed out, check network and security group rules.'),
+      DB_TEST_SSH_AUTH_FAILED: tr('SSH 认证失败，请检查 SSH 用户名和密码。', 'SSH authentication failed, verify SSH username/password.'),
+      DB_TEST_SSH_CONNECT_FAILED: tr('SSH 网络失败，请检查 SSH 地址端口和网络连通性。', 'SSH network failed, check SSH host/port and connectivity.'),
+      DB_TEST_SSH_CHANNEL_FAILED: tr('SSH 隧道通道创建失败，请检查跳板机到数据库的可达性。', 'SSH channel creation failed, verify bastion-to-DB reachability.'),
+    }
+    return map[normalized] || fallback || tr('请检查连接参数后重试。', 'Please verify connection settings and retry.')
+  }
+
   const handleDbTest = async () => {
     setIsLoading(true)
     setErrorObj(null)
@@ -33,7 +59,18 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
         port: showAdvanced ? port : 3306,
         username: username.trim(),
         password,
-      })
+      }) as DbTestResponse
+      if (res?.success === false) {
+        setErrorObj({
+          title: res?.diagnostic?.code || 'DB Test Failed',
+          message: res?.diagnostic?.message || '连接失败',
+          solution: getDbTestSolutionByCode(
+            res?.diagnostic?.code,
+            res?.diagnostic?.hint || res?.diagnostic?.detail || ''
+          ),
+        })
+        return
+      }
       const list = Array.isArray(res.databases) ? res.databases : []
       if (list.length === 0) {
         setErrorObj({
@@ -168,13 +205,13 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                 <div className="relative p-4 border border-[#30363d] bg-[#0d1117] rounded-xl hover:border-blue-500/50 cursor-pointer transition-colors overflow-hidden group">
                   <Database className="w-6 h-6 text-gray-500 group-hover:text-blue-400 mb-3 transition-colors" />
                   <h3 className="text-white font-medium mb-1">Import from Navicat (.ncx)</h3>
-                  <p className="text-xs text-gray-500">Upload exported connections.</p>
+                  <p className="text-xs text-gray-500">{tr('上传导出的连接配置。', 'Upload exported connections.')}</p>
                   <input 
                     type="file" 
                     accept=".ncx,.xml"
                     onChange={handleFileUpload}
                     className="absolute inset-0 opacity-0 cursor-pointer"
-                    title="Upload Navicat NCX file"
+                    title={tr('上传 Navicat NCX 文件', 'Upload Navicat NCX file')}
                   />
                 </div>
               </div>
@@ -204,7 +241,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                 <div className="mb-4 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg flex items-start gap-2">
                   <div className="text-blue-400 mt-0.5">💡</div>
                   <div className="text-xs text-blue-300/80 leading-relaxed">
-                    初次使用？您可以直接输入数据库地址密码，或者导入 Navicat 的连接配置。若当前无法连接真实库，也可直接点击底部的 <b>"Skip Database"</b> 跳过此步。
+                    初次使用？您可以直接输入数据库地址密码，或者导入 Navicat 的连接配置。若当前无法连接真实库，也可直接点击底部的 <b>{tr('“跳过数据库”', '"Skip Database"')}</b> 跳过此步。
                   </div>
                 </div>
 
@@ -423,7 +460,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
               onClick={() => setStep(1)}
               className="px-5 py-2 text-sm font-medium text-gray-400 hover:text-white transition-colors"
             >
-              Back
+              {tr('上一步', 'Back')}
             </button>
           ) : <div></div>}
           
@@ -437,13 +474,13 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                 }}
                 className="px-5 py-2.5 text-sm font-medium text-gray-300 bg-dark-panel border border-dark-border hover:bg-[#21262d] rounded-lg transition-colors"
               >
-                Skip Database
+                {tr('跳过数据库', 'Skip Database')}
               </button>
               <button 
                 onClick={() => setStep(2)}
                 className="flex items-center gap-2 px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors"
               >
-                Continue <ChevronRight className="w-4 h-4" />
+                {tr('继续', 'Continue')} <ChevronRight className="w-4 h-4" />
               </button>
             </div>
           ) : (
@@ -452,7 +489,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
               disabled={isLoading}
               className="flex items-center gap-2 px-6 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
             >
-              {isLoading ? 'Saving...' : 'Save & Launch'}
+              {isLoading ? tr('保存中...', 'Saving...') : tr('保存并启动', 'Save & Launch')}
               {!isLoading && <CheckCircle2 className="w-4 h-4" />}
             </button>
           )}

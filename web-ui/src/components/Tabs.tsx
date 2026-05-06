@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 export interface TabItem {
   id: string
   title: string
-  type: 'query' | 'table' | 'explain' | 'query-builder' | 'ai-training' | 'go-live-reports' | 'go-live-audit'
+  type: 'query' | 'table' | 'explain' | 'query-builder' | 'ai-training' | 'go-live-reports' | 'go-live-audit' | 'advanced-center'
   payload?: any
 }
 

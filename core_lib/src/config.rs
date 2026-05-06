@@ -269,6 +269,16 @@ pub struct DbConnection {
     pub name: String,
     pub url: String,
     #[serde(default)]
+    pub group_name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub is_favorite: bool,
+    #[serde(default)]
+    pub ssh: Option<serde_json::Value>,
+    #[serde(default)]
+    pub ssl: Option<serde_json::Value>,
+    #[serde(default)]
     pub db_type: Option<DbType>,
     #[serde(default)]
     pub capability_level: Option<DbCapabilityLevel>,
@@ -695,6 +705,11 @@ mod tests {
                 id: "db1".to_string(),
                 name: "db1".to_string(),
                 url: "postgres://u2:p2@127.0.0.1:5432/db".to_string(),
+                group_name: None,
+                color: None,
+                is_favorite: false,
+                ssh: None,
+                ssl: None,
                 db_type: None,
                 capability_level: None,
                 schema: None,
