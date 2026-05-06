@@ -1,0 +1,11 @@
+{
+  "rule_direct_threshold": 0.85,
+  "rule_suggest_threshold": 0.6,
+  "suggest_inject_max_rules": 1,
+  "llm_enabled_when_offline": true,
+  "llm_temperature": 0.1,
+  "llm_max_tokens": 4096,
+  "structured_output_enabled": true,
+  "extractor_pipeline_level": "json_then_markdown_then_sql",
+  "dangerous_sql_policy": "allow_with_force"
+}

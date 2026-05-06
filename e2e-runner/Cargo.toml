@@ -1,0 +1,15 @@
+[package]
+name = "e2e-runner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["chrono"] }
+axum = { workspace = true }
+core_lib = { path = "../core_lib" }
+uuid = { version = "1.23.1", features = ["v4"] }
+chrono = { version = "0.4.44", features = ["serde"] }
+sha2 = "0.10.9"

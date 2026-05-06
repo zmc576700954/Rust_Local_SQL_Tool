@@ -1,0 +1,21 @@
+{
+  "version": "v1",
+  "default_policy_version": "v1",
+  "agents": [
+    {
+      "id": "sql.generate",
+      "version": "v1",
+      "structured_output": true
+    },
+    {
+      "id": "template.extract_params",
+      "version": "v1",
+      "structured_output": true
+    },
+    {
+      "id": "rule.template",
+      "version": "v1",
+      "structured_output": false
+    }
+  ]
+}
