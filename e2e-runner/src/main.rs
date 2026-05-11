@@ -4,11 +4,13 @@ use core_lib::ai::gateway::AiGateway;
 use core_lib::config::{AiConnectionMode, AiProvider, AppConfig};
 use core_lib::db::DbClient;
 use core_lib::mysql_sync::{MySqlDataSyncEngine, SyncMode};
-use core_lib::perf_report::{PerformanceCase, PerformanceMetrics, PerformanceReport, PerformanceStage};
+use core_lib::perf_report::{
+    PerformanceCase, PerformanceMetrics, PerformanceReport, PerformanceStage,
+};
 use serde_json::Value;
 use sha2::Digest;
-use sqlx::{mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use sqlx::Row;
+use sqlx::{mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -167,9 +169,12 @@ async fn write_export_files(
         "format": "json",
         "db": db_tag,
     });
-    tokio::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| e.to_string())?;
+    tokio::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(ExportArtifacts {
         data_path,
@@ -267,7 +272,10 @@ async fn ai_proxy_failure_split_e2e() -> Result<(), String> {
     std::env::remove_var("HTTP_PROXY");
     std::env::remove_var("HTTPS_PROXY");
     let ok = AiGateway::new(config.clone()).health_check().await;
-    ensure(ok.is_ok(), format!("ai health should succeed: {:?}", ok.err()))?;
+    ensure(
+        ok.is_ok(),
+        format!("ai health should succeed: {:?}", ok.err()),
+    )?;
 
     std::env::set_var("HTTP_PROXY", format!("http://{}", proxy_addr));
     let fail = AiGateway::new(config).health_check().await;
@@ -338,7 +346,10 @@ async fn mysql_like_flow(
         .await
         .map_err(|e| e.to_string())?;
     ensure(page.len() == 10, format!("{db_tag} pagination rows != 10"))?;
-    ensure(page[0].0 == 11, format!("{db_tag} pagination first id != 11"))?;
+    ensure(
+        page[0].0 == 11,
+        format!("{db_tag} pagination first id != 11"),
+    )?;
     {
         let mut labels = HashMap::new();
         labels.insert("db".to_string(), db_tag.to_string());
@@ -352,7 +363,11 @@ async fn mysql_like_flow(
             None,
             vec![PerformanceStage {
                 name: "query".to_string(),
-                metrics: PerformanceMetrics::new(t_page.elapsed().as_millis(), Some(page.len() as u64), None),
+                metrics: PerformanceMetrics::new(
+                    t_page.elapsed().as_millis(),
+                    Some(page.len() as u64),
+                    None,
+                ),
             }],
             None,
         );
@@ -428,13 +443,20 @@ async fn mysql_like_flow(
     let _ = export_handle.await;
 
     let artifacts = export_job_poll(&store, &export_job_id).await?;
-    ensure(artifacts.row_count as usize <= spec.window_limit as usize, "export rows exceed window")?;
+    ensure(
+        artifacts.row_count as usize <= spec.window_limit as usize,
+        "export rows exceed window",
+    )?;
 
     let exported_bytes = tokio::fs::read(&artifacts.data_path)
         .await
         .map_err(|e| e.to_string())?;
-    let exported_rows: Vec<Value> = serde_json::from_slice(&exported_bytes).map_err(|e| e.to_string())?;
-    ensure(!exported_rows.is_empty(), "exported rows should not be empty")?;
+    let exported_rows: Vec<Value> =
+        serde_json::from_slice(&exported_bytes).map_err(|e| e.to_string())?;
+    ensure(
+        !exported_rows.is_empty(),
+        "exported rows should not be empty",
+    )?;
     {
         let mut labels = HashMap::new();
         labels.insert("db".to_string(), db_tag.to_string());
@@ -528,7 +550,10 @@ async fn mysql_like_flow(
     });
     let _ = import_handle.await;
     let inserted = import_job_poll(&store, &import_job_id).await?;
-    ensure(inserted as usize == exported_rows.len(), "imported rows mismatch")?;
+    ensure(
+        inserted as usize == exported_rows.len(),
+        "imported rows mismatch",
+    )?;
     {
         let mut labels = HashMap::new();
         labels.insert("db".to_string(), db_tag.to_string());
@@ -552,12 +577,14 @@ async fn mysql_like_flow(
         );
     }
 
-    let imported_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM e2e_items_imported")
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| e.to_string())?;
-    ensure(imported_count.0 as usize == exported_rows.len(), "imported table count mismatch")?;
+    let imported_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM e2e_items_imported")
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    ensure(
+        imported_count.0 as usize == exported_rows.len(),
+        "imported table count mismatch",
+    )?;
     Ok(())
 }
 
@@ -602,14 +629,18 @@ async fn postgres_flow(
     }
 
     let t_page = std::time::Instant::now();
-    let page: Vec<(i64,)> = sqlx::query_as("SELECT id FROM e2e_items ORDER BY id LIMIT $1 OFFSET $2")
-        .bind(10i64)
-        .bind(10i64)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let page: Vec<(i64,)> =
+        sqlx::query_as("SELECT id FROM e2e_items ORDER BY id LIMIT $1 OFFSET $2")
+            .bind(10i64)
+            .bind(10i64)
+            .fetch_all(&pool)
+            .await
+            .map_err(|e| e.to_string())?;
     ensure(page.len() == 10, format!("{db_tag} pagination rows != 10"))?;
-    ensure(page[0].0 == 11, format!("{db_tag} pagination first id != 11"))?;
+    ensure(
+        page[0].0 == 11,
+        format!("{db_tag} pagination first id != 11"),
+    )?;
     {
         let mut labels = HashMap::new();
         labels.insert("db".to_string(), db_tag.to_string());
@@ -623,7 +654,11 @@ async fn postgres_flow(
             None,
             vec![PerformanceStage {
                 name: "query".to_string(),
-                metrics: PerformanceMetrics::new(t_page.elapsed().as_millis(), Some(page.len() as u64), None),
+                metrics: PerformanceMetrics::new(
+                    t_page.elapsed().as_millis(),
+                    Some(page.len() as u64),
+                    None,
+                ),
             }],
             None,
         );
@@ -657,7 +692,9 @@ async fn postgres_flow(
     .collect();
     ensure(!rows.is_empty(), format!("{db_tag} export rows empty"))?;
     {
-        let bytes = serde_json::to_vec(&rows).map(|b| b.len() as u64).unwrap_or(0);
+        let bytes = serde_json::to_vec(&rows)
+            .map(|b| b.len() as u64)
+            .unwrap_or(0);
         let mut labels = HashMap::new();
         labels.insert("db".to_string(), db_tag.to_string());
         labels.insert("format".to_string(), "json".to_string());
@@ -671,7 +708,11 @@ async fn postgres_flow(
             Some(bytes),
             vec![PerformanceStage {
                 name: "export".to_string(),
-                metrics: PerformanceMetrics::new(t_export.elapsed().as_millis(), Some(rows.len() as u64), Some(bytes)),
+                metrics: PerformanceMetrics::new(
+                    t_export.elapsed().as_millis(),
+                    Some(rows.len() as u64),
+                    Some(bytes),
+                ),
             }],
             None,
         );
@@ -727,7 +768,10 @@ async fn sqlite_flow(
         .await
         .map_err(|e| e.to_string())?;
     ensure(page.len() == 10, format!("{db_tag} pagination rows != 10"))?;
-    ensure(page[0].0 == 11, format!("{db_tag} pagination first id != 11"))?;
+    ensure(
+        page[0].0 == 11,
+        format!("{db_tag} pagination first id != 11"),
+    )?;
     {
         let mut labels = HashMap::new();
         labels.insert("db".to_string(), db_tag.to_string());
@@ -741,7 +785,11 @@ async fn sqlite_flow(
             None,
             vec![PerformanceStage {
                 name: "query".to_string(),
-                metrics: PerformanceMetrics::new(t_page.elapsed().as_millis(), Some(page.len() as u64), None),
+                metrics: PerformanceMetrics::new(
+                    t_page.elapsed().as_millis(),
+                    Some(page.len() as u64),
+                    None,
+                ),
             }],
             None,
         );
@@ -775,7 +823,9 @@ async fn sqlite_flow(
     .collect();
     ensure(!rows.is_empty(), format!("{db_tag} export rows empty"))?;
     {
-        let bytes = serde_json::to_vec(&rows).map(|b| b.len() as u64).unwrap_or(0);
+        let bytes = serde_json::to_vec(&rows)
+            .map(|b| b.len() as u64)
+            .unwrap_or(0);
         let mut labels = HashMap::new();
         labels.insert("db".to_string(), db_tag.to_string());
         labels.insert("format".to_string(), "json".to_string());
@@ -789,7 +839,11 @@ async fn sqlite_flow(
             Some(bytes),
             vec![PerformanceStage {
                 name: "export".to_string(),
-                metrics: PerformanceMetrics::new(t_export.elapsed().as_millis(), Some(rows.len() as u64), Some(bytes)),
+                metrics: PerformanceMetrics::new(
+                    t_export.elapsed().as_millis(),
+                    Some(rows.len() as u64),
+                    Some(bytes),
+                ),
             }],
             None,
         );
@@ -869,16 +923,10 @@ async fn mysql_sync_flow(
     let compare_ms = t_compare.elapsed().as_millis();
 
     let t_preview = std::time::Instant::now();
-    let preview = MySqlDataSyncEngine::preview(
-        &source,
-        &target,
-        &compare,
-        SyncMode::Mirror,
-        2000,
-        None,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let preview =
+        MySqlDataSyncEngine::preview(&source, &target, &compare, SyncMode::Mirror, 2000, None)
+            .await
+            .map_err(|e| e.to_string())?;
     let preview_ms = t_preview.elapsed().as_millis();
 
     let t_deploy = std::time::Instant::now();
@@ -892,7 +940,10 @@ async fn mysql_sync_flow(
         .await
         .map_err(|e| e.to_string())?;
     let verify_ms = t_verify.elapsed().as_millis();
-    ensure(verify.different_chunks == 0, "sync verify should have zero diff")?;
+    ensure(
+        verify.different_chunks == 0,
+        "sync verify should have zero diff",
+    )?;
 
     let mut labels = HashMap::new();
     labels.insert("source".to_string(), "mysql".to_string());
@@ -965,15 +1016,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut failures = Vec::new();
     let mut cases: Vec<PerformanceCase> = Vec::new();
 
-    if let Err(e) = mysql_like_flow("mysql", &config.mysql_url, store.clone(), spec.clone(), &mut cases).await {
+    if let Err(e) = mysql_like_flow(
+        "mysql",
+        &config.mysql_url,
+        store.clone(),
+        spec.clone(),
+        &mut cases,
+    )
+    .await
+    {
         failures.push(format!("mysql: {}", e));
     }
-    if let Err(e) =
-        mysql_like_flow("mariadb", &config.mariadb_url, store.clone(), spec.clone(), &mut cases).await
+    if let Err(e) = mysql_like_flow(
+        "mariadb",
+        &config.mariadb_url,
+        store.clone(),
+        spec.clone(),
+        &mut cases,
+    )
+    .await
     {
         failures.push(format!("mariadb: {}", e));
     }
-    if let Err(e) = postgres_flow("postgres", &config.postgres_url, spec.clone(), &mut cases).await {
+    if let Err(e) = postgres_flow("postgres", &config.postgres_url, spec.clone(), &mut cases).await
+    {
         failures.push(format!("postgres: {}", e));
     }
     if let Err(e) = sqlite_flow("sqlite", &config.sqlite_url, spec.clone(), &mut cases).await {

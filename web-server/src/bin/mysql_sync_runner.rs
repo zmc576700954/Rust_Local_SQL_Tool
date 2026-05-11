@@ -31,10 +31,18 @@ fn env_string(name: &str, default: &str) -> String {
 
 fn tier_rows(tier: &str) -> Value {
     match tier {
-        "1m" => json!({"users":1_000_000,"orders":1_000_000,"events":1_000_000,"kv_hotspot":1_000_000,"files":100_000}),
-        "10m" => json!({"users":10_000_000,"orders":10_000_000,"events":10_000_000,"kv_hotspot":10_000_000,"files":1_000_000}),
-        "100m" => json!({"users":100_000_000,"orders":100_000_000,"events":100_000_000,"kv_hotspot":100_000_000,"files":10_000_000}),
-        _ => json!({"users":1_000_000,"orders":1_000_000,"events":1_000_000,"kv_hotspot":1_000_000,"files":100_000}),
+        "1m" => {
+            json!({"users":1_000_000,"orders":1_000_000,"events":1_000_000,"kv_hotspot":1_000_000,"files":100_000})
+        }
+        "10m" => {
+            json!({"users":10_000_000,"orders":10_000_000,"events":10_000_000,"kv_hotspot":10_000_000,"files":1_000_000})
+        }
+        "100m" => {
+            json!({"users":100_000_000,"orders":100_000_000,"events":100_000_000,"kv_hotspot":100_000_000,"files":10_000_000})
+        }
+        _ => {
+            json!({"users":1_000_000,"orders":1_000_000,"events":1_000_000,"kv_hotspot":1_000_000,"files":100_000})
+        }
     }
 }
 
@@ -46,8 +54,16 @@ fn parse_mode(s: &str) -> SyncMode {
     }
 }
 
-async fn poll_job(http: &Client, base: &str, job_id: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let url = format!("{}/backend/tools/data-sync/jobs/{}", base.trim_end_matches('/'), job_id);
+async fn poll_job(
+    http: &Client,
+    base: &str,
+    job_id: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let url = format!(
+        "{}/backend/tools/data-sync/jobs/{}",
+        base.trim_end_matches('/'),
+        job_id
+    );
     loop {
         let resp = http.get(&url).send().await?;
         let status = resp.status();
@@ -83,7 +99,10 @@ async fn http_sync_table(
     max_rows: usize,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let t0 = Instant::now();
-    let compare_url = format!("{}/backend/tools/data-sync/compare", base.trim_end_matches('/'));
+    let compare_url = format!(
+        "{}/backend/tools/data-sync/compare",
+        base.trim_end_matches('/')
+    );
     let compare_resp = http
         .post(&compare_url)
         .json(&json!({
@@ -106,7 +125,10 @@ async fn http_sync_table(
     let compare_ms = t0.elapsed().as_millis();
 
     let t1 = Instant::now();
-    let preview_url = format!("{}/backend/tools/data-sync/preview", base.trim_end_matches('/'));
+    let preview_url = format!(
+        "{}/backend/tools/data-sync/preview",
+        base.trim_end_matches('/')
+    );
     let actions: Vec<&str> = if mode == "upsert_only" {
         vec!["insert", "update"]
     } else {
@@ -126,7 +148,10 @@ async fn http_sync_table(
     let preview_ms = t1.elapsed().as_millis();
 
     let t2 = Instant::now();
-    let deploy_url = format!("{}/backend/tools/data-sync/deploy", base.trim_end_matches('/'));
+    let deploy_url = format!(
+        "{}/backend/tools/data-sync/deploy",
+        base.trim_end_matches('/')
+    );
     let deploy_resp = http
         .post(&deploy_url)
         .json(&json!({ "job_id": job_id }))
@@ -161,12 +186,14 @@ async fn engine_sync_table(
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let mode_label = format!("{:?}", mode).to_lowercase();
     let t0 = Instant::now();
-    let compare = MySqlDataSyncEngine::compare(source, target, table, primary_key, chunk_size).await?;
+    let compare =
+        MySqlDataSyncEngine::compare(source, target, table, primary_key, chunk_size).await?;
     let compare_ms = t0.elapsed().as_millis();
 
     let t1 = Instant::now();
     let preview =
-        MySqlDataSyncEngine::preview(source, target, &compare, mode.clone(), max_rows, None).await?;
+        MySqlDataSyncEngine::preview(source, target, &compare, mode.clone(), max_rows, None)
+            .await?;
     let preview_ms = t1.elapsed().as_millis();
 
     let t2 = Instant::now();
@@ -194,7 +221,8 @@ async fn engine_verify_mirror_zero_diff(
     chunk_size: usize,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let t0 = Instant::now();
-    let compare = MySqlDataSyncEngine::compare(source, target, table, primary_key, chunk_size).await?;
+    let compare =
+        MySqlDataSyncEngine::compare(source, target, table, primary_key, chunk_size).await?;
     Ok(json!({
         "table": table,
         "different_chunks": compare.different_chunks,
@@ -316,7 +344,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             report_engine.push(engine_res);
 
             if mode == "mirror" {
-                let v = engine_verify_mirror_zero_diff(&source, &target, table, pk, chunk_size).await?;
+                let v =
+                    engine_verify_mirror_zero_diff(&source, &target, table, pk, chunk_size).await?;
                 verify.push(v);
             }
         }

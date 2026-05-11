@@ -35,7 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connect_ms = t0.elapsed().as_millis();
 
     let t1 = Instant::now();
-    let compare = MySqlDataSyncEngine::compare(&source, &target, &table, &primary_key, chunk_size).await?;
+    let compare =
+        MySqlDataSyncEngine::compare(&source, &target, &table, &primary_key, chunk_size).await?;
     let compare_ms = t1.elapsed().as_millis();
 
     let t2 = Instant::now();

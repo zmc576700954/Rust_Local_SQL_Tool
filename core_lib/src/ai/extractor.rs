@@ -6,6 +6,12 @@ pub struct StructuredSqlIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     pub explanation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql_empty_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_information: Vec<String>,
 }
 
 /// Pipeline extractor for SQL intent.
@@ -20,9 +26,12 @@ pub fn extract_sql_intent(response_text: &str) -> StructuredSqlIntent {
             sql: String::new(),
             command: None,
             explanation: Some(
-                "AI 返回为空或被截断，无法解析 SQL。建议：检查 API Key/代理/限流，或降低 tier/max_tokens 后重试。"
+                "AI response was empty; no SQL could be extracted. Check API key, relay, rate limits, or tier/max_tokens and retry."
                     .to_string(),
             ),
+            task_type: None,
+            sql_empty_reason: None,
+            missing_information: Vec::new(),
         };
     }
 
@@ -39,21 +48,51 @@ pub fn extract_sql_intent(response_text: &str) -> StructuredSqlIntent {
 
     // Level 3: Fallback raw SQL extraction
     let sql_str = extract_code_block(text, "sql");
+    let accepted_sql = if looks_like_sql_or_command(&sql_str) {
+        sql_str
+    } else {
+        String::new()
+    };
     StructuredSqlIntent {
-        sql: sql_str,
+        sql: accepted_sql.clone(),
         command: None,
-        explanation: Some(diagnose_fallback(text)),
+        explanation: Some(diagnose_fallback(text, !accepted_sql.is_empty())),
+        task_type: None,
+        sql_empty_reason: None,
+        missing_information: Vec::new(),
     }
 }
 
 fn parse_intent_json(text: &str) -> Option<StructuredSqlIntent> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let sql = v.get("sql").and_then(|x| x.as_str()).unwrap_or_default();
-    let command = v.get("command").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let command = v
+        .get("command")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
     let explanation = v
         .get("explanation")
         .and_then(|x| x.as_str())
         .map(|s| s.to_string());
+    let task_type = v
+        .get("task_type")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let sql_empty_reason = v
+        .get("sql_empty_reason")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+    let missing_information = v
+        .get("missing_information")
+        .and_then(|x| x.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     let mut sql_final = sql.to_string();
     if sql_final.trim().is_empty() {
@@ -70,19 +109,75 @@ fn parse_intent_json(text: &str) -> Option<StructuredSqlIntent> {
         sql: sql_final,
         command,
         explanation,
+        task_type,
+        sql_empty_reason,
+        missing_information,
     })
 }
 
-fn diagnose_fallback(raw: &str) -> String {
+fn looks_like_sql_or_command(candidate: &str) -> bool {
+    let token = candidate
+        .trim_start()
+        .trim_start_matches('(')
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .to_ascii_uppercase();
+
+    matches!(
+        token.as_str(),
+        "SELECT"
+            | "WITH"
+            | "INSERT"
+            | "UPDATE"
+            | "DELETE"
+            | "SHOW"
+            | "DESCRIBE"
+            | "DESC"
+            | "EXPLAIN"
+            | "CREATE"
+            | "ALTER"
+            | "DROP"
+            | "TRUNCATE"
+            | "REPLACE"
+            | "CALL"
+            | "USE"
+            | "SET"
+            | "GRANT"
+            | "REVOKE"
+            | "BEGIN"
+            | "COMMIT"
+            | "ROLLBACK"
+            | "GET"
+            | "SETEX"
+            | "DEL"
+            | "KEYS"
+            | "SCAN"
+            | "HGET"
+            | "HGETALL"
+            | "HSET"
+            | "LRANGE"
+            | "SMEMBERS"
+            | "ZRANGE"
+    )
+}
+
+fn diagnose_fallback(raw: &str, accepted_sql: bool) -> String {
     let preview = raw.chars().take(160).collect::<String>();
-    if raw.contains("```json") && !raw.contains("```") {
+    if !accepted_sql {
         format!(
-            "AI 返回 JSON 可能被截断，已尝试回退提取 SQL。返回预览：{}。建议：降低 max_tokens 或重试。",
+            "AI returned non-JSON content that did not resemble SQL or a supported command. Response preview: {}. Suggestion: tighten the prompt or retry with JSON mode.",
+            preview
+        )
+    } else if raw.contains("```json") && !raw.contains("```") {
+        format!(
+            "AI returned a truncated JSON block; falling back to SQL extraction. Response preview: {}. Suggestion: reduce max_tokens or retry.",
             preview
         )
     } else {
         format!(
-            "AI 返回非 JSON，已尝试回退提取 SQL。返回预览：{}。建议：切换 provider/model 或关闭 JSON 模式重试。",
+            "AI returned non-JSON content; falling back to SQL extraction. Response preview: {}. Suggestion: switch provider/model or retry without JSON mode.",
             preview
         )
     }
@@ -174,14 +269,27 @@ mod tests {
     fn extract_sql_intent_handles_empty() {
         let intent = extract_sql_intent("   ");
         assert!(intent.sql.is_empty());
-        assert!(intent.explanation.unwrap_or_default().contains("为空"));
+        assert!(intent.explanation.unwrap_or_default().contains("empty"));
+        assert_eq!(intent.task_type, None);
+        assert_eq!(intent.sql_empty_reason, None);
+        assert!(intent.missing_information.is_empty());
     }
 
     #[test]
     fn extract_sql_intent_handles_non_json_and_provides_diagnostic() {
         let intent = extract_sql_intent("Here is the query:\n```sql\nSELECT 1;\n```");
         assert_eq!(intent.sql, "SELECT 1;");
-        assert!(intent.explanation.unwrap_or_default().contains("回退"));
+        assert!(intent.explanation.unwrap_or_default().contains("falling back"));
+    }
+
+    #[test]
+    fn extract_sql_intent_rejects_non_sql_chatter_fallback() {
+        let intent = extract_sql_intent("Here is a detailed explanation of the query and why it works.");
+        assert!(intent.sql.is_empty());
+        assert!(intent
+            .explanation
+            .unwrap_or_default()
+            .contains("did not resemble SQL"));
     }
 
     #[test]
@@ -189,5 +297,29 @@ mod tests {
         let intent = extract_sql_intent("{\"command\":\"GET k\",\"explanation\":\"x\"}");
         assert_eq!(intent.sql, "GET k");
         assert_eq!(intent.explanation.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn extract_sql_intent_ignores_additional_prompt_fields() {
+        let intent = extract_sql_intent(
+            "{\"task_type\":\"generate_sql\",\"sql\":\"SELECT 1;\",\"explanation\":\"ok\",\"sql_empty_reason\":\"\",\"missing_information\":[],\"grounding_evidence\":[\"dual\"]}",
+        );
+        assert_eq!(intent.sql, "SELECT 1;");
+        assert_eq!(intent.explanation.as_deref(), Some("ok"));
+        assert_eq!(intent.task_type.as_deref(), Some("generate_sql"));
+        assert_eq!(intent.sql_empty_reason, None);
+        assert!(intent.missing_information.is_empty());
+    }
+
+    #[test]
+    fn extract_sql_intent_parses_empty_sql_metadata() {
+        let intent = extract_sql_intent(
+            "{\"task_type\":\"ask_clarification\",\"sql\":\"\",\"explanation\":\"Need date range\",\"sql_empty_reason\":\"missing_filter\",\"missing_information\":[\"date_range\",\"metric\"]}",
+        );
+        assert!(intent.sql.is_empty());
+        assert_eq!(intent.explanation.as_deref(), Some("Need date range"));
+        assert_eq!(intent.task_type.as_deref(), Some("ask_clarification"));
+        assert_eq!(intent.sql_empty_reason.as_deref(), Some("missing_filter"));
+        assert_eq!(intent.missing_information, vec!["date_range", "metric"]);
     }
 }

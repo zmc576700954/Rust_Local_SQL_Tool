@@ -19,6 +19,6 @@ pub mod schema_ext;
 pub mod sql_history;
 pub mod sync;
 pub mod template;
+pub mod timeout_policy;
 pub mod tools;
 pub mod transfer;
-pub mod timeout_policy;

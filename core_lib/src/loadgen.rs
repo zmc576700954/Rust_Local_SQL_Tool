@@ -350,8 +350,9 @@ async fn bulk_insert_orders(
     let mut i = 0u64;
     while i < rows {
         let n = (rows - i).min(batch);
-        let mut sql =
-            String::from("INSERT INTO orders (id,user_id,amount,note,created_at,updated_at) VALUES ");
+        let mut sql = String::from(
+            "INSERT INTO orders (id,user_id,amount,note,created_at,updated_at) VALUES ",
+        );
         for j in 0..n {
             let id = start_id + i + j;
             let user_id = 1 + (rng.range(0, max_user_id.max(1)) as i64);
@@ -457,7 +458,10 @@ async fn bulk_insert_kv(
             if j > 0 {
                 sql.push(',');
             }
-            sql.push_str(&format!("({}, {}, '{}', '{}', '{}')", id, tenant_id, k, v, updated_at));
+            sql.push_str(&format!(
+                "({}, {}, '{}', '{}', '{}')",
+                id, tenant_id, k, v, updated_at
+            ));
         }
         exec(db, &sql).await?;
         i += n;
@@ -537,7 +541,11 @@ async fn diverge_target_mirror(target: &DbClient, tier: LoadgenTier) -> Result<(
     )
     .await?;
 
-    exec(target, "UPDATE files SET updated_at = NOW() WHERE id % 17 = 0").await?;
+    exec(
+        target,
+        "UPDATE files SET updated_at = NOW() WHERE id % 17 = 0",
+    )
+    .await?;
     Ok(())
 }
 
@@ -570,7 +578,11 @@ async fn diverge_target_upsert_only(target: &DbClient, tier: LoadgenTier) -> Res
     )
     .await?;
 
-    exec(target, "UPDATE files SET updated_at = NOW() WHERE id % 17 = 0").await?;
+    exec(
+        target,
+        "UPDATE files SET updated_at = NOW() WHERE id % 17 = 0",
+    )
+    .await?;
     Ok(())
 }
 

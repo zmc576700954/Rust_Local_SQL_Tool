@@ -25,6 +25,14 @@ pub struct SqlHistory {
     pub status: String, // "success", "error"
     pub execution_time_ms: u64,
     pub executed_at: i64,
+    #[serde(default)]
+    pub db_id: Option<String>,
+    #[serde(default)]
+    pub row_count: Option<u64>,
+    #[serde(default)]
+    pub affected_rows: Option<u64>,
+    #[serde(default)]
+    pub statement_kind: Option<String>,
 }
 
 fn default_id() -> String {

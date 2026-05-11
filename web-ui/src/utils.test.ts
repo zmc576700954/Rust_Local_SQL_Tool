@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { parseError, redactSensitiveText } from './utils'
 import { getErrorMessage } from './utils/ErrorDictionary'
+
+vi.mock('./i18n', () => ({
+  getLocale: () => 'zh',
+}))
 
 describe('parseError', () => {
   it('maps Network Error to backend connectivity message', () => {

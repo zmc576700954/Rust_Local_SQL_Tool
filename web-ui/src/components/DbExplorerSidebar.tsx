@@ -35,6 +35,10 @@ type DbTestDiagnostic = {
 type DbTestResponse = {
   success?: boolean
   databases?: string[]
+  capabilities_probed?: boolean
+  capabilities_ok?: boolean | null
+  stage?: string
+  server_version?: string | null
   diagnostic?: DbTestDiagnostic
 }
 
@@ -81,6 +85,13 @@ function getDbTestAdvice(code?: string, category?: string) {
       actions: [
         tr('检查账号权限（SHOW DATABASES）。', 'Check account permission for SHOW DATABASES.'),
         tr('如开启代理层，请检查代理对元数据语句的限制。', 'If using proxy layer, verify metadata statement restrictions.'),
+      ],
+    },
+    DB_TEST_CAPABILITY_PROBE_FAILED: {
+      title: tr('Capability probe incomplete', 'Capability probe incomplete'),
+      actions: [
+        tr('The connection itself succeeded; you can save it first and probe database visibility later.', 'The connection itself succeeded; you can save it first and probe database visibility later.'),
+        tr('If you need the database list, check SHOW DATABASES permission, proxy restrictions, or instance load.', 'If you need the database list, check SHOW DATABASES permission, proxy restrictions, or instance load.'),
       ],
     },
     DB_TEST_INVALID_URL: {
@@ -205,6 +216,7 @@ export function DbExplorerSidebar({
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [filter, setFilter] = useState('')
+  const [tableFilters, setTableFilters] = useState<Record<string, string>>({})
   const [showAdd, setShowAdd] = useState(false)
   const [draftName, setDraftName] = useState('')
   const [draftUrl, setDraftUrl] = useState('')
@@ -265,6 +277,22 @@ export function DbExplorerSidebar({
       setLoadingSchemaByDb((prev) => ({ ...prev, [dbId]: false }))
     }
   }, [loadingSchemaByDb, schemaByDb])
+
+  const setExpandedState = useCallback((dbId: string, nextExpanded: boolean) => {
+    setExpanded((prev) => ({ ...prev, [dbId]: nextExpanded }))
+    if (nextExpanded) {
+      loadSchemaByDbId(dbId)
+    }
+  }, [loadSchemaByDbId])
+
+  const handleConnectionClick = useCallback((dbId: string, isActive: boolean, isExpanded: boolean) => {
+    if (isActive) {
+      setExpandedState(dbId, !isExpanded)
+      return
+    }
+    onSwitchActiveDb(dbId)
+    setExpandedState(dbId, true)
+  }, [onSwitchActiveDb, setExpandedState])
 
   const filteredConnections = useMemo(() => {
     const q = filter.trim().toLowerCase()
@@ -350,18 +378,38 @@ export function DbExplorerSidebar({
           status: res.diagnostic?.status || 'error',
           category: res.diagnostic?.category || 'unknown',
           code: res.diagnostic?.code || 'DB_TEST_FAILED',
-          message: res.diagnostic?.message || tr('连接失败', 'Connection failed'),
+          message: res.diagnostic?.message || 'Connection failed',
           hint: res.diagnostic?.hint,
           detail: res.diagnostic?.detail,
         })
         return
       }
-      const count = Array.isArray(res?.databases) ? res.databases.length : 0
+      if (res?.capabilities_probed) {
+        if (res?.capabilities_ok === true) {
+          const count = Array.isArray(res?.databases) ? res.databases.length : 0
+          setTestConnectionResult({
+            status: 'success',
+            category: 'success',
+            code: 'DB_TEST_OK',
+            message: `Connection successful, found ${count} databases.`,
+          })
+        } else {
+          setTestConnectionResult({
+            status: res.diagnostic?.status || 'warning',
+            category: res.diagnostic?.category || 'query',
+            code: res.diagnostic?.code || 'DB_TEST_CAPABILITY_PROBE_FAILED',
+            message: res.diagnostic?.message || 'Connection successful, but capability probe did not complete.',
+            hint: res.diagnostic?.hint,
+            detail: res.diagnostic?.detail,
+          })
+        }
+        return
+      }
       setTestConnectionResult({
         status: 'success',
         category: 'success',
         code: 'DB_TEST_OK',
-        message: tr(`连接成功，发现 ${count} 个数据库。`, `Connection successful, found ${count} databases.`),
+        message: res.diagnostic?.message || 'Connection successful.',
       })
     } catch (e: any) {
       const data = e?.response?.data || {}
@@ -369,13 +417,13 @@ export function DbExplorerSidebar({
         status: 'error',
         category: String(data?.type || 'unknown'),
         code: String(data?.code || 'DB_TEST_REQUEST_FAILED'),
-        message: String(data?.message || data?.error || e?.message || tr('连接失败', 'Connection failed')),
+        message: String(data?.message || data?.error || e?.message || 'Connection failed'),
         detail: String(data?.details || ''),
       })
     } finally {
       setIsTestingConnection(false)
     }
-  }, [editUrl, editSshEnabled, editSslEnabled, editSslMode, tr])
+  }, [editUrl, editSshEnabled, editSshHost, editSshPassword, editSshPort, editSshUser, editSslEnabled, editSslMode])
 
   const testConnectionAdvice = useMemo(() => {
     if (!testConnectionResult) return null
@@ -402,18 +450,38 @@ export function DbExplorerSidebar({
           status: res.diagnostic?.status || 'error',
           category: res.diagnostic?.category || 'unknown',
           code: res.diagnostic?.code || 'DB_TEST_FAILED',
-          message: res.diagnostic?.message || tr('连接失败', 'Connection failed'),
+          message: res.diagnostic?.message || 'Connection failed',
           hint: res.diagnostic?.hint,
           detail: res.diagnostic?.detail,
         })
         return
       }
-      const count = Array.isArray(res?.databases) ? res.databases.length : 0
+      if (res?.capabilities_probed) {
+        if (res?.capabilities_ok === true) {
+          const count = Array.isArray(res?.databases) ? res.databases.length : 0
+          setTestConnectionResult({
+            status: 'success',
+            category: 'success',
+            code: 'DB_TEST_OK',
+            message: `Connection successful, found ${count} databases.`,
+          })
+        } else {
+          setTestConnectionResult({
+            status: res.diagnostic?.status || 'warning',
+            category: res.diagnostic?.category || 'query',
+            code: res.diagnostic?.code || 'DB_TEST_CAPABILITY_PROBE_FAILED',
+            message: res.diagnostic?.message || 'Connection successful, but capability probe did not complete.',
+            hint: res.diagnostic?.hint,
+            detail: res.diagnostic?.detail,
+          })
+        }
+        return
+      }
       setTestConnectionResult({
         status: 'success',
         category: 'success',
         code: 'DB_TEST_OK',
-        message: tr(`连接成功，发现 ${count} 个数据库。`, `Connection successful, found ${count} databases.`),
+        message: res.diagnostic?.message || 'Connection successful.',
       })
     } catch (e: any) {
       const data = e?.response?.data || {}
@@ -421,13 +489,13 @@ export function DbExplorerSidebar({
         status: 'error',
         category: String(data?.type || 'unknown'),
         code: String(data?.code || 'DB_TEST_REQUEST_FAILED'),
-        message: String(data?.message || data?.error || e?.message || tr('连接失败', 'Connection failed')),
+        message: String(data?.message || data?.error || e?.message || 'Connection failed'),
         detail: String(data?.details || ''),
       })
     } finally {
       setIsTestingConnection(false)
     }
-  }, [editUrl, editSshEnabled, editSshHost, editSshPort, editSshUser, editSshPassword, tr])
+  }, [editUrl, editSshEnabled, editSshHost, editSshPassword, editSshPort, editSshUser])
 
   const copyDiagnostic = useCallback(async () => {
     if (!testConnectionResult) return
@@ -667,6 +735,14 @@ export function DbExplorerSidebar({
             const isExpanded = !!expanded[c.id]
             const dbSchema = schemaByDb[c.id]
             const dbName = dbSchema?.db_name || (isActive ? activeDbName : extractDbName(c.url))
+            const tableFilter = (tableFilters[c.id] || '').trim().toLowerCase()
+            const visibleTables = (dbSchema?.tables || []).filter((t) =>
+              !tableFilter || t.table_name.toLowerCase().includes(tableFilter)
+            )
+            const visibleViews = (dbSchema?.views || []).filter((v: any) => {
+              const viewName = String(v.table_name || v.view_name || '')
+              return !tableFilter || viewName.toLowerCase().includes(tableFilter)
+            })
             return (
               <div key={c.id} className="mb-1">
                 <div
@@ -679,7 +755,7 @@ export function DbExplorerSidebar({
                     setDragConnId(null)
                     setDragOverGroup(null)
                   }}
-                  onClick={() => onSwitchActiveDb(c.id)}
+                  onClick={() => handleConnectionClick(c.id, isActive, isExpanded)}
                   onContextMenu={(e) => {
                     e.preventDefault()
                     setConnMenu({ x: e.clientX, y: e.clientY, conn: c })
@@ -704,10 +780,7 @@ export function DbExplorerSidebar({
                     onClick={(e) => {
                       e.stopPropagation()
                       const nextExpanded = !isExpanded
-                      setExpanded((p) => ({ ...p, [c.id]: nextExpanded }))
-                      if (nextExpanded) {
-                        loadSchemaByDbId(c.id)
-                      }
+                      setExpandedState(c.id, nextExpanded)
                     }}
                     className="w-5 h-5 flex items-center justify-center text-gray-500 hover:text-gray-200"
                     title={isExpanded ? tr('折叠', 'Collapse') : tr('展开', 'Expand')}
@@ -782,11 +855,21 @@ export function DbExplorerSidebar({
                           <Database className="w-4 h-4 text-gray-400" />
                           <span className="text-sm truncate" title={dbName || tr('(未知数据库)', '(unknown db)')}>{dbName || tr('(未知数据库)', '(unknown db)')}</span>
                         </div>
+                        <div className="mt-2 px-2">
+                          <input
+                            value={tableFilters[c.id] || ''}
+                            onChange={(e) => setTableFilters((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                            placeholder={tr('筛选表 / 视图...', 'Filter tables / views...')}
+                            className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 placeholder:text-gray-600 outline-none focus:border-blue-500/50"
+                          />
+                        </div>
                         <div className="mt-1">
                           <div className="px-2 py-1 text-[10px] text-gray-500 uppercase font-bold tracking-wider flex items-center justify-between">
-                            <span>{tr(`表 (${dbSchema?.tables?.length || 0})`, `Tables (${dbSchema?.tables?.length || 0})`)}</span>
+                            <span>{tr(`表 (${visibleTables.length}/${dbSchema?.tables?.length || 0})`, `Tables (${visibleTables.length}/${dbSchema?.tables?.length || 0})`)}</span>
                           </div>
-                          {dbSchema?.tables?.map((t) => (
+                          {visibleTables.length === 0 ? (
+                            <div className="px-2 py-2 text-xs text-gray-600">{tr('无匹配表', 'No matching tables')}</div>
+                          ) : visibleTables.map((t) => (
                             <div
                               key={t.table_name}
                               className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors duration-150 group hover:bg-[#21262d] text-gray-300"
@@ -805,6 +888,16 @@ export function DbExplorerSidebar({
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation()
+                                  onOpenTable(c.id, String((c as any).name || c.id), t.table_name)
+                                }}
+                                className="p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all"
+                                title={tr('打开表数据', 'Open table data')}
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation()
                                   onInsertTableName(t.table_name)
                                 }}
                                 className="opacity-0 group-hover:opacity-100 p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all"
@@ -818,17 +911,43 @@ export function DbExplorerSidebar({
 
                         <div className="mt-3">
                           <div className="px-2 py-1 text-[10px] text-gray-500 uppercase font-bold tracking-wider flex items-center justify-between">
-                            <span>{tr(`视图 (${dbSchema?.views?.length || 0})`, `Views (${dbSchema?.views?.length || 0})`)}</span>
+                            <span>{tr(`视图 (${visibleViews.length}/${dbSchema?.views?.length || 0})`, `Views (${visibleViews.length}/${dbSchema?.views?.length || 0})`)}</span>
                           </div>
-                          {dbSchema?.views?.map((v: any) => (
-                            <div
-                              key={v.table_name || v.view_name}
-                              className="flex items-center gap-2 px-2 py-1.5 rounded text-gray-400 hover:bg-[#21262d] transition-colors cursor-default"
-                            >
-                              <Eye className="w-4 h-4" />
-                              <span className="text-sm truncate" title={String(v.table_name || v.view_name)}>{String(v.table_name || v.view_name)}</span>
-                            </div>
-                          ))}
+                          {visibleViews.length === 0 ? (
+                            <div className="px-2 py-2 text-xs text-gray-600">{tr('无匹配视图', 'No matching views')}</div>
+                          ) : visibleViews.map((v: any) => {
+                            const viewName = String(v.table_name || v.view_name)
+                            return (
+                              <div
+                                key={viewName}
+                                className="flex items-center gap-2 px-2 py-1.5 rounded text-gray-400 hover:bg-[#21262d] transition-colors cursor-pointer group"
+                                onDoubleClick={() => onOpenTable(c.id, String((c as any).name || c.id), viewName)}
+                              >
+                                <Eye className="w-4 h-4" />
+                                <span className="text-sm truncate flex-1" title={viewName}>{viewName}</span>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    onOpenTable(c.id, String((c as any).name || c.id), viewName)
+                                  }}
+                                  className="p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all"
+                                  title={tr('打开视图数据', 'Open view data')}
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    onInsertTableName(viewName)
+                                  }}
+                                  className="p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all"
+                                  title={tr('插入视图名到编辑器', 'Insert view name into editor')}
+                                >
+                                  <AlignLeft className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )
+                          })}
                         </div>
                       </>
                     )}

@@ -51,7 +51,10 @@ pub trait UnifiedQueryEngine: Send + Sync {
 pub trait UnifiedMetadataProvider: Send + Sync {
     fn db_type(&self) -> DbType;
     fn list_databases<'a>(&'a self) -> BoxFuture<'a, Result<Vec<String>, AppError>>;
-    fn list_tables<'a>(&'a self, database: &str) -> BoxFuture<'a, Result<Vec<UnifiedTableRef>, AppError>>;
+    fn list_tables<'a>(
+        &'a self,
+        database: &str,
+    ) -> BoxFuture<'a, Result<Vec<UnifiedTableRef>, AppError>>;
     fn get_table_schema<'a>(
         &'a self,
         table: UnifiedTableRef,
@@ -104,7 +107,10 @@ impl UnifiedMetadataProvider for PlaceholderDbAdapter {
         Box::pin(async move { Err(AppError::InternalError("Not implemented".to_string())) })
     }
 
-    fn list_tables<'a>(&'a self, _database: &str) -> BoxFuture<'a, Result<Vec<UnifiedTableRef>, AppError>> {
+    fn list_tables<'a>(
+        &'a self,
+        _database: &str,
+    ) -> BoxFuture<'a, Result<Vec<UnifiedTableRef>, AppError>> {
         Box::pin(async move { Err(AppError::InternalError("Not implemented".to_string())) })
     }
 
@@ -136,4 +142,3 @@ impl UnifiedImportExport for PlaceholderDbAdapter {
         Box::pin(async move { Err(AppError::InternalError("Not implemented".to_string())) })
     }
 }
-

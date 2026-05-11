@@ -12,7 +12,9 @@ pub struct DbCapabilities {
 
 pub fn capability_level(db_type: &DbType) -> DbCapabilityLevel {
     match db_type {
-        DbType::MySQL | DbType::MariaDB | DbType::PostgreSQL | DbType::SQLite => DbCapabilityLevel::A,
+        DbType::MySQL | DbType::MariaDB | DbType::PostgreSQL | DbType::SQLite => {
+            DbCapabilityLevel::A
+        }
         DbType::SQLServer | DbType::Oracle => DbCapabilityLevel::B,
         DbType::MongoDB => DbCapabilityLevel::C,
         DbType::Redis => DbCapabilityLevel::D,

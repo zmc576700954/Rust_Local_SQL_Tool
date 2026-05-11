@@ -1,5 +1,6 @@
 use crate::db::{DbClient, DbError};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexInfo {
@@ -91,6 +92,43 @@ impl SchemaExtractor {
         Ok(result)
     }
 
+    /// Fetches all indexes for all tables in a specific database schema
+    pub async fn get_indexes_map(
+        client: &DbClient,
+        db_name: &str,
+    ) -> Result<HashMap<String, Vec<IndexInfo>>, DbError> {
+        let query = r#"
+            SELECT 
+                TABLE_NAME as table_name,
+                INDEX_NAME as index_name, 
+                COLUMN_NAME as column_name, 
+                NON_UNIQUE as non_unique, 
+                INDEX_TYPE as index_type 
+            FROM information_schema.STATISTICS 
+            WHERE TABLE_SCHEMA = ?
+            ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(db_name)
+            .fetch_all(&client.pool)
+            .await?;
+
+        let mut result: HashMap<String, Vec<IndexInfo>> = HashMap::new();
+        use sqlx::Row;
+        for row in rows {
+            let table_name = row.try_get::<String, _>("table_name")?;
+            result.entry(table_name).or_default().push(IndexInfo {
+                index_name: row.try_get::<String, _>("index_name")?,
+                column_name: row.try_get::<String, _>("column_name")?,
+                non_unique: row.try_get::<i64, _>("non_unique").unwrap_or(1) != 0,
+                index_type: row.try_get::<String, _>("index_type")?,
+            });
+        }
+
+        Ok(result)
+    }
+
     /// Fetches all foreign keys for a specific table
     pub async fn get_foreign_keys(
         client: &DbClient,
@@ -124,6 +162,51 @@ impl SchemaExtractor {
         use sqlx::Row;
         for row in fks {
             result.push(ForeignKeyInfo {
+                constraint_name: row.try_get::<String, _>("constraint_name")?,
+                column_name: row.try_get::<String, _>("column_name")?,
+                referenced_table_name: row.try_get::<String, _>("referenced_table_name")?,
+                referenced_column_name: row.try_get::<String, _>("referenced_column_name")?,
+                update_rule: row.try_get::<String, _>("update_rule")?,
+                delete_rule: row.try_get::<String, _>("delete_rule")?,
+            });
+        }
+
+        Ok(result)
+    }
+
+    /// Fetches all foreign keys for all tables in a specific database schema
+    pub async fn get_foreign_keys_map(
+        client: &DbClient,
+        db_name: &str,
+    ) -> Result<HashMap<String, Vec<ForeignKeyInfo>>, DbError> {
+        let query = r#"
+            SELECT 
+                kcu.TABLE_NAME as table_name,
+                kcu.CONSTRAINT_NAME as constraint_name,
+                kcu.COLUMN_NAME as column_name,
+                kcu.REFERENCED_TABLE_NAME as referenced_table_name,
+                kcu.REFERENCED_COLUMN_NAME as referenced_column_name,
+                rc.UPDATE_RULE as update_rule,
+                rc.DELETE_RULE as delete_rule
+            FROM information_schema.KEY_COLUMN_USAGE kcu
+            JOIN information_schema.REFERENTIAL_CONSTRAINTS rc 
+              ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME 
+              AND kcu.CONSTRAINT_SCHEMA = rc.CONSTRAINT_SCHEMA
+            WHERE kcu.TABLE_SCHEMA = ? 
+              AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(db_name)
+            .fetch_all(&client.pool)
+            .await?;
+
+        let mut result: HashMap<String, Vec<ForeignKeyInfo>> = HashMap::new();
+        use sqlx::Row;
+        for row in rows {
+            let table_name = row.try_get::<String, _>("table_name")?;
+            result.entry(table_name).or_default().push(ForeignKeyInfo {
                 constraint_name: row.try_get::<String, _>("constraint_name")?,
                 column_name: row.try_get::<String, _>("column_name")?,
                 referenced_table_name: row.try_get::<String, _>("referenced_table_name")?,

@@ -98,7 +98,11 @@ impl IntoResponse for AppError {
                 StatusCode::BAD_REQUEST,
                 "ERR_SQL_SYNTAX",
                 "validation",
-                if zh { "SQL 语法无效" } else { "SQL syntax is invalid" },
+                if zh {
+                    "SQL 语法无效"
+                } else {
+                    "SQL syntax is invalid"
+                },
                 msg.clone(),
             ),
             AppError::AiAgentTimeout(msg) => (
@@ -116,35 +120,55 @@ impl IntoResponse for AppError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "ERR_AI_RATE_LIMITED",
                 "rate_limit",
-                if zh { "AI 服务触发限流" } else { "AI rate limited" },
+                if zh {
+                    "AI 服务触发限流"
+                } else {
+                    "AI rate limited"
+                },
                 msg.clone(),
             ),
             AppError::AiAuth(msg) => (
                 StatusCode::UNAUTHORIZED,
                 "ERR_AI_AUTH",
                 "auth",
-                if zh { "AI 鉴权失败" } else { "AI authentication failed" },
+                if zh {
+                    "AI 鉴权失败"
+                } else {
+                    "AI authentication failed"
+                },
                 msg.clone(),
             ),
             AppError::AiForbidden(msg) => (
                 StatusCode::FORBIDDEN,
                 "ERR_AI_FORBIDDEN",
                 "auth",
-                if zh { "AI 访问被拒绝" } else { "AI access forbidden" },
+                if zh {
+                    "AI 访问被拒绝"
+                } else {
+                    "AI access forbidden"
+                },
                 msg.clone(),
             ),
             AppError::AiModelNotFound(msg) => (
                 StatusCode::NOT_FOUND,
                 "ERR_AI_MODEL_NOT_FOUND",
                 "not_found",
-                if zh { "AI 模型不存在" } else { "AI model not found" },
+                if zh {
+                    "AI 模型不存在"
+                } else {
+                    "AI model not found"
+                },
                 msg.clone(),
             ),
             AppError::AiProxy(msg) => (
                 StatusCode::BAD_GATEWAY,
                 "ERR_AI_PROXY",
                 "proxy",
-                if zh { "AI 代理错误" } else { "AI proxy error" },
+                if zh {
+                    "AI 代理错误"
+                } else {
+                    "AI proxy error"
+                },
                 msg.clone(),
             ),
             AppError::ExternalServiceUnavailable(msg) => (
@@ -162,77 +186,121 @@ impl IntoResponse for AppError {
                 StatusCode::NOT_FOUND,
                 "ERR_NOT_FOUND",
                 "not_found",
-                if zh { "资源不存在" } else { "Resource not found" },
+                if zh {
+                    "资源不存在"
+                } else {
+                    "Resource not found"
+                },
                 msg.clone(),
             ),
             AppError::Unauthorized(msg) => (
                 StatusCode::UNAUTHORIZED,
                 "ERR_UNAUTHORIZED",
                 "auth",
-                if zh { "未授权访问" } else { "Unauthorized access" },
+                if zh {
+                    "未授权访问"
+                } else {
+                    "Unauthorized access"
+                },
                 msg.clone(),
             ),
             AppError::BadRequest(msg) => (
                 StatusCode::BAD_REQUEST,
                 "ERR_BAD_REQUEST",
                 "validation",
-                if zh { "请求参数错误" } else { "Bad request parameters" },
+                if zh {
+                    "请求参数错误"
+                } else {
+                    "Bad request parameters"
+                },
                 msg.clone(),
             ),
             AppError::PayloadTooLarge(msg) => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "ERR_PAYLOAD_TOO_LARGE",
                 "resource_limit",
-                if zh { "请求体过大" } else { "Payload too large" },
+                if zh {
+                    "请求体过大"
+                } else {
+                    "Payload too large"
+                },
                 msg.clone(),
             ),
             AppError::ResourceLimit(msg) => (
                 StatusCode::INSUFFICIENT_STORAGE,
                 "ERR_RESOURCE_LIMIT",
                 "resource_limit",
-                if zh { "资源限制触发" } else { "Resource limit exceeded" },
+                if zh {
+                    "资源限制触发"
+                } else {
+                    "Resource limit exceeded"
+                },
                 msg.clone(),
             ),
             AppError::TooManyRequests(msg) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "ERR_CONCURRENCY_LIMIT",
                 "resource_limit",
-                if zh { "请求过多" } else { "Too many requests" },
+                if zh {
+                    "请求过多"
+                } else {
+                    "Too many requests"
+                },
                 msg.clone(),
             ),
             AppError::ParseError(msg) => (
                 StatusCode::BAD_REQUEST,
                 "ERR_PARSE",
                 "validation",
-                if zh { "解析数据失败" } else { "Failed to parse data" },
+                if zh {
+                    "解析数据失败"
+                } else {
+                    "Failed to parse data"
+                },
                 msg.clone(),
             ),
             AppError::Forbidden(msg) => (
                 StatusCode::FORBIDDEN,
                 "ERR_FORBIDDEN",
                 "auth",
-                if zh { "访问被拒绝" } else { "Access forbidden" },
+                if zh {
+                    "访问被拒绝"
+                } else {
+                    "Access forbidden"
+                },
                 msg.clone(),
             ),
             AppError::Timeout(msg) => (
                 StatusCode::GATEWAY_TIMEOUT,
                 "ERR_TIMEOUT",
                 "timeout",
-                if zh { "请求超时" } else { "Request timeout" },
+                if zh {
+                    "请求超时"
+                } else {
+                    "Request timeout"
+                },
                 msg.clone(),
             ),
             AppError::Canceled(msg) => (
                 StatusCode::CONFLICT,
                 "ERR_CANCELED",
                 "canceled",
-                if zh { "请求已取消" } else { "Request canceled" },
+                if zh {
+                    "请求已取消"
+                } else {
+                    "Request canceled"
+                },
                 msg.clone(),
             ),
             AppError::InternalError(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ERR_INTERNAL",
                 "internal",
-                if zh { "服务器内部错误" } else { "Internal server error" },
+                if zh {
+                    "服务器内部错误"
+                } else {
+                    "Internal server error"
+                },
                 msg.clone(),
             ),
         };
@@ -279,9 +347,7 @@ fn redact_sensitive(input: &str) -> String {
         let idx = search_start + rel_idx;
         let start = idx + "Bearer ".len();
         let end = out[start..]
-            .find(|c: char| {
-                c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ')' | ';')
-            })
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ')' | ';'))
             .map(|i| start + i)
             .unwrap_or(out.len());
         out.replace_range(start..end, "******");
@@ -327,7 +393,9 @@ fn redact_kv_like(input: &str, key: &str) -> String {
             continue;
         }
         let val_end = out[val_start..]
-            .find(|c: char| c.is_whitespace() || c == ',' || c == '&' || c == ')' || c == ';' || c == '"')
+            .find(|c: char| {
+                c.is_whitespace() || c == ',' || c == '&' || c == ')' || c == ';' || c == '"'
+            })
             .map(|i| val_start + i)
             .unwrap_or(out.len());
         out.replace_range(val_start..val_end, "******");

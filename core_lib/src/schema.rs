@@ -2,6 +2,7 @@ use crate::db::{DbClient, DbError};
 use crate::schema_ext::{IndexInfo, ViewInfo};
 pub struct SchemaExtractor;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableInfo {
@@ -97,6 +98,55 @@ impl SchemaExtractor {
         use sqlx::Row;
         for row in columns {
             result.push(ColumnInfo {
+                column_name: row.try_get::<String, _>("column_name")?,
+                data_type: row.try_get::<String, _>("data_type")?,
+                column_type: row.try_get::<String, _>("column_type")?,
+                is_nullable: row.try_get::<String, _>("is_nullable")?,
+                column_comment: row
+                    .try_get::<Option<String>, _>("column_comment")
+                    .unwrap_or_default(),
+                column_key: row.try_get::<String, _>("column_key")?,
+                column_default: row
+                    .try_get::<Option<String>, _>("column_default")
+                    .unwrap_or_default(),
+                extra: row.try_get::<String, _>("extra")?,
+            });
+        }
+
+        Ok(result)
+    }
+
+    /// Fetches all columns for all tables in a specific database schema
+    pub async fn get_columns_map(
+        client: &DbClient,
+        db_name: &str,
+    ) -> Result<HashMap<String, Vec<ColumnInfo>>, DbError> {
+        let query = r#"
+            SELECT 
+                TABLE_NAME as table_name,
+                COLUMN_NAME as column_name, 
+                DATA_TYPE as data_type, 
+                COLUMN_TYPE as column_type,
+                IS_NULLABLE as is_nullable, 
+                COLUMN_COMMENT as column_comment, 
+                COLUMN_KEY as column_key,
+                COLUMN_DEFAULT as column_default,
+                EXTRA as extra
+            FROM information_schema.COLUMNS 
+            WHERE TABLE_SCHEMA = ? 
+            ORDER BY TABLE_NAME, ORDINAL_POSITION
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(db_name)
+            .fetch_all(&client.pool)
+            .await?;
+
+        let mut result: HashMap<String, Vec<ColumnInfo>> = HashMap::new();
+        use sqlx::Row;
+        for row in rows {
+            let table_name = row.try_get::<String, _>("table_name")?;
+            result.entry(table_name).or_default().push(ColumnInfo {
                 column_name: row.try_get::<String, _>("column_name")?,
                 data_type: row.try_get::<String, _>("data_type")?,
                 column_type: row.try_get::<String, _>("column_type")?,

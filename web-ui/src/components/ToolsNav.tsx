@@ -1,4 +1,4 @@
-import { Layers, RefreshCw, MoveRight, MousePointerSquareDashed, BrainCircuit, HeartPulse, Rocket, FileText, ShieldCheck, Users, Bell, LayoutGrid } from 'lucide-react';
+import { Layers, RefreshCw, MoveRight, MousePointerSquareDashed, BrainCircuit, HeartPulse, Rocket, FileText, ShieldCheck, Users, Bell, LayoutGrid, Gauge } from 'lucide-react';
 import { tr } from '../i18n';
 
 interface ToolsNavProps {
@@ -10,6 +10,7 @@ export function ToolsNav({ onSelectTool }: ToolsNavProps) {
     { id: 'advanced-center', name: '高级工具中心', icon: LayoutGrid },
     { id: 'query-builder', name: '可视化查询', icon: MousePointerSquareDashed },
     { id: 'ai-training', name: 'AI 训练面板', icon: BrainCircuit },
+    { id: 'perf-diagnostics', name: 'Perf Diagnostics', icon: Gauge },
     { id: 'schema-sync', name: '结构同步', icon: Layers },
     { id: 'data-sync', name: '数据同步', icon: RefreshCw },
     { id: 'perf-sync', name: '同步压测', icon: HeartPulse },

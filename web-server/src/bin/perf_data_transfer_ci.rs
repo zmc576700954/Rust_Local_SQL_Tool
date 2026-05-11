@@ -1,4 +1,6 @@
-use core_lib::perf_report::{PerformanceCase, PerformanceMetrics, PerformanceReport, PerformanceStage};
+use core_lib::perf_report::{
+    PerformanceCase, PerformanceMetrics, PerformanceReport, PerformanceStage,
+};
 use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -98,7 +100,10 @@ async fn upload_csv(
     base: &str,
     csv_bytes: Vec<u8>,
 ) -> Result<(String, u128), AnyError> {
-    let url = format!("{}/backend/tools/data-transfer/upload", base.trim_end_matches('/'));
+    let url = format!(
+        "{}/backend/tools/data-transfer/upload",
+        base.trim_end_matches('/')
+    );
     let t0 = std::time::Instant::now();
     let part = Part::bytes(csv_bytes).file_name("load.csv");
     let form = Form::new()
@@ -129,7 +134,10 @@ async fn transfer_execute(
     target_table: &str,
     cols: usize,
 ) -> Result<(String, u128), AnyError> {
-    let url = format!("{}/backend/tools/data-transfer/execute", base.trim_end_matches('/'));
+    let url = format!(
+        "{}/backend/tools/data-transfer/execute",
+        base.trim_end_matches('/')
+    );
     let mappings: Vec<Value> = (0..cols.max(1))
         .map(|i| {
             let c = format!("c{}", i + 1);
@@ -154,7 +162,11 @@ async fn transfer_execute(
     if !status.is_success() {
         return Err(format!("transfer_execute failed: {}", v).into());
     }
-    let dml = v.get("dml").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let dml = v
+        .get("dml")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     if dml.is_empty() {
         return Err(format!("transfer_execute missing dml: {}", v).into());
     }
@@ -166,7 +178,10 @@ async fn import_sql_start(
     base: &str,
     sql: String,
 ) -> Result<(String, u128), AnyError> {
-    let url = format!("{}/backend/tools/jobs/import-sql/start", base.trim_end_matches('/'));
+    let url = format!(
+        "{}/backend/tools/jobs/import-sql/start",
+        base.trim_end_matches('/')
+    );
     let t0 = std::time::Instant::now();
     let resp = http
         .post(&url)
@@ -178,7 +193,11 @@ async fn import_sql_start(
     if !status.is_success() {
         return Err(format!("import_sql_start failed: {}", v).into());
     }
-    let job_id = v.get("job_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let job_id = v
+        .get("job_id")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     if job_id.is_empty() {
         return Err(format!("import_sql_start missing job_id: {}", v).into());
     }
@@ -186,7 +205,11 @@ async fn import_sql_start(
 }
 
 async fn poll_job(http: &Client, base: &str, job_id: &str) -> Result<(Value, u128), AnyError> {
-    let url = format!("{}/backend/tools/jobs/{}", base.trim_end_matches('/'), job_id);
+    let url = format!(
+        "{}/backend/tools/jobs/{}",
+        base.trim_end_matches('/'),
+        job_id
+    );
     let t0 = std::time::Instant::now();
     loop {
         let resp = http.get(&url).send().await?;
@@ -271,7 +294,8 @@ async fn main() -> Result<(), AnyError> {
             let csv = build_csv(csv_rows, csv_cols);
             let bytes = csv.len() as u64;
             let (source_path, upload_ms) = upload_csv(&http, &base, csv).await?;
-            let (dml, execute_ms) = transfer_execute(&http, &base, source_path, &target_table, csv_cols).await?;
+            let (dml, execute_ms) =
+                transfer_execute(&http, &base, source_path, &target_table, csv_cols).await?;
             let (start_ms, poll_ms, done) = if run_import {
                 let (job_id, start_ms) = import_sql_start(&http, &base, dml).await?;
                 let (done, poll_ms) = poll_job(&http, &base, &job_id).await?;
@@ -279,9 +303,9 @@ async fn main() -> Result<(), AnyError> {
             } else {
                 (0, 0, json!({ "status": "skipped" }))
             };
-            Ok::<(u128, u128, u128, u128, u64, Value), AnyError>(
-                (upload_ms, execute_ms, start_ms, poll_ms, bytes, done),
-            )
+            Ok::<(u128, u128, u128, u128, u64, Value), AnyError>((
+                upload_ms, execute_ms, start_ms, poll_ms, bytes, done,
+            ))
         }));
     }
 

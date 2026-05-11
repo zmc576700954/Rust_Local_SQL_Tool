@@ -258,7 +258,12 @@ impl TransferEngine {
                 let mapping_idx: Vec<(String, Option<usize>)> = config
                     .mappings
                     .iter()
-                    .map(|m| (m.target_col.clone(), header_to_idx.get(&m.source_col).copied()))
+                    .map(|m| {
+                        (
+                            m.target_col.clone(),
+                            header_to_idx.get(&m.source_col).copied(),
+                        )
+                    })
                     .collect();
 
                 let insert_cols: Vec<String> = mapping_idx

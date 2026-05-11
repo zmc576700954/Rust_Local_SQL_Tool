@@ -1,10 +1,11 @@
 use crate::ai::extractor::extract_code_block;
 use crate::ai::gateway::{AiError, AiGateway, ChatMessage};
 use crate::ai::policy_store::Policy;
+use crate::ai::prompting::{build_sql_generation_system_prompt, build_user_request_message};
 use crate::db::DbClient;
 use crate::rule_engine::{RuleStore, RuleType};
 use crate::rule_matcher::{MatchResult, SemanticMatcher};
-use crate::schema::{SchemaExtractor, SchemaResponse};
+use crate::schema::{SchemaExtractor, SchemaResponse, TableWithDetails};
 use crate::template::{extract_placeholders, render_template};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +14,9 @@ use serde_json::Value;
 pub struct IntentResult {
     pub sql: String,
     pub explanation: Option<String>,
+    pub task_type: Option<String>,
+    pub sql_empty_reason: Option<String>,
+    pub missing_information: Vec<String>,
     pub matched_rule_id: Option<String>,
 }
 
@@ -137,9 +141,12 @@ Return JSON object only.",
                         return Some(IntentResult {
                             sql: rule.sql_template,
                             explanation: Some(format!(
-                                "💡 0 Token Local Cache Hit (Rule: {})",
+                                "Local Cache Hit (Rule: {})",
                                 rule.prompt_pattern
                             )),
+                            task_type: Some("generate_sql".to_string()),
+                            sql_empty_reason: None,
+                            missing_information: Vec::new(),
                             matched_rule_id: Some(rule.id.clone()),
                         });
                     }
@@ -159,9 +166,12 @@ Return JSON object only.",
                             return Some(IntentResult {
                                 sql,
                                 explanation: Some(format!(
-                                    "💡 Template Rule Filled (Rule: {})",
+                                    "Template Rule Filled (Rule: {})",
                                     rule.prompt_pattern
                                 )),
+                                task_type: Some("generate_sql".to_string()),
+                                sql_empty_reason: None,
+                                missing_information: Vec::new(),
                                 matched_rule_id: Some(rule.id.clone()),
                             });
                         }
@@ -176,9 +186,12 @@ Return JSON object only.",
                     return Some(IntentResult {
                         sql: rule.sql_template,
                         explanation: Some(format!(
-                            "💡 Template Rule Fallback (Rule: {})",
+                            "Template Rule Fallback (Rule: {})",
                             rule.prompt_pattern
                         )),
+                        task_type: Some("generate_sql".to_string()),
+                        sql_empty_reason: None,
+                        missing_information: Vec::new(),
                         matched_rule_id: Some(rule.id.clone()),
                     });
                 }
@@ -186,9 +199,12 @@ Return JSON object only.",
                 Some(IntentResult {
                     sql: rule.sql_template,
                     explanation: Some(format!(
-                        "💡 0 Token Local Cache Hit (Rule: {})",
+                        "Local Cache Hit (Rule: {})",
                         rule.prompt_pattern
                     )),
+                    task_type: Some("generate_sql".to_string()),
+                    sql_empty_reason: None,
+                    missing_information: Vec::new(),
                     matched_rule_id: Some(rule.id.clone()),
                 })
             }
@@ -204,34 +220,22 @@ Return JSON object only.",
         store: &RuleStore,
         policy: &Policy,
         db_type: &str,
+        chat_history: Option<&[Value]>,
     ) -> Result<IntentResult, AiError> {
         if let Some(r) = self.try_rule_fast_path(user_input, store, policy).await {
             return Ok(r);
         }
 
-        let mut system_prompt = format!(
-            "You are a local AI SQL assistant. You must generate valid {} SQL statements based on the user's natural language request.\n\n\
-            Available Schema (Offline Mode):\n\
-            Database: {}\n",
+        let extra_guidance = suggestion_guidance(user_input, store, policy);
+        let system_prompt = build_sql_generation_system_prompt(
             db_type,
-            virtual_schema.db_name
-        );
-
-        for t in &virtual_schema.tables {
-            system_prompt.push_str(&format!("- Table: {}\n", t.table_name));
-            for c in &t.columns {
-                system_prompt.push_str(&format!(
-                    "  - {}: {} ({})\n",
-                    c.column_name, c.data_type, c.is_nullable
-                ));
-            }
-        }
-
-        system_prompt.push_str(
-            &format!("\nImportant Rules:\n\
-            1. You MUST output your response ONLY as a JSON object with two keys: 'sql' containing the valid {} statement, and 'explanation' containing a brief 1-sentence reasoning in Chinese.\n\
-            2. Do not wrap it in markdown blocks, just return the raw JSON.\n\
-            3. Use standard {} syntax.", db_type, db_type)
+            user_input,
+            Some(virtual_schema),
+            &[],
+            chat_history,
+            None,
+            None,
+            extra_guidance.as_deref(),
         );
 
         let messages = vec![
@@ -241,7 +245,7 @@ Return JSON object only.",
             },
             ChatMessage {
                 role: "user".into(),
-                content: user_input.to_string(),
+                content: build_user_request_message(user_input),
             },
         ];
 
@@ -256,7 +260,10 @@ Return JSON object only.",
             sql: intent.sql,
             explanation: intent
                 .explanation
-                .or(Some("💡 Generated using offline schema".to_string())),
+                .or(Some("Generated using offline schema".to_string())),
+            task_type: intent.task_type,
+            sql_empty_reason: intent.sql_empty_reason,
+            missing_information: intent.missing_information,
             matched_rule_id: None,
         })
     }
@@ -267,17 +274,23 @@ Return JSON object only.",
         store: &RuleStore,
         policy: &Policy,
         db_type: &str,
+        chat_history: Option<&[Value]>,
     ) -> Result<IntentResult, AiError> {
         if let Some(r) = self.try_rule_fast_path(user_input, store, policy).await {
             return Ok(r);
         }
 
-        let system_prompt = format!("You are a local AI SQL assistant. You must generate valid {} SQL statements based on the user's natural language request.\n\
-\n\
-Important Rules:\n\
-1. You MUST output your response ONLY as a JSON object with two keys: 'sql' containing the valid {} statement, and 'explanation' containing a brief 1-sentence reasoning in Chinese.\n\
-2. Do not wrap it in markdown blocks, just return the raw JSON.\n\
-3. Use standard {} syntax.", db_type, db_type, db_type);
+        let extra_guidance = suggestion_guidance(user_input, store, policy);
+        let system_prompt = build_sql_generation_system_prompt(
+            db_type,
+            user_input,
+            None,
+            &[],
+            chat_history,
+            None,
+            None,
+            extra_guidance.as_deref(),
+        );
 
         let messages = vec![
             ChatMessage {
@@ -286,7 +299,7 @@ Important Rules:\n\
             },
             ChatMessage {
                 role: "user".into(),
-                content: user_input.to_string(),
+                content: build_user_request_message(user_input),
             },
         ];
 
@@ -302,7 +315,10 @@ Important Rules:\n\
             sql: intent.sql,
             explanation: intent
                 .explanation
-                .or(Some("💡 Generated without schema context".to_string())),
+                .or(Some("Generated without schema context".to_string())),
+            task_type: intent.task_type,
+            sql_empty_reason: intent.sql_empty_reason,
+            missing_information: intent.missing_information,
             matched_rule_id: None,
         })
     }
@@ -319,73 +335,45 @@ Important Rules:\n\
         store: &RuleStore,
         policy: &Policy,
         db_type: &str,
+        chat_history: Option<&[Value]>,
     ) -> Result<IntentResult, AiError> {
         if let Some(r) = self.try_rule_fast_path(user_input, store, policy).await {
             return Ok(r);
         }
 
-        let match_result = SemanticMatcher::find_best_match_with_thresholds(
-            user_input,
-            store,
-            policy.rule_direct_threshold,
-            policy.rule_suggest_threshold,
-        );
-
-        let mut system_prompt = if let MatchResult::SuggestionMatch { rule, confidence } =
-            match_result
-        {
-            tracing::info!(
-                "Rule Suggested ({:?}, conf: {:.2}): {}",
-                rule.rule_type,
-                confidence,
-                rule.prompt_pattern
-            );
-            format!(
-                "You are a local AI SQL assistant. You must generate valid {} SQL statements based on the user's natural language request.\n\
-                \n\
-                💡 HINT: The user's request is very similar to a known rule: \"{}\".\n\
-                Here is the base SQL for that rule. Please use it as a starting point and modify it to match the user's new conditions:\n\
-                ```sql\n\
-                {}\n\
-                ```\n\n",
-                db_type, rule.prompt_pattern, rule.sql_template
-            )
-        } else {
-            format!("You are a local AI SQL assistant. You must generate valid {} SQL statements based on the user's natural language request.\n\n", db_type)
-        };
+        let extra_guidance = suggestion_guidance(user_input, store, policy);
 
         // Step 2: Extract schema context if needed
-        let mut schema_context = String::new();
+        let mut schema = SchemaResponse {
+            db_name: db_name.to_string(),
+            tables: Vec::new(),
+            views: Vec::new(),
+        };
         if let Ok(tables) = SchemaExtractor::get_tables(db_client, db_name).await {
             for table in tables {
-                schema_context.push_str(&format!("Table: {}\n", table.table_name));
                 if let Ok(columns) =
                     SchemaExtractor::get_columns(db_client, db_name, &table.table_name).await
                 {
-                    for col in columns {
-                        schema_context.push_str(&format!(
-                            "  - {} ({}): {}\n",
-                            col.column_name,
-                            col.data_type,
-                            col.column_comment.unwrap_or_default()
-                        ));
-                    }
+                    schema.tables.push(TableWithDetails {
+                        table_name: table.table_name,
+                        columns,
+                        indexes: Vec::new(),
+                        foreign_keys: Vec::new(),
+                    });
                 }
             }
         }
 
-        // Step 3: Build system prompt
-        system_prompt.push_str(&format!(
-            "Available Schema:\n\
-            {}\n\
-            \n\
-            Important Rules:\n\
-            1. You MUST output your response ONLY as a JSON object with two keys: 'sql' containing the valid {} statement, and 'explanation' containing a brief 1-sentence reasoning in Chinese.\n\
-            2. Do not wrap it in markdown blocks, just return the raw JSON.\n\
-            3. If the user asks for data modification (INSERT/UPDATE/DELETE), ensure it's safe.\n\
-            4. Use standard {} syntax.",
-            schema_context, db_type, db_type
-        ));
+        let system_prompt = build_sql_generation_system_prompt(
+            db_type,
+            user_input,
+            Some(&schema),
+            &[],
+            chat_history,
+            None,
+            None,
+            extra_guidance.as_deref(),
+        );
 
         let messages = vec![
             ChatMessage {
@@ -394,7 +382,7 @@ Important Rules:\n\
             },
             ChatMessage {
                 role: "user".into(),
-                content: user_input.into(),
+                content: build_user_request_message(user_input),
             },
         ];
 
@@ -411,7 +399,34 @@ Important Rules:\n\
         Ok(IntentResult {
             sql: intent.sql,
             explanation: intent.explanation,
+            task_type: intent.task_type,
+            sql_empty_reason: intent.sql_empty_reason,
+            missing_information: intent.missing_information,
             matched_rule_id: None,
         })
     }
+}
+
+fn suggestion_guidance(user_input: &str, store: &RuleStore, policy: &Policy) -> Option<String> {
+    let match_result = SemanticMatcher::find_best_match_with_thresholds(
+        user_input,
+        store,
+        policy.rule_direct_threshold,
+        policy.rule_suggest_threshold,
+    );
+
+    if let MatchResult::SuggestionMatch { rule, confidence } = match_result {
+        tracing::info!(
+            "Rule Suggested ({:?}, conf: {:.2}): {}",
+            rule.rule_type,
+            confidence,
+            rule.prompt_pattern
+        );
+        return Some(format!(
+            "A similar successful rule exists. Use it as a semantic hint, not as a blind template.\nKeep the user's requested metric, filters, time window, grouping, ordering, and row granularity aligned with the current request.\nReuse tables and predicates from the reference only when they are grounded by the current schema context.\nKnown rule prompt: {}\nReference SQL:\n{}",
+            rule.prompt_pattern, rule.sql_template
+        ));
+    }
+
+    None
 }

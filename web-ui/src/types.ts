@@ -60,11 +60,74 @@ export interface SchemaResponse {
 }
 
 export interface QueryExecutionResult {
-  columns: string[];
+  columns?: string[];
   rows: any[];
   execution_time_ms?: number;
-  row_count: number;
+  row_count?: number;
   affected_rows?: number;
+  has_more?: boolean;
+  next_offset?: number | null;
+  chunk_offset?: number;
+  chunk_size?: number;
+  preview_cap?: number | null;
+  truncated?: boolean;
+  source_sql?: string;
+  statement_index?: number;
+  statement_label?: string;
+  statement_kind?: string;
+  status?: 'success' | 'error' | 'canceled';
+  error?: {
+    title: string;
+    message: string;
+    solution: string;
+  } | null;
+}
+
+export interface QueryResultCompareSummary {
+  baseline_row_count: number;
+  current_row_count: number;
+  added_count: number;
+  removed_count: number;
+  unchanged_count: number;
+}
+
+export interface QueryResultCompareReport {
+  baseline_statement_label?: string | null;
+  current_statement_label?: string | null;
+  baseline_source_sql?: string | null;
+  current_source_sql?: string | null;
+  baseline_execution_time_ms?: number;
+  current_execution_time_ms?: number;
+  compared_at: number;
+  summary: QueryResultCompareSummary;
+  added_rows: any[];
+  removed_rows: any[];
+}
+
+export interface QueryErrorInsight {
+  source_sql: string;
+  error_message: string;
+  explanation: string;
+  fixed_sql?: string | null;
+  statement_label?: string | null;
+  statement_kind?: string | null;
+  generated_at: number;
+}
+
+export interface SessionInfoEntry {
+  key: string;
+  value: string | null;
+}
+
+export interface WorkbenchSessionInfo {
+  db_id?: string | null;
+  db_name?: string | null;
+  connection_name?: string | null;
+  read_only: boolean;
+  fetched_at: number;
+  summary: SessionInfoEntry[];
+  session_variables: SessionInfoEntry[];
+  global_variables: SessionInfoEntry[];
 }
 
 export interface AiRule {
@@ -88,6 +151,17 @@ export interface KnowledgeItem {
   description?: string | null;
   updated_at?: number;
   is_golden: boolean;
+}
+
+export interface SavedSqlBookmark {
+  id: string;
+  title: string;
+  sql: string;
+  description?: string | null;
+  db_id?: string | null;
+  db_label?: string | null;
+  created_at: number;
+  updated_at: number;
 }
 
 export interface AiPolicy {

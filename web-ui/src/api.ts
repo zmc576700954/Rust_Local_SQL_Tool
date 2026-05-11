@@ -6,11 +6,125 @@ import { getLocale, tr } from './i18n'
 export const HTTP_TIMEOUT_MS = 120000
 export const JOB_POLL_REQUEST_TIMEOUT_MS = 10000
 export const JOB_POLL_INTERVAL_MS = 1200
+const DESKTOP_HTTP_FALLBACK_PREFIX = 'DESKTOP_HTTP_FALLBACK:'
+
+type TauriInvoke = <T = unknown>(command: string, args?: Record<string, unknown>) => Promise<T>
+
+let tauriInvokePromise: Promise<TauriInvoke | null> | null = null
+
+function isDesktopRuntime(): boolean {
+  if (typeof window === 'undefined') return false
+  const w = window as Window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }
+  return Boolean(w.__TAURI__ || w.__TAURI_INTERNALS__)
+}
+
+async function getTauriInvoke(): Promise<TauriInvoke | null> {
+  if (!isDesktopRuntime()) return null
+  if (!tauriInvokePromise) {
+    tauriInvokePromise = import('@tauri-apps/api/core')
+      .then((mod) => mod.invoke as TauriInvoke)
+      .catch(() => null)
+  }
+  return tauriInvokePromise
+}
+
+function normalizeDesktopError(error: unknown): Error {
+  if (error instanceof Error) return error
+  if (typeof error === 'string') return new Error(error)
+  if (typeof (error as any)?.message === 'string') return new Error((error as any).message)
+  try {
+    return new Error(JSON.stringify(error))
+  } catch {
+    return new Error(String(error ?? 'Unknown error'))
+  }
+}
+
+function shouldFallbackToHttp(error: unknown): boolean {
+  const message =
+    typeof error === 'string'
+      ? error
+      : typeof (error as any)?.message === 'string'
+        ? (error as any).message
+        : ''
+  return message.startsWith(DESKTOP_HTTP_FALLBACK_PREFIX)
+}
+
+function stripLeadingSqlComments(sql: string): string {
+  let cleanSql = sql.trim()
+  while (cleanSql) {
+    if (cleanSql.startsWith('--')) {
+      const idx = cleanSql.indexOf('\n')
+      cleanSql = idx >= 0 ? cleanSql.slice(idx + 1).trim() : ''
+      continue
+    }
+    if (cleanSql.startsWith('/*')) {
+      const idx = cleanSql.indexOf('*/')
+      cleanSql = idx >= 0 ? cleanSql.slice(idx + 2).trim() : ''
+      continue
+    }
+    break
+  }
+  return cleanSql
+}
+
+function isDesktopReadQuery(sql: string): boolean {
+  const upperSql = stripLeadingSqlComments(sql).toUpperCase()
+  return (
+    upperSql.startsWith('SELECT') ||
+    upperSql.startsWith('SHOW') ||
+    upperSql.startsWith('DESCRIBE') ||
+    upperSql.startsWith('EXPLAIN')
+  )
+}
+
+async function runExecuteRequest(
+  sql: string,
+  force?: boolean,
+  db_id?: string,
+  chunk_offset?: number,
+  chunk_size?: number,
+  cancel_token?: string,
+  transaction_id?: string
+) {
+  const payload = { sql, force, db_id, chunk_offset, chunk_size, cancel_token, transaction_id }
+  const httpRequest = () => client.post('/execute', payload).then(res => res.data)
+  if (transaction_id) {
+    return invokeDesktopOrHttp('workbench_run', { request: payload }, httpRequest)
+  }
+  if (!isDesktopReadQuery(sql)) {
+    return httpRequest()
+  }
+  return invokeDesktopOrHttp('workbench_run', { request: payload }, httpRequest)
+}
+
+async function invokeDesktopOrHttp<T>(
+  command: string,
+  args: Record<string, unknown>,
+  httpFallback: () => Promise<T>
+): Promise<T> {
+  const invoke = await getTauriInvoke()
+  if (!invoke) return httpFallback()
+  try {
+    return await invoke<T>(command, args)
+  } catch (error) {
+    if (shouldFallbackToHttp(error)) {
+      return httpFallback()
+    }
+    throw normalizeDesktopError(error)
+  }
+}
 
 const client = axios.create({
   baseURL: '/backend',
   timeout: HTTP_TIMEOUT_MS,
 })
+
+type AiQueryPayload = {
+  query: string
+  mode?: 'generate' | 'optimize' | 'explain'
+  current_sql?: string
+  chat_history?: any[]
+}
 
 client.interceptors.request.use((config) => {
   const locale = getLocale()
@@ -29,6 +143,7 @@ client.interceptors.response.use(
     let message = tr('网络错误，请稍后重试。', 'Network error, please try again later.');
     const status = error?.response?.status as number | undefined;
     const data = error?.response?.data as any | undefined;
+    const isCanceled = data?.code === 'ERR_CANCELED';
 
     if (data) {
       const { code, message: serverMessage, details } = data;
@@ -45,7 +160,7 @@ client.interceptors.response.use(
       if (status === 404) message = tr('接口不存在（404）：请确认后端已更新并重启。', 'Not found (404): please confirm backend is updated and restarted.');
     }
     
-    if (!silent) {
+    if (!silent && !isCanceled) {
       window.dispatchEvent(new CustomEvent('global-toast', {
         detail: { message: redactSensitiveText(message), type: 'error' }
       }));
@@ -70,12 +185,82 @@ export const api = {
     ssh_port?: number
     ssh_username?: string
     ssh_password?: string
+    probe_capabilities?: boolean
   }) =>
     client.post('/db/test', payload).then(res => res.data),
+  perfProbe: (payload: {
+    operation?:
+      | 'connect_cold'
+      | 'connect_warm'
+      | 'query_select_small'
+      | 'query_write_small'
+      | 'explain_plan'
+      | 'catalog_first_paint'
+      | 'table_first_page'
+      | 'cancel_latency'
+    db_id?: string
+    sql?: string
+    table_name?: string
+    iterations?: number
+  }) => {
+    const httpRequest = () => client.post('/diagnostics/perf/probe', payload).then(res => res.data)
+    return invokeDesktopOrHttp('perf_probe', { request: payload }, httpRequest)
+  },
+  listPerfSuites: (limit?: number) =>
+    client.get('/diagnostics/perf/suites', { params: { limit } }).then(res => res.data),
+  savePerfSuite: (suite: any) =>
+    client.post('/diagnostics/perf/suites', suite).then(res => res.data),
+  getPerfSuite: (suiteId: string) =>
+    client.get(`/diagnostics/perf/suites/${encodeURIComponent(suiteId)}`, {
+      headers: { 'x-silent-error': '1' }
+    }).then(res => res.data),
+  getPerfSuiteBaseline: () =>
+    client.get('/diagnostics/perf/suites/baseline').then(res => res.data),
+  pinPerfSuiteBaseline: (suite_id: string) =>
+    client.post('/diagnostics/perf/suites/baseline', { suite_id }).then(res => res.data),
+  listPerfSuiteDiffs: (limit?: number, current_suite_id?: string, baseline_suite_id?: string) =>
+    client.get('/diagnostics/perf/suite-diffs', {
+      params: { limit, current_suite_id, baseline_suite_id },
+      headers: { 'x-silent-error': '1' }
+    }).then(res => res.data),
+  savePerfSuiteDiff: (report: any) =>
+    client.post('/diagnostics/perf/suite-diffs', report).then(res => res.data),
   getSchema: (db_id?: string) => client.get('/schema', { params: { db_id } }).then(res => res.data),
   parseSchema: (sqlContent: string) => client.post('/schema/parse', { sql_content: sqlContent }).then(res => res.data),
   chatToSql: (query: string, chatHistory?: any[]) => client.post('/chat', { query, chat_history: chatHistory }).then(res => res.data),
-  executeSql: (sql: string, force?: boolean, db_id?: string) => client.post('/execute', { sql, force, db_id }).then(res => res.data),
+  executeSql: (sql: string, force?: boolean, db_id?: string, cancel_token?: string, transaction_id?: string) =>
+    runExecuteRequest(sql, force, db_id, undefined, undefined, cancel_token, transaction_id),
+  executeSqlChunk: (sql: string, chunk_offset: number, chunk_size: number, db_id?: string, transaction_id?: string) =>
+    runExecuteRequest(sql, true, db_id, chunk_offset, chunk_size, undefined, transaction_id),
+  executeTransactionAction: async (
+    action: 'commit' | 'rollback',
+    transaction_id: string,
+    db_id?: string
+  ) => {
+    const payload = { action, transaction_id, db_id }
+    const httpRequest = () => client.post('/execute/transaction', payload).then(res => res.data)
+    return invokeDesktopOrHttp('workbench_transaction', { request: payload }, httpRequest)
+  },
+  cancelExecution: async (cancel_token: string, db_id?: string) => {
+    const payload = { cancel_token, db_id }
+    const httpRequest = () =>
+      client.post('/execute/cancel', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data)
+    const invoke = await getTauriInvoke()
+    if (!invoke) {
+      return httpRequest()
+    }
+    try {
+      const result = await invoke<{ canceled?: boolean }>('workbench_cancel', { request: payload })
+      if (result?.canceled) {
+        return result
+      }
+    } catch (error) {
+      if (!shouldFallbackToHttp(error)) {
+        throw normalizeDesktopError(error)
+      }
+    }
+    return httpRequest()
+  },
   parseNavicat: (xmlContent: string) => client.post('/navicat/parse', { xml_content: xmlContent }).then(res => res.data),
   // Rules
   getRules: () => client.get('/rules').then(res => res.data),
@@ -87,10 +272,24 @@ export const api = {
   snapshotPolicy: () => client.post('/policy/snapshot').then(res => res.data),
   rollbackPolicy: (name: string) => client.post('/policy/rollback', { name }).then(res => res.data),
   // Tables
-  getTableData: (tableName: string, page: number, pageSize: number, filters?: string, orders?: string, db_id?: string) => 
-    client.get(`/table/data`, { params: { table_name: tableName, page, page_size: pageSize, filters, orders, db_id } }).then(res => res.data),
-  getTableSchema: (tableName: string, db_id?: string) => 
-    client.get(`/table/schema`, { params: { table_name: tableName, db_id } }).then(res => res.data),
+  getTableData: (tableName: string, page: number, pageSize: number, filters?: string, orders?: string, db_id?: string) => {
+    const httpRequest = () =>
+      client.get(`/table/data`, { params: { table_name: tableName, page, page_size: pageSize, filters, orders, db_id } }).then(res => res.data)
+    return invokeDesktopOrHttp(
+      'table_page',
+      { request: { table_name: tableName, page, page_size: pageSize, filters, orders, db_id } },
+      httpRequest
+    )
+  },
+  getTableSchema: (tableName: string, db_id?: string) => {
+    const httpRequest = () =>
+      client.get(`/table/schema`, { params: { table_name: tableName, db_id } }).then(res => res.data)
+    return invokeDesktopOrHttp(
+      'table_schema',
+      { request: { table_name: tableName, db_id } },
+      httpRequest
+    )
+  },
   previewDdl: (oldTable: any | null, newTable: any | null) =>
     client.post('/table/ddl/preview', { old_table: oldTable, new_table: newTable }).then(res => res.data),
   executeDdl: (sql: string, db_id?: string) => 
@@ -183,13 +382,21 @@ export const api = {
   clearHistory: () => client.post('/sql/history').then(res => res.data),
   // Explain
   explainSql: (sql: string) => client.post('/sql/explain', { sql }).then(res => res.data),
+  getSessionInfo: (db_id?: string) =>
+    client.get('/sql/session-info', {
+      params: { db_id },
+      headers: { 'x-silent-error': '1' }
+    }).then(res => res.data),
   // AI Connection Manager
   getAiModels: () => client.get('/api/ai/models').then(res => res.data),
   fetchProviderModels: (provider: string, apiKey: string, baseUrl?: string) => 
     client.post('/api/ai/provider/models', { provider, api_key: apiKey, base_url: baseUrl }).then(res => res.data.models),
   getAiHealth: () => client.get('/api/ai/health').then(res => res.data),
   // AI Agents
-  aiQuery: (query: string) => client.post('/api/ai/query', { query }).then(res => res.data),
+  aiQuery: (payload: AiQueryPayload | string) => {
+    const request = typeof payload === 'string' ? { query: payload } : payload
+    return client.post('/api/ai/query', request).then(res => res.data)
+  },
   aiExplainError: (errorMsg: string, failedQuery: string) => client.post('/api/ai/explain_error', { error_msg: errorMsg, failed_query: failedQuery }).then(res => res.data),
   // AI Knowledge Base
   getKnowledge: (dbConnectionId?: string) => client.get('/api/ai/knowledge', { params: { db_connection_id: dbConnectionId } }).then(res => res.data),

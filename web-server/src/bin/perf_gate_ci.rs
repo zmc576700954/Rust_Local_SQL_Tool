@@ -136,7 +136,13 @@ fn main() {
     }
 
     if failures.is_empty() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({"ok": true, "cases": report.cases.len()})).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({"ok": true, "cases": report.cases.len()})
+            )
+            .unwrap_or_default()
+        );
         return;
     }
 
@@ -151,4 +157,3 @@ fn main() {
     );
     std::process::exit(2);
 }
-

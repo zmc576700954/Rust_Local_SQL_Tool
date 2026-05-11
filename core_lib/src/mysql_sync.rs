@@ -329,11 +329,10 @@ impl MySqlDataSyncEngine {
                 progress(idx + 1, total);
                 continue;
             }
-            let res =
-                tokio::time::timeout(policy.db_query, sqlx::query(stmt).execute(&mut *tx))
-                    .await
-                    .map_err(|_| AppError::Timeout(format!("执行SQL超时: {}", stmt)))?
-                    .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let res = tokio::time::timeout(policy.db_query, sqlx::query(stmt).execute(&mut *tx))
+                .await
+                .map_err(|_| AppError::Timeout(format!("执行SQL超时: {}", stmt)))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
             affected += res.rows_affected();
             progress(idx + 1, total);
         }
@@ -365,13 +364,10 @@ async fn fetch_min_max_pk(
         pk = primary_key,
         table = table_name
     );
-    let row = tokio::time::timeout(
-        policy.db_query,
-        sqlx::query(&sql).fetch_one(&db.pool),
-    )
-    .await
-    .map_err(|_| AppError::Timeout("获取PK范围超时".to_string()))?
-    .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let row = tokio::time::timeout(policy.db_query, sqlx::query(&sql).fetch_one(&db.pool))
+        .await
+        .map_err(|_| AppError::Timeout("获取PK范围超时".to_string()))?
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
 
     let min_pk = value_to_string(&row, 0);
     let max_pk = value_to_string(&row, 1);

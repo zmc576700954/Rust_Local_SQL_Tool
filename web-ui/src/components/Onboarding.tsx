@@ -26,6 +26,10 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
   type DbTestResponse = {
     success?: boolean
     databases?: string[]
+    capabilities_probed?: boolean
+    capabilities_ok?: boolean | null
+    stage?: string
+    server_version?: string | null
     diagnostic?: {
       message?: string
       hint?: string
@@ -41,6 +45,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
       DB_TEST_NETWORK_FAILED: tr('请检查数据库地址、端口、防火墙和白名单。', 'Check DB host/port, firewall, and whitelist.'),
       DB_TEST_SSL_FAILED: tr('请调整 SSL 模式并校验证书配置。', 'Adjust SSL mode and verify certificate settings.'),
       DB_TEST_CONNECT_TIMEOUT: tr('数据库连接超时，请检查网络与安全组策略。', 'Connection timed out, check network and security group rules.'),
+      DB_TEST_CAPABILITY_PROBE_FAILED: tr('Capability probe failed. Check SHOW DATABASES permission or retry later.', 'Capability probe failed. Check SHOW DATABASES permission or retry later.'),
       DB_TEST_SSH_AUTH_FAILED: tr('SSH 认证失败，请检查 SSH 用户名和密码。', 'SSH authentication failed, verify SSH username/password.'),
       DB_TEST_SSH_CONNECT_FAILED: tr('SSH 网络失败，请检查 SSH 地址端口和网络连通性。', 'SSH network failed, check SSH host/port and connectivity.'),
       DB_TEST_SSH_CHANNEL_FAILED: tr('SSH 隧道通道创建失败，请检查跳板机到数据库的可达性。', 'SSH channel creation failed, verify bastion-to-DB reachability.'),
@@ -59,11 +64,23 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
         port: showAdvanced ? port : 3306,
         username: username.trim(),
         password,
+        probe_capabilities: true,
       }) as DbTestResponse
       if (res?.success === false) {
         setErrorObj({
           title: res?.diagnostic?.code || 'DB Test Failed',
-          message: res?.diagnostic?.message || '连接失败',
+          message: res?.diagnostic?.message || 'Connection failed',
+          solution: getDbTestSolutionByCode(
+            res?.diagnostic?.code,
+            res?.diagnostic?.hint || res?.diagnostic?.detail || ''
+          ),
+        })
+        return
+      }
+      if (res?.capabilities_probed && res?.capabilities_ok === false) {
+        setErrorObj({
+          title: res?.diagnostic?.code || 'Capability Probe Failed',
+          message: res?.diagnostic?.message || 'Connection successful, but capability probe failed.',
           solution: getDbTestSolutionByCode(
             res?.diagnostic?.code,
             res?.diagnostic?.hint || res?.diagnostic?.detail || ''
@@ -75,8 +92,8 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
       if (list.length === 0) {
         setErrorObj({
           title: 'Database List Empty',
-          message: '连接成功，但未获取到数据库列表。',
-          solution: '请检查账号权限。'
+          message: 'Connection successful, but no databases were returned.',
+          solution: 'Check SHOW DATABASES permission or metadata visibility.'
         })
         return
       }

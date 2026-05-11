@@ -1,4 +1,5 @@
 use crate::ai::gateway::{AiGateway, ChatMessage};
+use crate::ai::prompting::{build_sql_generation_system_prompt, build_user_request_message};
 use crate::schema::SchemaResponse;
 use serde::{Deserialize, Serialize};
 
@@ -120,60 +121,27 @@ impl AiRouter {
         chat_history: Option<Vec<serde_json::Value>>,
     ) -> Result<String, crate::ai::gateway::AiError> {
         let config = AgentConfig::new(dialect);
-        let schema_context = config.format_schema_context(schema);
-
-        let mut kb_context = String::new();
-        if !knowledge.is_empty() {
-            kb_context.push_str("\n\nContext: Business Rules & Examples:\n");
-            for k in knowledge {
-                match k.knowledge_type {
-                    crate::knowledge_base::KnowledgeType::Ddl => {
-                        kb_context
-                            .push_str(&format!("- DDL/Table Info ({}): {}\n", k.title, k.content));
-                    }
-                    crate::knowledge_base::KnowledgeType::Documentation => {
-                        kb_context
-                            .push_str(&format!("- Business Rule ({}): {}\n", k.title, k.content));
-                    }
-                    crate::knowledge_base::KnowledgeType::Sql => {
-                        kb_context
-                            .push_str(&format!("- Golden SQL ({}): {}\n", k.title, k.content));
-                        if let Some(ref desc) = k.description {
-                            kb_context.push_str(&format!("  Description: {}\n", desc));
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut history_context = String::new();
-        if let Some(history) = chat_history {
-            if !history.is_empty() {
-                history_context.push_str("\n\nPrevious Conversation:\n");
-                for msg in history {
-                    if let (Some(role), Some(content)) = (
-                        msg.get("role").and_then(|r| r.as_str()),
-                        msg.get("content").and_then(|c| c.as_str()),
-                    ) {
-                        if role == "user" {
-                            history_context.push_str(&format!("User: {}\n", content));
-                        } else if role == "assistant" {
-                            history_context.push_str(&format!("Assistant: {}\n", content));
-                        }
-                    }
-                }
-            }
-        }
-
-        let system_message = format!(
-            "{}\n\nSchema Context:\n{}{}{}",
-            config.system_prompt, schema_context, kb_context, history_context
+        let dialect_name = match config.dialect {
+            DbDialect::MySQL => "MySQL",
+            DbDialect::PostgreSQL => "PostgreSQL",
+            DbDialect::Redis => "Redis",
+        };
+        let schema_for_prompt = if matches!(config.dialect, DbDialect::Redis) {
+            None
+        } else {
+            schema
+        };
+        let system_message = build_sql_generation_system_prompt(
+            dialect_name,
+            query,
+            schema_for_prompt,
+            knowledge,
+            chat_history.as_deref(),
+            None,
+            None,
+            Some("Prefer concise SQL. First resolve entities, filters, time range, grouping, ordering, and output columns from the user's request. When the user asks to explain or optimize SQL, keep the returned sql field aligned with the user's current statement or the improved statement."),
         );
-
-        let user_message = format!(
-            "Generate a query to accomplish the following task: {}",
-            query
-        );
+        let user_message = build_user_request_message(query);
 
         let messages = vec![
             ChatMessage {
@@ -197,17 +165,25 @@ impl AiRouter {
         schema: Option<&SchemaResponse>,
     ) -> Result<String, crate::ai::gateway::AiError> {
         let config = AgentConfig::new(dialect);
-        let schema_context = config.format_schema_context(schema);
-
-        let system_message = format!(
-            "{}\n\nYou are helping a developer debug an error. Provide a clear explanation of the error and a suggested fix.\n\nSchema Context:\n{}",
-            config.system_prompt, schema_context
+        let dialect_name = match config.dialect {
+            DbDialect::MySQL => "MySQL",
+            DbDialect::PostgreSQL => "PostgreSQL",
+            DbDialect::Redis => "Redis",
+        };
+        let system_message = build_sql_generation_system_prompt(
+            dialect_name,
+            failed_query,
+            schema,
+            &[],
+            None,
+            Some(failed_query),
+            Some(error_msg),
+            Some("Intent is fix_sql. Preserve the business intent of the failed query, change only the minimal syntax, alias, join, or schema references needed to fix it, explain the failure briefly, and return a corrected query when possible. If a safe correction is impossible, keep sql empty and explain why."),
         );
-
-        let user_message = format!(
-            "The following query failed:\n```\n{}\n```\n\nError Message:\n{}\n\nPlease explain why this error occurred and suggest a corrected query. Return ONLY valid JSON with 'explanation' and 'fixed_query' fields.",
+        let user_message = build_user_request_message(&format!(
+            "The following query failed and needs a fix.\nSQL:\n{}\n\nDatabase error:\n{}",
             failed_query, error_msg
-        );
+        ));
 
         let messages = vec![
             ChatMessage {

@@ -9,6 +9,7 @@ export function parseError(e: unknown): AppError {
   const errorObj = e as any | null;
   const networkLike = errorObj?.message === 'Network Error'
   const isTimeout = errorObj?.code === 'ECONNABORTED'
+  const errorCode = String(errorObj?.response?.data?.code || '')
 
   if (networkLike) {
     message = '无法连接后端服务（/backend）。'
@@ -30,6 +31,14 @@ export function parseError(e: unknown): AppError {
   }
 
   const msgLower = message.toLowerCase()
+
+  if (errorCode === 'ERR_CANCELED' || msgLower.includes('err_canceled') || msgLower.includes('query canceled') || msgLower.includes('request canceled')) {
+    return {
+      title: 'Request canceled (Canceled)',
+      message: message || 'Query canceled',
+      solution: 'The running query was canceled. Run it again if needed.',
+    }
+  }
 
   if (networkLike) {
     return {

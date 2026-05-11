@@ -1,7 +1,7 @@
+use crate::timeout_policy::TimeoutPolicy;
 use sqlx::{mysql::MySqlPoolOptions, MySqlPool};
 use std::time::Duration;
 use thiserror::Error;
-use crate::timeout_policy::TimeoutPolicy;
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -30,14 +30,40 @@ impl DbClient {
         let options = MySqlConnectOptions::from_str(url)?;
 
         let pool_future = MySqlPoolOptions::new()
-            .max_connections(5)
-            .acquire_timeout(Duration::from_secs(5))
+            .max_connections(10)
+            .min_connections(1)
+            .acquire_timeout(Duration::from_secs(3))
+            .idle_timeout(Duration::from_secs(600))
+            .max_lifetime(Duration::from_secs(1800))
+            .test_before_acquire(false)
             .connect_with(options);
 
         let pool = tokio::time::timeout(policy.db_connect, pool_future)
             .await
             .map_err(|_| DbError::Timeout)??;
         Ok(Self { pool })
+    }
+
+    pub async fn ping(&self) -> Result<(), DbError> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn connection_id_for_session(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>,
+    ) -> Result<u64, DbError> {
+        use sqlx::Row;
+
+        let row = sqlx::query("SELECT CONNECTION_ID() AS connection_id")
+            .fetch_one(&mut **conn)
+            .await?;
+        Ok(row.try_get::<u64, _>("connection_id")?)
+    }
+
+    pub async fn kill_query(&self, connection_id: u64) -> Result<(), DbError> {
+        let sql = format!("KILL QUERY {}", connection_id);
+        sqlx::query(&sql).execute(&self.pool).await?;
+        Ok(())
     }
 
     /// Extract the database name from the connection URL

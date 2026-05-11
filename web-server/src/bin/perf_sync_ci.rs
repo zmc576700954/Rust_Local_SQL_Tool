@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 
-use core_lib::perf_report::{PerformanceCase, PerformanceMetrics, PerformanceReport, PerformanceStage};
+use core_lib::perf_report::{
+    PerformanceCase, PerformanceMetrics, PerformanceReport, PerformanceStage,
+};
 
 fn env_string(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
@@ -32,8 +34,16 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn poll_job(http: &Client, base: &str, job_id: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let url = format!("{}/backend/tools/perf-sync/jobs/{}", base.trim_end_matches('/'), job_id);
+async fn poll_job(
+    http: &Client,
+    base: &str,
+    job_id: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let url = format!(
+        "{}/backend/tools/perf-sync/jobs/{}",
+        base.trim_end_matches('/'),
+        job_id
+    );
     loop {
         let resp = http.get(&url).send().await?;
         let status = resp.status();
@@ -62,7 +72,10 @@ fn write_report(path: &str, payload: &Value) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-fn write_report_any<T: Serialize>(path: &str, payload: &T) -> Result<(), Box<dyn std::error::Error>> {
+fn write_report_any<T: Serialize>(
+    path: &str,
+    payload: &T,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut f = std::fs::File::create(path)?;
     f.write_all(serde_json::to_string_pretty(payload)?.as_bytes())?;
     Ok(())
@@ -83,7 +96,11 @@ fn build_cases(done: &Value) -> Vec<PerformanceCase> {
             .cloned()
             .unwrap_or_default();
         for v in verify {
-            let table = v.get("table_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let table = v
+                .get("table_name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             if table.is_empty() {
                 continue;
             }
@@ -100,8 +117,16 @@ fn build_cases(done: &Value) -> Vec<PerformanceCase> {
             .unwrap_or_default();
 
         for t in tables {
-            let table_name = t.get("table_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let primary_key = t.get("primary_key").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let table_name = t
+                .get("table_name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let primary_key = t
+                .get("primary_key")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             if table_name.is_empty() {
                 continue;
             }
@@ -208,7 +233,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let http = Client::new();
 
-    let check_url = format!("{}/backend/tools/perf-sync/check", base.trim_end_matches('/'));
+    let check_url = format!(
+        "{}/backend/tools/perf-sync/check",
+        base.trim_end_matches('/')
+    );
     let check_resp = http
         .post(&check_url)
         .json(&json!({
@@ -234,11 +262,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fill = auto_fill && !insufficient.is_empty();
     if !insufficient.is_empty() && !auto_fill {
         eprintln!("insufficient data and AUTO_FILL disabled: {}", check);
-        write_report(&report_path, &json!({"check": check, "error": "insufficient_data"}))?;
+        write_report(
+            &report_path,
+            &json!({"check": check, "error": "insufficient_data"}),
+        )?;
         std::process::exit(3);
     }
 
-    let start_url = format!("{}/backend/tools/perf-sync/start", base.trim_end_matches('/'));
+    let start_url = format!(
+        "{}/backend/tools/perf-sync/start",
+        base.trim_end_matches('/')
+    );
     let start_resp = http
         .post(&start_url)
         .json(&json!({
@@ -266,10 +300,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(3);
     }
 
-    let job_id = start
-        .get("job_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let job_id = start.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
     if job_id.is_empty() {
         eprintln!("missing job_id: {}", start);
         write_report(&report_path, &json!({"check": check, "start": start}))?;
@@ -280,7 +311,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(v) => v,
         Err(e) => {
             eprintln!("job poll failed: {}", e);
-            write_report(&report_path, &json!({"check": check, "start": start, "error": e.to_string()}))?;
+            write_report(
+                &report_path,
+                &json!({"check": check, "start": start, "error": e.to_string()}),
+            )?;
             std::process::exit(3);
         }
     };

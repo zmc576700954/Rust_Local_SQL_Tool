@@ -8,4 +8,3 @@ fn timeout_policy_defaults_are_positive() {
     assert!(p.external_http_default.as_millis() > 0);
     assert!(p.job_poll_request.as_millis() > 0);
 }
-
