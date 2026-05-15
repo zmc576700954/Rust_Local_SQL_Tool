@@ -1909,6 +1909,7 @@ async fn crud_insert(
         chunk_size: None,
         preview_cap: None,
         truncated: false,
+        transaction_state: None,
     }))
 }
 
@@ -1947,6 +1948,7 @@ async fn crud_update(
         chunk_size: None,
         preview_cap: None,
         truncated: false,
+        transaction_state: None,
     }))
 }
 
@@ -1986,6 +1988,7 @@ async fn crud_delete(
         chunk_size: None,
         preview_cap: None,
         truncated: false,
+        transaction_state: None,
     }))
 }
 
@@ -4347,6 +4350,7 @@ async fn execute_ddl(
         chunk_size: None,
         preview_cap: None,
         truncated: false,
+        transaction_state: None,
     }))
 }
 
