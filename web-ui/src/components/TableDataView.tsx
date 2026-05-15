@@ -18,7 +18,7 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue;
 }
 
-export function TableDataView({ tableName, isActive, dbId }: { tableName: string, isActive: boolean, dbId?: string }) {
+export function TableDataView({ tableName, isActive, dbId, transactionId, onTransactionStateChange }: { tableName: string, isActive: boolean, dbId?: string, transactionId?: string | null, onTransactionStateChange?: (state: 'active' | 'idle') => void }) {
   const [data, setData] = useState<any[]>([])
   const [schema, setSchema] = useState<any>(null)
   const [total, setTotal] = useState<number | null>(null)
@@ -265,6 +265,8 @@ export function TableDataView({ tableName, isActive, dbId }: { tableName: string
                 schema={memoizedSchema} 
                 tableName={tableName}
                 dbId={dbId}
+                transactionId={transactionId}
+                onTransactionStateChange={onTransactionStateChange}
                 sorts={sorts}
                 setSorts={setSorts}
                 filters={filters}

@@ -25,6 +25,12 @@ describe('parseError', () => {
     })
     expect(err.title).toContain('Auth')
   })
+
+  it('maps ERR_NOT_FOUND to transaction session not found', () => {
+    const err = parseError({ code: 'ERR_NOT_FOUND' })
+    expect(err.title).toContain('Transaction session not found')
+    expect(err.code).toBe('ERR_NOT_FOUND')
+  })
 })
 
 describe('ErrorDictionary', () => {

@@ -9,6 +9,8 @@ interface DataTableProps {
   schema: any;
   tableName: string;
   dbId?: string;
+  transactionId?: string | null;
+  onTransactionStateChange?: (state: 'active' | 'idle') => void;
   sorts: { column: string; desc: boolean }[];
   setSorts: (sorts: { column: string; desc: boolean }[]) => void;
   filters: { column: string; operator: string; value: string }[];
@@ -281,21 +283,24 @@ function useResetTableState(
   }, [tableName, dbId]);
 }
 
-export function DataTable({ 
-  data, 
-  schema, 
-  tableName, 
+export function DataTable({
+  data,
+  schema,
+  tableName,
   dbId,
-  sorts, 
-  setSorts, 
-  filters, 
-  setFilters, 
+  transactionId,
+  onTransactionStateChange,
+  sorts,
+  setSorts,
+  filters,
+  setFilters,
   onRefresh,
   isActive,
   isRefreshing,
   refreshError,
   dataRevision,
 }: DataTableProps) {
+
   const [editingCell, setEditingCell] = useState<{ rowIdx: number; col: string; isNew: boolean } | null>(null);
   
   // Track changes
@@ -1747,9 +1752,25 @@ export function DataTable({
       const nextNewRows = [...newRows];
       const failures: SaveFailureItem[] = [];
 
+      let currentTransactionState = 'idle';
+
+      const ensureTransactionStarted = async () => {
+        if (transactionId && currentTransactionState === 'idle') {
+          try {
+            await api.executeTransactionAction('begin', transactionId, dbId);
+            currentTransactionState = 'active';
+            onTransactionStateChange?.('active');
+          } catch (e) {
+            console.error('Failed to start transaction for CRUD:', e);
+            // If it already exists or fails, we continue anyway
+          }
+        }
+      };
+
       for (const row of deletedRowPreviews) {
         try {
-          const result = await api.crudDelete(tableName, row.condition, dbId);
+          await ensureTransactionStarted();
+          const result = await api.crudDelete(tableName, row.condition, dbId, transactionId || undefined);
           if ((result?.affected_rows ?? 0) === 0) {
             failures.push(buildSaveFailureItem({
               action: 'delete',
@@ -1780,7 +1801,8 @@ export function DataTable({
 
       for (const row of updatedRowPreviews) {
         try {
-          const result = await api.crudUpdate(tableName, row.rowData, row.condition, dbId);
+          await ensureTransactionStarted();
+          const result = await api.crudUpdate(tableName, row.rowData, row.condition, dbId, transactionId || undefined);
           if ((result?.affected_rows ?? 0) === 0) {
             failures.push(buildSaveFailureItem({
               action: 'update',
@@ -1813,7 +1835,8 @@ export function DataTable({
 
       for (const row of insertedRowPreviews) {
         try {
-          await api.crudInsert(tableName, prepareInsertRowPayload(row.rowData), dbId);
+          await ensureTransactionStarted();
+          await api.crudInsert(tableName, prepareInsertRowPayload(row.rowData), dbId, transactionId || undefined);
           nextNewRows[row.rowIdx] = null;
         } catch (error) {
           failures.push(buildSaveFailureItem({

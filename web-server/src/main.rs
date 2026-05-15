@@ -1220,6 +1220,7 @@ struct TransactionSession {
     connection_id: u64,
     db_id: Option<String>,
     conn: sqlx::pool::PoolConnection<sqlx::MySql>,
+    last_accessed: std::time::Instant,
 }
 
 type SharedTransactionSession = Arc<Mutex<TransactionSession>>;
@@ -1616,6 +1617,7 @@ async fn get_or_open_transaction_session(
     state: &AppState,
     db_id: Option<&str>,
     transaction_id: &str,
+    create_if_not_found: bool,
 ) -> Result<SharedTransactionSession, AppError> {
     if let Some(existing) = state
         .transaction_sessions
@@ -1625,13 +1627,19 @@ async fn get_or_open_transaction_session(
         .cloned()
     {
         let expected_db_id = resolve_transaction_db_id(state, db_id).await;
-        let session_db_id = existing.lock().await.db_id.clone();
-        if session_db_id != expected_db_id {
+        let mut session = existing.lock().await;
+        if session.db_id != expected_db_id {
             return Err(AppError::BadRequest(
                 "Transaction session is bound to a different database connection".to_string(),
             ));
         }
+        session.last_accessed = std::time::Instant::now();
+        drop(session);
         return Ok(existing);
+    }
+
+    if !create_if_not_found {
+        return Err(AppError::NotFound("transaction session not found".to_string()));
     }
 
     let resolved_db_id = resolve_transaction_db_id(state, db_id).await;
@@ -1656,6 +1664,7 @@ async fn get_or_open_transaction_session(
         connection_id,
         db_id: resolved_db_id,
         conn,
+        last_accessed: std::time::Instant::now(),
     }));
 
     state
@@ -1830,7 +1839,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nest("/backend", api)
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state.clone());
+
+    let state_for_cleanup = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let mut sessions_to_remove = Vec::new();
+            {
+                let sessions = state_for_cleanup.transaction_sessions.read().await;
+                for (id, session_arc) in sessions.iter() {
+                    let session = session_arc.lock().await;
+                    if session.last_accessed.elapsed() > std::time::Duration::from_secs(600) {
+                        sessions_to_remove.push(id.clone());
+                    }
+                }
+            }
+
+            if !sessions_to_remove.is_empty() {
+                let mut sessions = state_for_cleanup.transaction_sessions.write().await;
+                for id in sessions_to_remove {
+                    if let Some(session_arc) = sessions.remove(&id) {
+                        let mut session = session_arc.lock().await;
+                        // Try to rollback just in case, though it might fail if connection is broken
+                        let _ = sqlx::query("ROLLBACK").execute(&mut *session.conn).await;
+                        tracing::info!("Cleaned up idle transaction session: {}", id);
+                    }
+                }
+            }
+        }
+    });
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     tracing::info!("Server listening on http://0.0.0.0:3000");
@@ -1872,6 +1911,7 @@ struct CrudMutationRequest {
     data: serde_json::Value,
     condition: Option<serde_json::Map<String, serde_json::Value>>,
     db_id: Option<String>,
+    transaction_id: Option<String>,
 }
 
 async fn crud_insert(
@@ -1887,15 +1927,37 @@ async fn crud_insert(
 
     let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
+    let transaction_id = req
+        .transaction_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+    let transaction_session = if let Some(id) = transaction_id.as_deref() {
+        Some(get_or_open_transaction_session(&state, req.db_id.as_deref(), id, false).await?)
+    } else {
+        None
+    };
+
     let crud_req = CrudRequest {
         table_name: req.table_name,
         data: req.data,
         condition: req.condition,
     };
 
-    let affected_rows = CrudManager::insert(&db_client, &crud_req)
-        .await
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
+        let mut guard = session.lock().await;
+        guard.last_accessed = std::time::Instant::now();
+        let affected = CrudManager::insert(&mut *guard.conn, &crud_req)
+            .await
+            .map_err(|e| AppError::InternalError(e.to_string()))?;
+        (affected, Some("active".to_string()))
+    } else {
+        let affected = CrudManager::insert(&db_client.pool, &crud_req)
+            .await
+            .map_err(|e| AppError::InternalError(e.to_string()))?;
+        (affected, None)
+    };
 
     Ok(Json(ExecuteResponse {
         columns: vec![],
@@ -1909,7 +1971,7 @@ async fn crud_insert(
         chunk_size: None,
         preview_cap: None,
         truncated: false,
-        transaction_state: None,
+        transaction_state,
     }))
 }
 
@@ -1926,15 +1988,37 @@ async fn crud_update(
 
     let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
+    let transaction_id = req
+        .transaction_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+    let transaction_session = if let Some(id) = transaction_id.as_deref() {
+        Some(get_or_open_transaction_session(&state, req.db_id.as_deref(), id, false).await?)
+    } else {
+        None
+    };
+
     let crud_req = CrudRequest {
         table_name: req.table_name,
         data: req.data,
         condition: req.condition,
     };
 
-    let affected_rows = CrudManager::update(&db_client, &crud_req)
-        .await
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
+        let mut guard = session.lock().await;
+        guard.last_accessed = std::time::Instant::now();
+        let affected = CrudManager::update(&mut *guard.conn, &crud_req)
+            .await
+            .map_err(|e| AppError::InternalError(e.to_string()))?;
+        (affected, Some("active".to_string()))
+    } else {
+        let affected = CrudManager::update(&db_client.pool, &crud_req)
+            .await
+            .map_err(|e| AppError::InternalError(e.to_string()))?;
+        (affected, None)
+    };
 
     Ok(Json(ExecuteResponse {
         columns: vec![],
@@ -1948,7 +2032,7 @@ async fn crud_update(
         chunk_size: None,
         preview_cap: None,
         truncated: false,
-        transaction_state: None,
+        transaction_state,
     }))
 }
 
@@ -1957,6 +2041,7 @@ struct DeleteRequest {
     table_name: String,
     condition: serde_json::Map<String, serde_json::Value>,
     db_id: Option<String>,
+    transaction_id: Option<String>,
 }
 
 async fn crud_delete(
@@ -1972,9 +2057,31 @@ async fn crud_delete(
 
     let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
-    let affected_rows = CrudManager::delete(&db_client, &req.table_name, &req.condition)
-        .await
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let transaction_id = req
+        .transaction_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+    let transaction_session = if let Some(id) = transaction_id.as_deref() {
+        Some(get_or_open_transaction_session(&state, req.db_id.as_deref(), id, false).await?)
+    } else {
+        None
+    };
+
+    let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
+        let mut guard = session.lock().await;
+        guard.last_accessed = std::time::Instant::now();
+        let affected = CrudManager::delete(&mut *guard.conn, &req.table_name, &req.condition)
+            .await
+            .map_err(|e| AppError::InternalError(e.to_string()))?;
+        (affected, Some("active".to_string()))
+    } else {
+        let affected = CrudManager::delete(&db_client.pool, &req.table_name, &req.condition)
+            .await
+            .map_err(|e| AppError::InternalError(e.to_string()))?;
+        (affected, None)
+    };
 
     Ok(Json(ExecuteResponse {
         columns: vec![],
@@ -1988,7 +2095,7 @@ async fn crud_delete(
         chunk_size: None,
         preview_cap: None,
         truncated: false,
-        transaction_state: None,
+        transaction_state,
     }))
 }
 
@@ -2525,9 +2632,20 @@ async fn execute_transaction(
     }
 
     let action = req.action.trim().to_lowercase();
+    if action == "begin" {
+        // Explicitly start a new transaction session
+        let _ = get_or_open_transaction_session(&state, req.db_id.as_deref(), transaction_id, true).await?;
+        return Ok(Json(ExecuteTransactionResponse {
+            action: "begin".to_string(),
+            transaction_id: transaction_id.to_string(),
+            state: "active".to_string(),
+            execution_time_ms: 0,
+        }));
+    }
+
     if action != "commit" && action != "rollback" {
         return Err(AppError::BadRequest(
-            "transaction action must be commit or rollback".to_string(),
+            "transaction action must be begin, commit or rollback".to_string(),
         ));
     }
 
@@ -3785,7 +3903,7 @@ async fn execute_sql(
         .filter(|token| !token.is_empty())
         .map(str::to_string);
     let transaction_session = if let Some(id) = transaction_id.as_deref() {
-        Some(get_or_open_transaction_session(&state, req.db_id.as_deref(), id).await?)
+        Some(get_or_open_transaction_session(&state, req.db_id.as_deref(), id, false).await?)
     } else {
         None
     };
@@ -4033,6 +4151,23 @@ async fn execute_sql(
             return Err(AppError::Canceled(e));
         }
         return Err(AppError::InternalError(e));
+    }
+
+    if let Some(session) = transaction_session.as_ref() {
+        let mut session_lock = session.lock().await;
+        session_lock.last_accessed = std::time::Instant::now();
+        drop(session_lock);
+
+        // If this was a successful COMMIT or ROLLBACK, clean up the session
+        let is_tx_end = {
+            let s = upper_sql.trim();
+            s == "COMMIT" || s == "ROLLBACK" || s == "COMMIT;" || s == "ROLLBACK;"
+        };
+        if is_tx_end && err_msg.is_none() {
+            if let Some(id) = transaction_id.as_deref() {
+                state.transaction_sessions.write().await.remove(id);
+            }
+        }
     }
 
     if !is_select {

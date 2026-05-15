@@ -1,4 +1,4 @@
-use crate::db::{DbClient, DbError};
+use crate::db::DbError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,7 +14,10 @@ pub struct CrudManager;
 
 impl CrudManager {
     /// Generates and executes an INSERT statement
-    pub async fn insert(client: &DbClient, req: &CrudRequest) -> Result<u64, DbError> {
+    pub async fn insert<'e, E>(executor: E, req: &CrudRequest) -> Result<u64, DbError>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::MySql>,
+    {
         let obj = req
             .data
             .as_object()
@@ -55,12 +58,15 @@ impl CrudManager {
             }
         }
 
-        let result = query.execute(&client.pool).await?;
+        let result = query.execute(executor).await?;
         Ok(result.rows_affected())
     }
 
     /// Generates and executes an UPDATE statement
-    pub async fn update(client: &DbClient, req: &CrudRequest) -> Result<u64, DbError> {
+    pub async fn update<'e, E>(executor: E, req: &CrudRequest) -> Result<u64, DbError>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::MySql>,
+    {
         let obj = req
             .data
             .as_object()
@@ -131,16 +137,19 @@ impl CrudManager {
             }
         }
 
-        let result = query.execute(&client.pool).await?;
+        let result = query.execute(executor).await?;
         Ok(result.rows_affected())
     }
 
     /// Generates and executes a DELETE statement
-    pub async fn delete(
-        client: &DbClient,
+    pub async fn delete<'e, E>(
+        executor: E,
         table_name: &str,
         condition: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<u64, DbError> {
+    ) -> Result<u64, DbError>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::MySql>,
+    {
         let mut where_clauses = Vec::new();
         for (k, val) in condition.iter() {
             if val.is_null() {
@@ -174,7 +183,7 @@ impl CrudManager {
             }
         }
 
-        let result = query.execute(&client.pool).await?;
+        let result = query.execute(executor).await?;
         Ok(result.rows_affected())
     }
 }

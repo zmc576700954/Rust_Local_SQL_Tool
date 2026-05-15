@@ -123,6 +123,7 @@ struct TransactionSession {
     connection_id: u64,
     db_id: Option<String>,
     conn: sqlx::pool::PoolConnection<sqlx::MySql>,
+    last_accessed: Instant,
 }
 
 type SharedTransactionSession = Arc<Mutex<TransactionSession>>;
@@ -925,6 +926,7 @@ async fn get_or_open_transaction_session(
     state: &DesktopState,
     db_id: Option<&str>,
     transaction_id: &str,
+    create_if_not_found: bool,
 ) -> Result<SharedTransactionSession, String> {
     if let Some(existing) = state
         .transaction_sessions
@@ -934,11 +936,16 @@ async fn get_or_open_transaction_session(
         .cloned()
     {
         let expected_db_id = resolve_transaction_db_id(db_id).await?;
-        let session_db_id = existing.lock().await.db_id.clone();
-        if session_db_id != expected_db_id {
+        let mut session = existing.lock().await;
+        if session.db_id != expected_db_id {
             return Err("Transaction session is bound to a different database connection".to_string());
         }
+        session.last_accessed = Instant::now();
         return Ok(existing);
+    }
+
+    if !create_if_not_found {
+        return Err("transaction session not found".to_string());
     }
 
     let resolved_db_id = resolve_transaction_db_id(db_id).await?;
@@ -960,6 +967,7 @@ async fn get_or_open_transaction_session(
         connection_id,
         db_id: resolved_db_id,
         conn,
+        last_accessed: Instant::now(),
     }));
     state
         .transaction_sessions
@@ -1038,7 +1046,7 @@ async fn workbench_run(
     }
 
     let transaction_session = if let Some(id) = transaction_id.as_deref() {
-        Some(get_or_open_transaction_session(&state, request.db_id.as_deref(), id).await?)
+        Some(get_or_open_transaction_session(&state, request.db_id.as_deref(), id, false).await?)
     } else {
         None
     };
@@ -1251,6 +1259,23 @@ async fn workbench_run(
 
     let elapsed = start_time.elapsed().as_millis() as u64;
 
+    if let Some(session) = transaction_session.as_ref() {
+        let mut session_lock = session.lock().await;
+        session_lock.last_accessed = Instant::now();
+        drop(session_lock);
+
+        // If this was a successful COMMIT or ROLLBACK, clean up the session
+        let is_tx_end = {
+            let s = upper_sql.trim();
+            s == "COMMIT" || s == "ROLLBACK" || s == "COMMIT;" || s == "ROLLBACK;"
+        };
+        if is_tx_end && err_msg.is_none() {
+            if let Some(id) = transaction_id.as_deref() {
+                state.transaction_sessions.write().await.remove(id);
+            }
+        }
+    }
+
     if let Some(error) = err_msg {
         if was_canceled {
             append_sql_history(sql, "canceled", elapsed).await;
@@ -1303,8 +1328,18 @@ async fn workbench_transaction(
     }
 
     let action = request.action.trim().to_lowercase();
+    if action == "begin" {
+        let _ = get_or_open_transaction_session(&state, request.db_id.as_deref(), transaction_id, true).await?;
+        return Ok(WorkbenchTransactionResponse {
+            action: "begin".to_string(),
+            transaction_id: transaction_id.to_string(),
+            state: "active".to_string(),
+            execution_time_ms: 0,
+        });
+    }
+
     if action != "commit" && action != "rollback" {
-        return Err("transaction action must be commit or rollback".to_string());
+        return Err("transaction action must be begin, commit or rollback".to_string());
     }
 
     let session = state
@@ -1511,8 +1546,42 @@ async fn perf_probe(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let state = Arc::new(DesktopState::default());
+
+    // Start background cleanup task for idle transaction sessions
+    let state_for_cleanup = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let mut sessions_to_remove = Vec::new();
+            {
+                let sessions = state_for_cleanup.transaction_sessions.read().await;
+                for (id, session_arc) in sessions.iter() {
+                    let session = session_arc.lock().await;
+                    if session.last_accessed.elapsed() > Duration::from_secs(600) {
+                        sessions_to_remove.push(id.clone());
+                    }
+                }
+            }
+
+            if !sessions_to_remove.is_empty() {
+                let mut sessions = state_for_cleanup.transaction_sessions.write().await;
+                for id in sessions_to_remove {
+                    if let Some(session_arc) = sessions.remove(&id) {
+                        let mut session = session_arc.lock().await;
+                        // Try to rollback just in case, though it might fail if connection is broken
+                        let _ = sqlx::query("ROLLBACK").execute(&mut *session.conn).await;
+                        // In Tauri we don't have tracing configured by default, but we can log to stdout
+                        println!("Cleaned up idle transaction session: {}", id);
+                    }
+                }
+            }
+        }
+    });
+
     tauri::Builder::default()
-        .manage(DesktopState::default())
+        .manage(state)
         .invoke_handler(tauri::generate_handler![
             workbench_run,
             workbench_cancel,

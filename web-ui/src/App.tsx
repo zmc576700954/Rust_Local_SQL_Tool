@@ -1385,12 +1385,25 @@ function App() {
     
     try {
       const collectedResults: QueryExecutionResult[] = []
+      let lastLoopTxState = fallbackTabState.transactionState;
+
       for (const [statementIndex, statementSql] of statements.entries()) {
         try {
+          if (transactionMode === 'manual' && transactionId && lastLoopTxState === 'idle' && statementIndex === 0) {
+            await api.executeTransactionAction('begin', transactionId, executionDbId);
+            lastLoopTxState = 'active';
+          }
           const result = await api.executeSql(statementSql, force, executionDbId, cancelToken, transactionId || undefined)
-          collectedResults.push(normalizeExecuteResult(result, statementSql, statementIndex))
+          const normalized = normalizeExecuteResult(result, statementSql, statementIndex);
+          if (normalized.transaction_state) {
+            lastLoopTxState = normalized.transaction_state;
+          }
+          collectedResults.push(normalized)
         } catch (e: unknown) {
           const err = parseError(e)
+          if (err.code === 'ERR_NOT_FOUND' && transactionId) {
+            lastLoopTxState = 'idle';
+          }
           const canceledText = `${err.title} ${err.message}`.toLowerCase()
           const isCanceled = canceledText.includes('canceled') || canceledText.includes('cancelled')
 
@@ -1409,14 +1422,13 @@ function App() {
       }
 
       const nextExecuteResult = collectedResults[0] || null
-      const lastTxState = [...collectedResults].reverse().find(r => r.transaction_state)?.transaction_state;
       
       patchExecutingTabState({
         executeResult: nextExecuteResult,
         executeResults: collectedResults,
         activeResultIndex: 0,
         transactionId,
-        transactionState: (lastTxState || (transactionMode === 'manual' ? 'active' : 'idle')) as any,
+        transactionState: (lastLoopTxState || (transactionMode === 'manual' ? 'active' : 'idle')) as any,
         isLoadingMoreResults: false,
         errorObj: null,
       })
@@ -2231,8 +2243,23 @@ function App() {
                   </div>
                 ) : tab.type === 'table' ? (
                   <Suspense fallback={<SkeletonLoader />}>
-                    <TableWorkspace tableName={tab.payload?.tableName} dbId={tab.payload?.dbId} isActive={isActive} />
+                    <TableWorkspace 
+                      tableName={tab.payload?.tableName} 
+                      dbId={tab.payload?.dbId} 
+                      isActive={isActive} 
+                      transactionId={tabState.transactionId}
+                      onTransactionStateChange={(state) => {
+                        setTabStates(prev => ({
+                          ...prev,
+                          [tab.id]: {
+                            ...(prev[tab.id] || tabState),
+                            transactionState: state
+                          }
+                        }))
+                      }}
+                    />
                   </Suspense>
+
                 ) : tab.type === 'explain' ? (
                   <Suspense fallback={<SkeletonLoader />}>
                     <ExecutionPlan sql={tab.payload?.sql} />

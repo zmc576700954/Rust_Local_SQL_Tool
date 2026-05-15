@@ -233,7 +233,7 @@ export const api = {
   executeSqlChunk: (sql: string, chunk_offset: number, chunk_size: number, db_id?: string, transaction_id?: string) =>
     runExecuteRequest(sql, true, db_id, chunk_offset, chunk_size, undefined, transaction_id),
   executeTransactionAction: async (
-    action: 'commit' | 'rollback',
+    action: 'begin' | 'commit' | 'rollback',
     transaction_id: string,
     db_id?: string
   ) => {
@@ -294,12 +294,12 @@ export const api = {
     client.post('/table/ddl/preview', { old_table: oldTable, new_table: newTable }).then(res => res.data),
   executeDdl: (sql: string, db_id?: string) => 
     client.post('/table/ddl', { sql, db_id }).then(res => res.data),
-  crudInsert: (tableName: string, data: any, db_id?: string) => 
-    client.post('/crud/insert', { table_name: tableName, data, db_id }).then(res => res.data),
-  crudUpdate: (tableName: string, data: any, condition: Record<string, any>, db_id?: string) => 
-    client.post('/crud/update', { table_name: tableName, data, condition, db_id }).then(res => res.data),
-  crudDelete: (tableName: string, condition: Record<string, any>, db_id?: string) => 
-    client.post('/crud/delete', { table_name: tableName, condition, db_id }).then(res => res.data),
+  crudInsert: (tableName: string, data: any, db_id?: string, transaction_id?: string) => 
+    client.post('/crud/insert', { table_name: tableName, data, db_id, transaction_id }).then(res => res.data),
+  crudUpdate: (tableName: string, data: any, condition: Record<string, any>, db_id?: string, transaction_id?: string) => 
+    client.post('/crud/update', { table_name: tableName, data, condition, db_id, transaction_id }).then(res => res.data),
+  crudDelete: (tableName: string, condition: Record<string, any>, db_id?: string, transaction_id?: string) => 
+    client.post('/crud/delete', { table_name: tableName, condition, db_id, transaction_id }).then(res => res.data),
   generateMockData: (tableName: string, rowCount: number, rules?: Record<string, string>) => 
     client.post('/tools/mock-data', { table_name: tableName, row_count: rowCount, rules }).then(res => res.data),
   exportData: (tableName: string, exportType: string) => 

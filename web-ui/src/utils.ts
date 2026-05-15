@@ -108,6 +108,16 @@ export function parseError(e: unknown): AppError {
     }
   }
 
+  if (errorCode === 'ERR_NOT_FOUND' || msgLower.includes('transaction session not found')) {
+    return {
+      ...baseError,
+      title: 'Transaction session not found',
+      message: message || 'The transaction session has expired or was not found.',
+      solution: 'The transaction might have been closed or timed out. Please start a new transaction.',
+      code: 'ERR_NOT_FOUND',
+    }
+  }
+
   return {
     ...baseError,
     title: '系统错误 (System Error)',
