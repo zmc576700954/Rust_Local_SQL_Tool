@@ -71,6 +71,7 @@ export interface QueryExecutionResult {
   chunk_size?: number;
   preview_cap?: number | null;
   truncated?: boolean;
+  transaction_state?: 'idle' | 'active';
   source_sql?: string;
   statement_index?: number;
   statement_label?: string;

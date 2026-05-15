@@ -272,6 +272,7 @@ function App() {
       chunk_size: typeof result?.chunk_size === 'number' ? result.chunk_size : undefined,
       preview_cap: typeof result?.preview_cap === 'number' ? result.preview_cap : null,
       truncated: Boolean(result?.truncated),
+      transaction_state: result?.transaction_state,
       source_sql: sourceSql,
       statement_index: statementIndex,
       statement_label: getStatementLabel(sourceSql, statementIndex),
@@ -1255,14 +1256,18 @@ function App() {
       }
       toast(action === 'commit' ? 'Transaction committed' : 'Transaction rolled back', 'success')
     } catch (e: unknown) {
+      const err = parseError(e)
+      const isSessionGone = err.code === 'ERR_NOT_FOUND'
+
       setTabStates(prev => ({
         ...prev,
         [tabId]: {
           ...(prev[tabId] || currentTabState),
-          transactionState: 'active',
+          transactionState: isSessionGone ? 'idle' : 'active',
+          errorObj: err,
         }
       }))
-      toast(`${action === 'commit' ? 'Commit' : 'Rollback'} failed: ${parseError(e).message}`, 'error')
+      toast(`${action === 'commit' ? 'Commit' : 'Rollback'} failed: ${err.message}`, 'error')
     }
   }
   const handleSqlUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1404,12 +1409,14 @@ function App() {
       }
 
       const nextExecuteResult = collectedResults[0] || null
+      const lastTxState = [...collectedResults].reverse().find(r => r.transaction_state)?.transaction_state;
+      
       patchExecutingTabState({
         executeResult: nextExecuteResult,
         executeResults: collectedResults,
         activeResultIndex: 0,
         transactionId,
-        transactionState: transactionMode === 'manual' ? 'active' : 'idle',
+        transactionState: (lastTxState || (transactionMode === 'manual' ? 'active' : 'idle')) as any,
         isLoadingMoreResults: false,
         errorObj: null,
       })
@@ -1586,6 +1593,7 @@ function App() {
             isLoadingMoreResults: false,
             executeResult: mergedResult,
             executeResults: nextResults,
+            transactionState: (normalizedNext.transaction_state || currentTabState.transactionState) as any,
           }
         }
       })

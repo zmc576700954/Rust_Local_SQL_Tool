@@ -2,6 +2,7 @@ export interface AppError {
   title: string;
   message: string;
   solution: string;
+  code?: string;
 }
 
 export function parseError(e: unknown): AppError {
@@ -9,7 +10,7 @@ export function parseError(e: unknown): AppError {
   const errorObj = e as any | null;
   const networkLike = errorObj?.message === 'Network Error'
   const isTimeout = errorObj?.code === 'ECONNABORTED'
-  const errorCode = String(errorObj?.response?.data?.code || '')
+  const errorCode = String(errorObj?.response?.data?.code || errorObj?.code || '')
 
   if (networkLike) {
     message = '无法连接后端服务（/backend）。'
@@ -31,76 +32,85 @@ export function parseError(e: unknown): AppError {
   }
 
   const msgLower = message.toLowerCase()
+  const baseError = {
+    message,
+    code: errorCode || 'ERR_UNKNOWN',
+  }
 
   if (errorCode === 'ERR_CANCELED' || msgLower.includes('err_canceled') || msgLower.includes('query canceled') || msgLower.includes('request canceled')) {
     return {
+      ...baseError,
       title: 'Request canceled (Canceled)',
       message: message || 'Query canceled',
       solution: 'The running query was canceled. Run it again if needed.',
+      code: 'ERR_CANCELED',
     }
   }
 
   if (networkLike) {
     return {
+      ...baseError,
       title: '服务未启动 (Network Error)',
-      message,
       solution: '请确保本地的 Rust 后端服务已启动并在运行，且没有任何端口占用或防火墙拦截。',
+      code: 'ERR_NETWORK',
     }
   }
   if (isTimeout) {
     return {
+      ...baseError,
       title: '请求超时 (Timeout)',
-      message,
       solution: '后端处理或 AI 响应超过 120 秒，请检查您的网络代理配置是否通畅。',
+      code: 'ERR_TIMEOUT',
     }
   }
+
   if (msgLower.includes('invalid session token') || msgLower.includes('401') || msgLower.includes('unauthorized') || msgLower.includes('authentication failed') || msgLower.includes('incorrect api key')) {
     return {
+      ...baseError,
       title: 'AI 鉴权失败 (Auth Error)',
-      message,
       solution: '当前配置的 AI Token 无效、已过期或格式错误。请在配置页重新填写对应服务商的有效 API Key。',
     }
   }
   if (msgLower.includes('access denied') || msgLower.includes('unknown database') || msgLower.includes('connection refused') || msgLower.includes('communications link failure') || msgLower.includes('failed to connect')) {
     return {
+      ...baseError,
       title: '数据库连接失败 (DB Connection)',
-      message,
       solution: '请检查您的数据库地址、端口是否开放，以及账号密码、IP白名单权限是否配置正确。',
     }
   }
   if (msgLower.includes('error in your sql syntax') || msgLower.includes("table doesn't exist") || msgLower.includes('unknown column')) {
     return {
+      ...baseError,
       title: 'SQL 语法/结构错误 (DB Execution)',
-      message,
       solution: 'AI 生成的 SQL 可能由于缺乏上下文导致表名/字段名错误。请在侧边栏上传真实的 .sql 结构文件，或手动在编辑器中修改报错的字段。',
     }
   }
   if (msgLower.includes('429') || msgLower.includes('too many requests') || msgLower.includes('timeout') || msgLower.includes('rate limit')) {
     return {
+      ...baseError,
       title: 'AI 请求受限 (Rate Limit / Timeout)',
-      message,
       solution: '请求过于频繁或被服务商风控。建议在配置中选择 Pool (Token池) 模式填入多个 Key 以自动轮询重试。',
     }
   }
   if (msgLower.includes('failed to parse sql')) {
     return {
+      ...baseError,
       title: '离线 SQL 解析失败 (Parse Error)',
-      message,
       solution: '文件包含了不受支持的专有语法方言，请确保上传标准格式的 MySQL DDL (CREATE TABLE) 语句。',
     }
   }
 
   if (msgLower.includes('dangerous_sql')) {
     return {
+      ...baseError,
       title: '高危操作警告 (Dangerous SQL)',
-      message,
       solution: '系统检测到该 SQL 可能对数据造成不可逆的修改或删除，已拦截执行请求。若确需执行，请在弹窗中确认。',
     }
   }
 
   return {
+    ...baseError,
     title: '系统错误 (System Error)',
-    message,
     solution: '请检查您的输入内容或查看终端运行日志获取详细信息。',
   }
 }

@@ -2469,6 +2469,7 @@ struct ExecuteResponse {
     chunk_size: Option<u32>,
     preview_cap: Option<u32>,
     truncated: bool,
+    transaction_state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -4035,6 +4036,16 @@ async fn execute_sql(
         clear_metadata_caches(&state).await;
     }
 
+    let transaction_state = if let Some(id) = transaction_id.as_deref() {
+        if state.transaction_sessions.read().await.contains_key(id) {
+            Some("active".to_string())
+        } else {
+            Some("idle".to_string())
+        }
+    } else {
+        None
+    };
+
     Ok(Json(ExecuteResponse {
         columns,
         row_count: rows.len(),
@@ -4047,6 +4058,7 @@ async fn execute_sql(
         chunk_size,
         preview_cap,
         truncated,
+        transaction_state,
     }))
 }
 

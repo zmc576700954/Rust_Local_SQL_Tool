@@ -223,6 +223,64 @@ function normalizeColumnLayout(raw: unknown, columns: string[]): ColumnLayoutSta
   };
 }
 
+function useResetTableState(
+  tableName: string,
+  dbId: string | undefined,
+  setters: {
+    setEditingCell: (v: any) => void;
+    setModifiedRows: (v: any) => void;
+    setDeletedRowIdxs: (v: any) => void;
+    setNewRows: (v: any) => void;
+    setSaveAttemptReport: (v: any) => void;
+    setPendingStaleRecovery: (v: any) => void;
+    setActiveStaleConflictKey: (v: any) => void;
+    setStaleConflictReviewScope: (v: any) => void;
+    setStaleConflictSelections: (v: any) => void;
+    setShowStaleConflictOverview: (v: any) => void;
+    setShowSaveReviewModal: (v: any) => void;
+    setStaleConflictQueueFilter: (v: any) => void;
+    setStaleConflictOverviewQuery: (v: any) => void;
+    setStaleConflictOverviewSort: (v: any) => void;
+    setStaleConflictOverviewCollapsedGroups: (v: any) => void;
+    setShowPasteModal: (v: any) => void;
+    setPasteText: (v: any) => void;
+    setIsReadingClipboard: (v: any) => void;
+    setContextMenu: (v: any) => void;
+    setPreviewCell: (v: any) => void;
+    setFilterMenu: (v: any) => void;
+    setShowColumnMenu: (v: any) => void;
+  }
+) {
+  const settersRef = useRef(setters);
+  settersRef.current = setters;
+
+  useEffect(() => {
+    const s = settersRef.current;
+    s.setEditingCell(null);
+    s.setModifiedRows({});
+    s.setDeletedRowIdxs(new Set());
+    s.setNewRows([]);
+    s.setSaveAttemptReport(null);
+    s.setPendingStaleRecovery(null);
+    s.setActiveStaleConflictKey(null);
+    s.setStaleConflictReviewScope(null);
+    s.setStaleConflictSelections({});
+    s.setShowStaleConflictOverview(false);
+    s.setShowSaveReviewModal(false);
+    s.setStaleConflictQueueFilter('all');
+    s.setStaleConflictOverviewQuery('');
+    s.setStaleConflictOverviewSort('risk_desc');
+    s.setStaleConflictOverviewCollapsedGroups(createStaleConflictOverviewCollapsedState());
+    s.setShowPasteModal(false);
+    s.setPasteText('');
+    s.setIsReadingClipboard(false);
+    s.setContextMenu(null);
+    s.setPreviewCell(null);
+    s.setFilterMenu(null);
+    s.setShowColumnMenu(false);
+  }, [tableName, dbId]);
+}
+
 export function DataTable({ 
   data, 
   schema, 
@@ -276,6 +334,31 @@ export function DataTable({
 
   const layoutStorageKey = useMemo(() => `data-table-layout:${dbId || 'default'}:${tableName}`, [dbId, tableName]);
   const [columnLayout, setColumnLayout] = useState<ColumnLayoutState>(() => buildDefaultColumnLayout([]));
+
+  useResetTableState(tableName, dbId, {
+    setEditingCell,
+    setModifiedRows,
+    setDeletedRowIdxs,
+    setNewRows,
+    setSaveAttemptReport,
+    setPendingStaleRecovery,
+    setActiveStaleConflictKey,
+    setStaleConflictReviewScope,
+    setStaleConflictSelections,
+    setShowStaleConflictOverview,
+    setShowSaveReviewModal,
+    setStaleConflictQueueFilter,
+    setStaleConflictOverviewQuery,
+    setStaleConflictOverviewSort,
+    setStaleConflictOverviewCollapsedGroups,
+    setShowPasteModal,
+    setPasteText,
+    setIsReadingClipboard,
+    setContextMenu,
+    setPreviewCell,
+    setFilterMenu,
+    setShowColumnMenu,
+  });
 
   const primaryKeys = useMemo(() => {
     const pkIdxs = schema.indexes.filter((i: any) => i.index_name === 'PRIMARY');
