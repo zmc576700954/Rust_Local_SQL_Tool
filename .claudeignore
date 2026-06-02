@@ -1,0 +1,69 @@
+# ============================================================
+# .claudeignore — 告诉 Claude 哪些文件/目录不需要读取
+# 格式同 .gitignore，路径相对于项目根目录
+# ============================================================
+
+# ── Rust 构建产物（合计 ~20GB） ─────────────────────────────
+/target/
+web-ui/src-tauri/target/
+web-ui/src-tauri/tmp/
+
+# ── Tauri 自动生成代码 ─────────────────────────────────────
+web-ui/src-tauri/gen/
+
+# ── 前端构建产物与依赖 ─────────────────────────────────────
+web-ui/node_modules/
+web-ui/dist/
+web-ui/dist-ssr/
+
+# ── Lock 文件（自动生成，体量大，无代码参考价值） ───────────
+Cargo.lock
+web-ui/src-tauri/Cargo.lock
+package-lock.json
+web-ui/package-lock.json
+
+# ── 前端构建缓存 ──────────────────────────────────────────
+web-ui/.vite/
+web-ui/.cache/
+web-ui/coverage/
+
+# ── 一次性修复脚本（历史遗留，非项目源码） ────────────────
+web-ui/fix_any.py
+web-ui/fix_any_script.py
+web-ui/fix_catch.py
+web-ui/fix_err.py
+web-ui/undo_any_script.py
+
+# ── 临时诊断文件 ──────────────────────────────────────────
+*.log
+*.local
+web-ui/tsc_errors.txt
+
+# ── 二进制产物 ────────────────────────────────────────────
+*.exe
+*.dll
+*.pdb
+*.so
+*.dylib
+*.o
+*.rlib
+*.d
+
+# ── docs/（设计文档/任务清单，可按需保留） ─────────────────
+docs/tasks/
+
+# ── CI/CD 与平台配置 ─────────────────────────────────────
+.github/
+.claude/
+.codex/
+.trae/
+.superpowers/
+
+# ── OS 系统文件 ───────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Python 编译缓存 ──────────────────────────────────────
+*.pyc
+__pycache__/
