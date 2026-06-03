@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { api } from '../api';
+import { api } from '../../api';
 import { Database, FileText, Code, Trash2, Plus, Edit2, Check, Sparkles } from 'lucide-react';
-import { useToast } from './Toast';
-import { parseError } from '../utils';
-import type { KnowledgeItem } from '../types';
-import { tr } from '../i18n';
+import { useToast } from '../Toast';
+import { parseError } from '../../utils';
+import type { KnowledgeItem } from '../../types';
+import { tr } from '../../i18n';
 
 interface AiTrainingPanelProps {
   onInsertSql?: (sql: string) => void;

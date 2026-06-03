@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { StepWizard } from './StepWizard'
-import type { WizardStep } from './StepWizard'
-import { api, JOB_POLL_INTERVAL_MS } from '../api'
-import { useToast } from './Toast'
-import { parseError } from '../utils'
-import { tr } from '../i18n'
+import { StepWizard } from '../StepWizard'
+import type { WizardStep } from '../StepWizard'
+import { api, JOB_POLL_INTERVAL_MS } from '../../api'
+import { useToast } from '../Toast'
+import { parseError } from '../../utils'
+import { tr } from '../../i18n'
 
 interface GoLiveProps {
   onCancel: () => void

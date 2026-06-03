@@ -1,15 +1,15 @@
 use crate::config::{AiConnectionMode, AiModel, AiProvider, AppConfig, ResolvedAiProfile};
 use crate::timeout_policy::TimeoutPolicy;
 use reqwest::{Client, Error as ReqwestError, StatusCode};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Instant};
+
+pub use crate::ai::types::{AiError, AiHealthReport, ChatMessage};
 
 type TierParams = (
     Option<f32>,
@@ -20,45 +20,6 @@ type TierParams = (
     Option<String>,
     Duration,
 );
-
-#[derive(Debug, Error)]
-pub enum AiError {
-    #[error("Network error: {0}")]
-    Network(#[from] ReqwestError),
-    #[error("No tokens available in pool")]
-    NoTokens,
-    #[error("AI auth failed: {0}")]
-    Auth(String),
-    #[error("AI forbidden: {0}")]
-    Forbidden(String),
-    #[error("AI model not found: {0}")]
-    ModelNotFound(String),
-    #[error("AI rate limited: {0}")]
-    RateLimited(String),
-    #[error("AI server error: {0}")]
-    ServerError(String),
-    #[error("API returned an error: {0}")]
-    ApiError(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiHealthReport {
-    pub ok: bool,
-    pub active_ai_profile_id: Option<String>,
-    pub provider: AiProvider,
-    pub mode: AiConnectionMode,
-    pub endpoint: String,
-    pub model_id: String,
-    pub tier: String,
-    pub latency_ms: Option<u128>,
-    pub result_preview: Option<String>,
-}
 
 #[derive(Debug, Clone)]
 struct TokenState {

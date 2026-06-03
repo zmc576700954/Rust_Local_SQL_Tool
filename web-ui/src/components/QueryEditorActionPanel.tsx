@@ -2,7 +2,7 @@ import React, { Suspense } from 'react'
 import { AlignLeft, BookMarked, Command, MoreHorizontal, Play, Save, Server, Sparkles, X } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { Skeleton } from './Skeleton'
-import { TypingEffect } from './TypingEffect'
+import { TypingEffect } from './ai'
 import { tr } from '../i18n'
 import type { Monaco, MonacoEditor } from '../types'
 

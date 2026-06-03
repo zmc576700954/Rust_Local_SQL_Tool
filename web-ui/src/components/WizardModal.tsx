@@ -8,11 +8,11 @@ import { ImportWizard } from './ImportWizard';
 import { StructureSync } from './StructureSync';
 import { DataSync } from './DataSync';
 import { PerfSync } from './PerfSync';
-import { GoLive } from './GoLive';
+import { GoLive } from './goLive';
 import { DataTransfer } from './DataTransfer';
 import { DbSecurityManager } from './DbSecurityManager';
 import { DbEventsTriggers } from './DbEventsTriggers';
-import { ModelCompare } from './ModelCompare';
+import { ModelCompare } from './ai';
 import { VisualSyncWizard } from './VisualSyncWizard';
 import { tr } from '../i18n';
 

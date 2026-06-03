@@ -2,171 +2,41 @@ import React, { useState, useEffect, useRef, Suspense, useCallback, useMemo } fr
 import { Database, Settings, BookMarked, Keyboard, X } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { format as formatSql } from 'sql-formatter'
-import { Onboarding } from './components/Onboarding'
-import { SettingsPanel } from './components/SettingsPanel'
-import { useToast } from './components/Toast'
-import { SkeletonLoader } from './components/Skeleton'
-import { CommandPalette } from './components/CommandPalette'
-import { QueryEditorActionPanel } from './components/QueryEditorActionPanel'
-import { QueryResultsPanel } from './components/QueryResultsPanel'
-import { Tabs, type TabItem } from './components/Tabs'
-import { TableContextMenu } from './components/TableContextMenu'
-import { ToolsNav } from './components/ToolsNav'
-import { WizardModal } from './components/WizardModal'
-import { GoLiveReportsTab } from './components/GoLiveReportsTab'
-import { GoLiveAuditTab } from './components/GoLiveAuditTab'
-import { AdvancedToolsHub } from './components/AdvancedToolsHub'
-import { PerfDiagnosticsPanel } from './components/PerfDiagnosticsPanel'
-import { SqlHistory } from './components/SqlHistory'
-import { AiTrainingPanel } from './components/AiTrainingPanel'
-import { DbExplorerSidebar } from './components/DbExplorerSidebar'
-import { api } from './api'
-import { runAiExplain, runAiOptimize, runExplainErrorWithAi, runFixWithAi, runGenerateSql } from './queryAiActions'
-import { getStatementKind, getStatementLabel, isPotentiallyDangerousSql, splitSqlStatements } from './sqlStatements'
+import { Onboarding } from '../components/Onboarding'
+import { SettingsPanel } from '../components/SettingsPanel'
+import { useToast } from '../components/Toast'
+import { SkeletonLoader } from '../components/Skeleton'
+import { CommandPalette } from '../components/CommandPalette'
+import { QueryEditorActionPanel } from '../components/QueryEditorActionPanel'
+import { QueryResultsPanel } from '../components/QueryResultsPanel'
+import { Tabs, type TabItem } from '../components/Tabs'
+import { TableContextMenu } from '../components/TableContextMenu'
+import { ToolsNav } from '../components/ToolsNav'
+import { WizardModal } from '../components/WizardModal'
+import { GoLiveReportsTab, GoLiveAuditTab } from '../components/goLive'
+import { AdvancedToolsHub } from '../components/AdvancedToolsHub'
+import { PerfDiagnosticsPanel } from '../components/PerfDiagnosticsPanel'
+import { SqlHistory } from '../components/SqlHistory'
+import { AiTrainingPanel } from '../components/ai'
+import { DbExplorerSidebar } from '../components/DbExplorerSidebar'
+import { api } from '../api'
+import { runAiExplain, runAiOptimize, runExplainErrorWithAi, runFixWithAi, runGenerateSql } from '../queryAiActions'
+import { getStatementKind, getStatementLabel, isPotentiallyDangerousSql, splitSqlStatements } from '../sqlStatements'
   
-import { parseError, formatErr, sanitizeForLog } from './utils'
-import type { AppError } from './utils'
-import { dbTypeDisplayName } from './utils/dbCapabilities'
-import { useAutoI18nDom } from './i18n'
-import { tr } from './i18n'
+import { parseError, formatErr, sanitizeForLog } from '../utils'
+import type { AppError } from '../utils'
+import { dbTypeDisplayName } from '../utils/dbCapabilities'
+import { useAutoI18nDom } from '../i18n'
+import { tr } from '../i18n'
 
 import * as monaco from 'monaco-editor';
-import type { SchemaResponse, ConfigData, QueryExecutionResult, QueryResultCompareReport, AiRule, DbConnection, TableWithDetails, ColumnInfo, MonacoEditor, Monaco, KnowledgeItem, SavedSqlBookmark, QueryErrorInsight } from './types';
+import type { SchemaResponse, ConfigData, QueryExecutionResult, AiRule, DbConnection, TableWithDetails, ColumnInfo, MonacoEditor, Monaco, KnowledgeItem, SavedSqlBookmark, QueryErrorInsight } from '../types'
+import { QUERY_CHUNK_SIZE, SQL_BOOKMARKS_KEY, MAX_SQL_BOOKMARKS, DEFAULT_QUERY_SQL, buildDefaultBookmarkTitle, normalizeSavedBookmarks, createCancelToken, stringifyJsonArtifact, cloneQueryExecutionResultSnapshot, canCompareQueryResult, buildQueryResultCompareReport } from './helpers'
 
-const ExecutionPlan = React.lazy(() => import('./components/ExecutionPlan').then(m => ({ default: m.ExecutionPlan })));
-const SessionInfoPanel = React.lazy(() => import('./components/SessionInfoPanel').then(m => ({ default: m.SessionInfoPanel })));
-const QueryBuilder = React.lazy(() => import('./components/QueryBuilder').then(m => ({ default: m.QueryBuilder })));
-const TableWorkspace = React.lazy(() => import('./components/TableWorkspace').then(m => ({ default: m.TableWorkspace })));
-const QUERY_CHUNK_SIZE = 200
-const SQL_BOOKMARKS_KEY = 'sql_workbench_bookmarks_v1'
-const MAX_SQL_BOOKMARKS = 50
-
-const buildDefaultBookmarkTitle = (sql: string) => {
-  const firstLine = sql
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean)
-
-  if (!firstLine) return 'SQL Bookmark'
-  return firstLine.length > 56 ? `${firstLine.slice(0, 56)}…` : firstLine
-}
-
-const normalizeSavedBookmarks = (raw: unknown): SavedSqlBookmark[] => {
-  if (!Array.isArray(raw)) return []
-
-  return raw
-    .filter((item): item is SavedSqlBookmark => Boolean(
-      item
-      && typeof item === 'object'
-      && typeof (item as SavedSqlBookmark).id === 'string'
-      && typeof (item as SavedSqlBookmark).title === 'string'
-      && typeof (item as SavedSqlBookmark).sql === 'string'
-    ))
-    .map((item) => ({
-      ...item,
-      description: item.description || null,
-      db_id: item.db_id || null,
-      db_label: item.db_label || null,
-      created_at: typeof item.created_at === 'number' ? item.created_at : Date.now(),
-      updated_at: typeof item.updated_at === 'number' ? item.updated_at : Date.now(),
-    }))
-    .slice(0, MAX_SQL_BOOKMARKS)
-}
-
-function createCancelToken(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-  return `cancel-${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-const DEFAULT_QUERY_SQL = '-- Generated SQL will appear here\n'
-
-const stringifyJsonArtifact = (value: unknown) =>
-  JSON.stringify(value, (_key, innerValue) => typeof innerValue === 'bigint' ? innerValue.toString() : innerValue, 2)
-
-const normalizeComparableValue = (value: unknown): unknown => {
-  if (typeof value === 'bigint') return value.toString()
-  if (Array.isArray(value)) return value.map((item) => normalizeComparableValue(item))
-  if (value && typeof value === 'object') {
-    return Object.keys(value as Record<string, unknown>)
-      .sort()
-      .reduce<Record<string, unknown>>((acc, key) => {
-        acc[key] = normalizeComparableValue((value as Record<string, unknown>)[key])
-        return acc
-      }, {})
-  }
-  return value
-}
-
-const serializeComparableRow = (row: unknown) => JSON.stringify(normalizeComparableValue(row))
-
-const cloneQueryExecutionResultSnapshot = (result: QueryExecutionResult): QueryExecutionResult =>
-  JSON.parse(stringifyJsonArtifact(result)) as QueryExecutionResult
-
-const canCompareQueryResult = (result: QueryExecutionResult | null | undefined): result is QueryExecutionResult => {
-  if (!result || result.status !== 'success' || result.error) return false
-  return Array.isArray(result.rows) && (result.rows.length > 0 || (result.columns?.length ?? 0) > 0)
-}
-
-const buildQueryResultCompareReport = (
-  baseline: QueryExecutionResult | null | undefined,
-  current: QueryExecutionResult | null | undefined
-): QueryResultCompareReport | null => {
-  if (!canCompareQueryResult(baseline) || !canCompareQueryResult(current)) {
-    return null
-  }
-
-  const baselineCounts = new Map<string, { count: number; row: any }>()
-  for (const row of baseline.rows) {
-    const key = serializeComparableRow(row)
-    const existing = baselineCounts.get(key)
-    if (existing) {
-      existing.count += 1
-    } else {
-      baselineCounts.set(key, { count: 1, row })
-    }
-  }
-
-  let unchangedCount = 0
-  const addedRows: any[] = []
-  for (const row of current.rows) {
-    const key = serializeComparableRow(row)
-    const existing = baselineCounts.get(key)
-    if (existing && existing.count > 0) {
-      existing.count -= 1
-      unchangedCount += 1
-    } else {
-      addedRows.push(row)
-    }
-  }
-
-  const removedRows: any[] = []
-  baselineCounts.forEach(({ count, row }) => {
-    for (let index = 0; index < count; index += 1) {
-      removedRows.push(row)
-    }
-  })
-
-  return {
-    baseline_statement_label: baseline.statement_label || null,
-    current_statement_label: current.statement_label || null,
-    baseline_source_sql: baseline.source_sql || null,
-    current_source_sql: current.source_sql || null,
-    baseline_execution_time_ms: baseline.execution_time_ms,
-    current_execution_time_ms: current.execution_time_ms,
-    compared_at: Date.now(),
-    summary: {
-      baseline_row_count: baseline.rows.length,
-      current_row_count: current.rows.length,
-      added_count: addedRows.length,
-      removed_count: removedRows.length,
-      unchanged_count: unchangedCount,
-    },
-    added_rows: addedRows,
-    removed_rows: removedRows,
-  }
-}
+const ExecutionPlan = React.lazy(() => import('../components/ExecutionPlan').then(m => ({ default: m.ExecutionPlan })));
+const SessionInfoPanel = React.lazy(() => import('../components/SessionInfoPanel').then(m => ({ default: m.SessionInfoPanel })));
+const QueryBuilder = React.lazy(() => import('../components/QueryBuilder').then(m => ({ default: m.QueryBuilder })));
+const TableWorkspace = React.lazy(() => import('../components/TableWorkspace').then(m => ({ default: m.TableWorkspace })));
 
 function App() {
   useAutoI18nDom()

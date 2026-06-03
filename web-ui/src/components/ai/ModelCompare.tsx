@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '../api';
-import { useToast } from './Toast';
-import { tr } from '../i18n';
-import { DiffViewer } from './DiffViewer';
-import type { SchemaDiff } from './DiffViewer';
+import { api } from '../../api';
+import { useToast } from '../Toast';
+import { tr } from '../../i18n';
+import { DiffViewer } from '../DiffViewer';
+import type { SchemaDiff } from '../DiffViewer';
 
 interface ModelCompareProps {
   onCancel: () => void;
