@@ -583,3 +583,512 @@ if conn.is_read_only && is_mutation_sql(&sql) {
 | 批量 INSERT 的 SQL 长度超过 `max_allowed_packet` | 中 | 动态计算批次大小，按行估算字节数 |
 | SSH 隧道引入新的依赖和安全考量 | 低 | Phase 4 实现，用 feature flag 控制编译 |
 | 标识符白名单可能漏掉合法但含特殊字符的列名 | 低 | 白名单验证失败时回退到标识符引用（带转义） |
+
+---
+
+## 六、数据库工具功能审计
+
+### 6.1 功能目录总览
+
+经全面审计前端和后端代码，共发现 **52 个独立功能点**，按能力域分类如下：
+
+| 能力域 | 功能数 | 实现状态 |
+|--------|--------|----------|
+| SQL 编辑与执行 | 9 | 全部完整 |
+| 表管理与 CRUD | 4 | 全部完整 |
+| 数据导入/导出/传输 | 5 | 全部完整 |
+| AI 功能 | 8 | 全部完整 |
+| 智能规则与策略 | 2 | 全部完整 |
+| 结构同步与对比 | 3 | 功能有重叠 |
+| 数据同步与压测 | 2 | 全部完整 |
+| 上线门禁系统 | 3 | 全部完整 |
+| 数据库管理 | 5 | 仅 MySQL |
+| 性能诊断 | 1 | 全部完整 |
+| 辅助工具 | 10 | 全部完整 |
+
+### 6.2 关键工具功能详细清单
+
+#### 结构同步与对比（3 个功能）
+
+| # | 功能 | API | 后端实现 | 问题 |
+|---|------|-----|---------|------|
+| 29 | 结构同步 (Schema Sync) | `POST /tools/schema-sync/diff` `POST /tools/schema-sync/ddl` | `SyncEngine::schema_sync` + `DdlEngine::generate_preview` | 仅 MySQL 语法；无 ALGORITHM/LOCK 提示；对比维度不足（缺 CHECK 约束、触发器、存储过程、分区） |
+| 30 | 模型对比 (Model Compare) | 复用 schema-sync/diff | 同上 | 与结构同步功能重叠 |
+| 31 | 可视化同步向导 | 复用 schema-sync 和 data-sync API | 同上 | 与结构同步、数据同步均有大量重叠 |
+
+**当前 Schema Sync 后端问题**:
+- `DdlEngine::generate_preview` 生成的 ALTER TABLE 无 `ALGORITHM=INSTANT/INPLACE, LOCK=NONE` 提示
+- 不处理外键依赖排序（父表/子表执行顺序）
+- 不支持列重排序 (`AFTER`/`FIRST`)
+- 不支持 MySQL → PostgreSQL 的类型映射
+- 无回滚 DDL 生成
+- 不处理循环外键引用
+
+#### 数据同步与压测（2 个功能）
+
+| # | 功能 | API | 后端实现 | 问题 |
+|---|------|-----|---------|------|
+| 32 | 数据同步 (Data Sync) | `POST /tools/data-sync/compare` `POST /tools/data-sync/preview` `POST /tools/data-sync/deploy` | `MySqlDataSyncEngine` (mysql_sync.rs) + `DataSyncEngine` (sync.rs) | 两套独立实现（sync.rs 和 mysql_sync.rs）；主键比较用 f64 精度丢失；无 LIMIT 保护；format_value() SQL 注入风险 |
+| 33 | 同步压测 (Perf Sync) | `POST /tools/perf-sync/start` | `LoadgenEngine` (loadgen.rs) | 仅支持 MySQL 语法 (ENGINE=InnoDB)；批量 INSERT 无事务包裹；表名未加引号 |
+
+**当前数据同步算法问题**:
+- `MySqlDataSyncEngine::compare` 使用 `fetch_rows_in_range` 全量拉取两个数据库的数据到内存做 HashMap 比较
+- 校验和仅用于判断块是否相等，不用于过滤——不一致块的行仍然全量拉取
+- 缺少 pt-table-sync 风格的分层校验和（块级→行级→列级）
+- 缺少自适应分块大小
+- 缺少 NULL 安全的行哈希计算（`CONCAT_WS` + `COALESCE`）
+
+#### 数据导入/导出/传输（5 个功能）
+
+| # | 功能 | API | 后端实现 | 问题 |
+|---|------|-----|---------|------|
+| 14 | 数据导出 (Export) | `POST /tools/jobs/export/start` | 异步 Job | 功能完整；支持 CSV/SQL/JSON/XML/XLS |
+| 15 | 数据导入 (Import Wizard) | `POST /tools/jobs/import/start` `POST /tools/import` | Job + `import_data` handler | **`import_data` 逐行 INSERT（严重性能问题）**；Excel 通过 Magic Bytes 检测 |
+| 16 | 数据传输 (Data Transfer) | `POST /tools/data-transfer/upload` `POST /tools/data-transfer/execute` | `TransferEngine` (transfer.rs) | `format!()` 拼接 SQL（注入风险）；大文件全量读入内存；跨库传输仅支持 MySQL 源 |
+| 17 | 测试数据生成 | `POST /tools/mock-data` | `MockDataGenerator` + AI | 依赖 AI 生成 SQL，无本地模板引擎 |
+| 18 | Navicat 文件解析 | `POST /navicat/parse` | `NavicatParser` | 后端有实现，前端入口有限 |
+
+#### 表管理与 CRUD（4 个功能）
+
+| # | 功能 | API | 后端实现 | 问题 |
+|---|------|-----|---------|------|
+| 10 | 表数据浏览 | `GET /table/data` | 分页查询 | 仅支持 MySQL 语法；Keyset 分页实现正确 |
+| 11 | 表设计器 | `POST /table/ddl/preview` `POST /table/ddl` | DDL 生成 | AI 索引建议未完整实现 |
+| 12 | CRUD 操作 | `POST /crud/insert` `POST /crud/update` `POST /crud/delete` | `CrudManager` (crud.rs) | 仅 MySQL 反引号标识符；无批量 INSERT；SQL 值类型不够完整 |
+| 13 | 表右键菜单 | 前端路由 | - | 无问题 |
+
+#### SQL 工作台核心（9 个功能）
+
+| # | 功能 | API | 问题 |
+|---|------|-----|------|
+| 1 | SQL 编辑器 | 无（前端 Monaco） | 无 |
+| 2 | SQL 执行引擎 | `POST /execute` `POST /execute/cancel` | 分块加载实现正确 |
+| 3 | 事务管理 | `POST /execute/transaction` | 实现完整 |
+| 4 | 执行计划 | `POST /sql/explain` | 仅 MySQL EXPLAIN 语法 |
+| 5 | SQL 变量替换 | 前端本地 | 引号内的变量也会被替换 |
+| 6 | SQL 格式化 | 前端 sql-formatter | 无 |
+| 7 | 查询结果对比 | 前端本地 | 大结果集 JSON 序列化性能差 |
+| 8 | 结果导出 | 前端本地 | SQL 导出表名硬编码为 `query_result` |
+| 9 | 结果图表可视化 | 前端 Recharts | 无 |
+
+#### 数据库管理（5 个功能）
+
+| # | 功能 | 问题 |
+|---|------|------|
+| 37 | 权限与用户管理 | 仅支持 MySQL/MariaDB |
+| 38 | 事件与触发器 | 仅支持 MySQL/MariaDB |
+| 39 | 会话信息 | 仅 MySQL `SHOW VARIABLES` |
+| 40 | 连接管理 | 功能完整，诊断信息详尽 |
+| 41 | 离线 Schema 解析 | 功能完整 |
+
+#### AI 功能（8 个功能）
+
+| # | 功能 | 问题 |
+|---|------|------|
+| 19-22 | AI SQL 生成/优化/解释/修复 | `/chat` 和 `/api/ai/query` 两条路由功能重叠 |
+| 23 | AI 知识库 | 功能完整 |
+| 24 | AI Health Check | 功能完整 |
+| 25 | AI 模型管理 | 功能完整 |
+| 26 | AI Profile 管理 | 功能完整 |
+
+### 6.3 UX 层面功能重叠问题
+
+| 重叠组 | 涉及功能 | 建议 |
+|--------|---------|------|
+| 结构对比三合一 | 结构同步 + 模型对比 + 可视化同步向导 | 合并为统一的 "Schema Compare" 入口，内部切换展示模式 |
+| 数据同步两套路由 | `data-sync/*` + `mysql-sync/*` | 去重，保留一套路由 |
+| AI 查询两套路由 | `/chat` + `/api/ai/query` | 统一为 `/api/ai/query` |
+
+---
+
+## 七、结构同步最佳实践方案
+
+> 基于对 Atlas、Liquibase、DBeaver、gh-ost、pgloader 等工具的研究
+
+### 7.1 当前问题诊断
+
+`DdlEngine::generate_preview` (tools.rs) 的核心问题：
+
+1. **对比维度不足**：仅对比列、索引、外键，缺少 CHECK 约束、触发器、存储过程、分区、序列
+2. **无 ALGORITHM 提示**：生成的 ALTER TABLE 不包含 `ALGORITHM=INSTANT/INPLACE`，MySQL 可能选择最慢的 COPY 算法
+3. **无依赖排序**：ALTER 语句不考虑表间依赖（父表 vs 子表）
+4. **无回滚 DDL**：只有正向同步，无反向回滚脚本
+5. **仅 MySQL 方言**：标识符用反引号，类型系统是 MySQL 特有的
+
+### 7.2 目标架构（参考 Atlas/Liquibase 声明式方法）
+
+```
+┌─────────────┐     ┌─────────────┐
+│  Source DB   │     │  Target DB   │
+└──────┬──────┘     └──────┬──────┘
+       │                    │
+       ▼                    ▼
+┌──────────────┐    ┌──────────────┐
+│ SchemaSnapshot│    │ SchemaSnapshot│
+│ (元数据快照)   │    │ (元数据快照)   │
+└──────┬───────┘    └──────┬───────┘
+       │                    │
+       └────────┬───────────┘
+                ▼
+       ┌────────────────┐
+       │  SchemaDiffer   │
+       │  (差集计算)      │
+       └───────┬────────┘
+               ▼
+       ┌────────────────┐
+       │  DdlGenerator   │
+       │  (方言化DDL生成)  │
+       └───────┬────────┘
+               ▼
+       ┌────────────────┐
+       │  DependencySorter│
+       │  (拓扑排序)      │
+       └───────┬────────┘
+               ▼
+       ┌────────────────┐
+       │  Preview + Deploy│
+       │  (预览/执行)     │
+       └────────────────┘
+```
+
+### 7.3 SchemaSnapshot 数据模型增强
+
+当前 `TableWithDetails` 需要扩展：
+
+```rust
+pub struct SchemaSnapshot {
+    pub db_name: String,
+    pub db_type: DbType,
+    pub tables: Vec<TableSnapshot>,
+    pub views: Vec<ViewSnapshot>,
+    pub procedures: Vec<ProcedureSnapshot>,   // 新增
+    pub triggers: Vec<TriggerSnapshot>,       // 新增
+    pub enums: Vec<EnumSnapshot>,             // 新增（PG CREATE TYPE）
+    pub sequences: Vec<SequenceSnapshot>,     // 新增
+}
+
+pub struct TableSnapshot {
+    pub name: String,
+    pub engine: Option<String>,               // MySQL ENGINE
+    pub charset: Option<String>,              // 字符集
+    pub collation: Option<String>,            // 排序规则
+    pub comment: Option<String>,
+    pub columns: Vec<ColumnSnapshot>,
+    pub indexes: Vec<IndexSnapshot>,
+    pub foreign_keys: Vec<ForeignKeySnapshot>,
+    pub check_constraints: Vec<CheckConstraintSnapshot>,  // 新增
+    pub partitions: Option<PartitionSnapshot>,             // 新增
+}
+```
+
+### 7.4 DDL 生成引擎增强
+
+**MySQL ALGORITHM 提示**：
+
+```rust
+fn algorithm_hint(op: &DdlOperation) -> &'static str {
+    match op {
+        AddColumn { .. } => "ALGORITHM=INSTANT",     // 8.0.12+
+        DropColumn { .. } => "ALGORITHM=INSTANT",     // 8.0.29+
+        RenameColumn { .. } => "ALGORITHM=INSTANT",   // 8.0.28+
+        ModifyColumnType { .. } => "ALGORITHM=INPLACE", // 需要表重建
+        AddIndex { .. } => "ALGORITHM=INPLACE, LOCK=NONE",
+        ReorderColumn { .. } => "ALGORITHM=INPLACE",  // 需要表重建
+        _ => "ALGORITHM=DEFAULT",
+    }
+}
+```
+
+**依赖排序**：
+
+```rust
+fn sort_by_dependency(tables: &[TableDiff]) -> Vec<&TableDiff> {
+    // 构建 DAG：外键引用关系
+    // 拓扑排序：父表先于子表
+    // CREATE: 父→子顺序
+    // DROP:   子→父顺序
+}
+```
+
+**回滚 DDL 生成**：
+
+```rust
+fn generate_rollback(old: Option<&TableSnapshot>, new: &TableSnapshot) -> String {
+    // 正向 ADD COLUMN → 回滚 DROP COLUMN
+    // 正向 DROP COLUMN → 回滚 ADD COLUMN (需要保留旧定义)
+    // 正向 MODIFY → 回滚 MODIFY (恢复旧类型)
+}
+```
+
+### 7.5 MySQL ↔ PostgreSQL 类型映射（参考 pgloader）
+
+```rust
+pub fn mysql_to_pg_type(mysql_type: &str, column: &ColumnSnapshot) -> String {
+    match mysql_type.to_uppercase().as_str() {
+        "TINYINT" if column.column_type.contains("(1)") => "BOOLEAN".into(),
+        "INT" | "INTEGER" if column.extra.contains("auto_increment") => {
+            if column.column_type.contains("UNSIGNED") { "BIGSERIAL" } else { "SERIAL" }
+        }
+        "BIGINT" if column.extra.contains("auto_increment") => "BIGSERIAL".into(),
+        "TINYINT" | "SMALLINT" | "MEDIUMINT" if column.column_type.contains("UNSIGNED") => {
+            // 无符号需要更大的 PG 类型
+            match mysql_type { "TINYINT" => "SMALLINT", "SMALLINT" => "INTEGER", _ => "INTEGER" }.into()
+        }
+        "DOUBLE" => "DOUBLE PRECISION".into(),
+        "DATETIME" | "TIMESTAMP" => "TIMESTAMPTZ".into(),
+        "YEAR" => "INTEGER".into(),
+        "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => "BYTEA".into(),
+        "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => "TEXT".into(),
+        "JSON" => "JSONB".into(),
+        _ => mysql_type.into(), // 保留原样
+    }
+}
+```
+
+### 7.6 安全执行策略
+
+| DDL 操作 | MySQL 安全策略 | PostgreSQL 安全策略 |
+|----------|---------------|-------------------|
+| 添加列 | `ALGORITHM=INSTANT` | 事务包裹，可回滚 |
+| 修改列类型 | 用户确认 + 建议 gh-ost | 事务包裹，可回滚 |
+| 添加索引 | `ALGORITHM=INPLACE, LOCK=NONE` | `CREATE INDEX CONCURRENTLY` |
+| 添加外键 | `SET FOREIGN_KEY_CHECKS=0` | `NOT VALID` + `VALIDATE CONSTRAINT` |
+| 删除表 | 二次确认 + 回滚 DDL 预览 | 事务包裹 |
+| 列重排序 | 警告需要表重建 | 不支持（PG 无列顺序概念） |
+
+---
+
+## 八、数据同步最佳实践方案
+
+> 基于对 pt-table-sync、SymmetricDS、pg_chameleon 等工具的研究
+
+### 8.1 当前算法问题诊断
+
+`MySqlDataSyncEngine` (mysql_sync.rs) 的核心问题：
+
+1. **全量数据拉取**：`fetch_rows_in_range` 将整个块的数据（所有列）拉入内存，对大表 (100 万行+) 会 OOM
+2. **无分层校验和**：校验和仅用于判断"块是否相同"，不用于逐行过滤
+3. **主键用 f64 比较**：`compare_pk_str` 对超过 2^53 的大整数会精度丢失
+4. **`format_value()` SQL 注入**：`generate_statements` 用字符串拼接生成 UPSERT SQL
+5. **无自适应分块**：`chunk_size` 由用户指定，无运行时自适应
+
+### 8.2 目标算法（参考 pt-table-sync Chunk 算法）
+
+```
+阶段 1: 快速预检
+    ├─ SELECT COUNT(*) 源 vs 目标
+    ├─ 行数相同 → 可能完全一致，进入校验和
+    └─ 行数不同 → 确定有 INSERT/DELETE
+
+阶段 2: 分块校验和比较（仅传输主键+校验和）
+    ├─ 按主键范围分块（初始 1000 行/块）
+    ├─ 每块: SELECT pk, CRC32(CONCAT_WS('#', COALESCE(col1,'<N>'), ...))
+    ├─ 源和目标的块级聚合校验和比较
+    ├─ 相同 → 跳过
+    ├─ 不同 → 进入阶段 3
+    └─ 自适应调整块大小（目标 0.5s/块）
+
+阶段 3: 行级差异检测（仅对不一致块）
+    ├─ 获取不一致块的逐行校验和
+    ├─ 行级 CRC32 不同 → 获取完整行数据
+    ├─ 分类: INSERT / UPDATE / DELETE
+    └─ 生成同步 SQL
+
+阶段 4: 批量同步执行
+    ├─ UPSERT: INSERT ... ON DUPLICATE KEY UPDATE (MySQL)
+    │         INSERT ... ON CONFLICT DO UPDATE (PostgreSQL)
+    ├─ DELETE: 批量 IN 子句
+    ├─ 每批 1000-5000 行，每批一个事务
+    ├─ BLOB/TEXT 列用 HEX() 处理
+    ├─ 进度回调 + 取消支持
+    └─ 错误处理: 唯一键冲突自动降级为 DELETE+INSERT
+```
+
+### 8.3 NULL 安全行哈希
+
+```rust
+/// 生成 NULL 安全的行级校验和 SQL
+fn row_checksum_expr(columns: &[String], db_type: DbType) -> String {
+    let coalesced: Vec<String> = columns.iter().map(|col| {
+        format!("COALESCE(CAST({} AS CHAR), '<NULL>')", quote_ident(col, db_type))
+    }).collect();
+    match db_type {
+        DbType::MySQL => format!("CRC32(CONCAT_WS('#', {}))", coalesced.join(", ")),
+        DbType::PostgreSQL => format!(
+            "md5(concat_ws('#', {}))", coalesced.join(", ")
+        ),
+        _ => format!("md5(concat_ws('#', {}))", coalesced.join(", ")),
+    }
+}
+```
+
+### 8.4 自适应分块算法
+
+```rust
+struct AdaptiveChunker {
+    target_duration_ms: u64,       // 默认 500ms
+    current_chunk_size: usize,     // 初始 1000
+    min_chunk_size: usize,         // 最小 100
+    max_chunk_size: usize,         // 最大 100000
+    ema_throughput: f64,           // 指数衰减移动平均 行/秒
+    alpha: f64,                    // 衰减系数 0.3
+}
+
+impl AdaptiveChunker {
+    fn adjust(&mut self, actual_rows: usize, actual_duration_ms: u64) {
+        let throughput = (actual_rows as f64) * 1000.0 / (actual_duration_ms as f64).max(1.0);
+        self.ema_throughput = self.alpha * throughput + (1.0 - self.alpha) * self.ema_throughput;
+        let ideal_rows = (self.ema_throughput * (self.target_duration_ms as f64) / 1000.0) as usize;
+        self.current_chunk_size = ideal_rows.clamp(self.min_chunk_size, self.max_chunk_size);
+    }
+}
+```
+
+### 8.5 跨引擎 UPSERT 生成
+
+```rust
+fn generate_upsert_sql(
+    table: &str, columns: &[String], db_type: &DbType, batch: &[RowData]
+) -> String {
+    match db_type {
+        DbType::MySQL | DbType::MariaDB => {
+            // INSERT INTO `t` (cols) VALUES (...) ON DUPLICATE KEY UPDATE col=VALUES(col)
+            let updates: Vec<String> = columns.iter()
+                .filter(|c| !c.eq_ignore_ascii_case("id"))
+                .map(|c| format!("`{}` = VALUES(`{}`)", c, c))
+                .collect();
+            format!("INSERT INTO `{}` ({}) VALUES {} ON DUPLICATE KEY UPDATE {}",
+                table, cols_quoted, values_clause, updates.join(", "))
+        }
+        DbType::PostgreSQL => {
+            // INSERT INTO "t" (cols) VALUES (...) ON CONFLICT (pk) DO UPDATE SET col=EXCLUDED.col
+            let updates: Vec<String> = columns.iter()
+                .filter(|c| !c.eq_ignore_ascii_case("id"))
+                .map(|c| format!("\"{0}\" = EXCLUDED.\"{0}\"", c))
+                .collect();
+            format!("INSERT INTO \"{}\" ({}) VALUES {} ON CONFLICT ({}) DO UPDATE SET {}",
+                table, cols_quoted, values_clause, pk_col, updates.join(", "))
+        }
+        _ => unimplemented!("Unsupported DB type for UPSERT"),
+    }
+}
+```
+
+---
+
+## 九、数据传输与导入最佳实践
+
+### 9.1 `import_data` 批量化改造
+
+**当前问题** (web-server main.rs):
+```rust
+// 逐行 INSERT — 1000 行 = 1000 次网络往返
+for (i, row) in req.data.iter().enumerate() {
+    let mut query = sqlx::query(&sql);
+    // ... bind each column
+    query.execute(&db_client.pool).await?;
+}
+```
+
+**改造方案**:
+```rust
+// 批量 VALUES — 1000 行 = 2 次网络往返
+let batch_size = 500;
+for chunk in req.data.chunks(batch_size) {
+    let mut values_clauses = Vec::new();
+    let mut all_params: Vec<serde_json::Value> = Vec::new();
+    for row in chunk {
+        let placeholders: Vec<String> = mapped_cols.iter().enumerate()
+            .map(|(i, _)| format!("${}", all_params.len() + i + 1))
+            .collect();
+        values_clauses.push(format!("({})", placeholders.join(", ")));
+        for (_, src_field) in &mapped_cols {
+            all_params.push(row.get(src_field).cloned().unwrap_or(serde_json::Value::Null));
+        }
+    }
+    let sql = format!("INSERT INTO {} ({}) VALUES {}",
+        table_ident, col_list, values_clauses.join(", "));
+    let mut query = sqlx::query(&sql);
+    for val in &all_params { query = bind_json_value(query, val); }
+    query.execute(&db_client.pool).await?;
+}
+```
+
+**性能预期**: 1000 行从 ~1000ms 降至 ~10ms (减少 99% 网络往返)。
+
+### 9.2 `TransferEngine` SQL 注入修复
+
+**当前问题** (transfer.rs): 大量 `format!()` 拼接用户可控的表名和列名。
+
+**改造**: 引入 `validate_identifier()` 白名单 + `quote_ident()` 标识符引用。
+
+### 9.3 大文件流式处理
+
+**当前问题**: SQL 文件用 `read_to_string` 全量读入内存。
+
+**改造**: 使用 `BufReader` 逐行读取，SQL 语句按 `;` 分隔拼接，每 500 条执行一次。
+
+---
+
+## 十、修订后的分期规划
+
+```
+Phase 1 (稳定性基础)
+  ├── 1A. 连接池管理重构（test_before_acquire、可配置参数）
+  ├── 1B. SQL 注入防护（validate_identifier + quote_ident）
+  ├── 1C. 错误处理增强（保留 SQLSTATE、区分连接/查询错误）
+  ├── 1D. import_data 批量化                                  ← 新增
+  └── 1E. TransferEngine SQL 注入修复                          ← 新增
+
+Phase 2 (多引擎支持)
+  ├── 2A. PostgreSQL 适配器
+  ├── 2B. SQLite 适配器
+  └── 2C. MySQL ↔ PG 类型映射表                                ← 新增
+
+Phase 3 (性能优化)
+  ├── 3A. 批量 INSERT 优化
+  ├── 3B. 连接池调优（before_acquire 惰性检查）
+  ├── 3C. 流式查询（fetch_stream 替代 fetch_all）
+  ├── 3D. 数据同步算法重构（pt-table-sync 风格分层校验和）     ← 新增
+  ├── 3E. 自适应分块大小                                        ← 新增
+  └── 3F. NULL 安全行哈希                                       ← 新增
+
+Phase 4 (工具功能增强)
+  ├── 4A. Schema Sync: ALGORITHM 提示 + 依赖排序 + 回滚 DDL    ← 新增
+  ├── 4B. Schema Sync: 对比维度扩展（CHECK/触发器/存储过程）     ← 新增
+  ├── 4C. Data Sync: UPSERT 跨引擎语法                          ← 新增
+  ├── 4D. Data Sync: BLOB/TEXT HEX 处理                         ← 新增
+  ├── 4E. Data Sync: 进度报告 + 取消支持                        ← 新增
+  ├── 4F. SSH 隧道支持
+  ├── 4G. SSL/TLS 支持
+  ├── 4H. 只读模式强制执行
+  └── 4I. 事务管理增强（超时回滚、影响行数限制、死锁检测）
+
+Phase 5 (代码质量)
+  ├── 5A. 消除重复代码（format_value/escape_sql/row_to_json）
+  ├── 5B. 统一抽象层完善（MySqlAdapter/PgAdapter/SqliteAdapter）
+  ├── 5C. UX 去重（合并结构同步三合一、统一 AI 路由）
+  └── 5D. 测试覆盖补全
+```
+
+---
+
+## 十一、技术参考来源汇总
+
+| 来源 | 链接 | 用途 |
+|------|------|------|
+| sqlx 官方文档 | docs.rs/sqlx | 连接池配置、before_acquire、事务 |
+| MySQL InnoDB Online DDL | dev.mysql.com/doc/refman/8.0/en/innodb-online-ddl-operations.html | ALGORITHM 选择指南 |
+| PostgreSQL ALTER TABLE | postgresql.org/docs/current/sql-altertable.html | DDL 事务、锁级别、NOT VALID |
+| Atlas Schema Diff | atlasgo.io/versioned/diff | 声明式 Schema 管理 |
+| Liquibase Snapshot | github.com/liquibase/liquibase | Snapshot-Diff 架构 |
+| DBeaver Schema Compare | dbeaver.com/docs/dbeaver/Schema-compare/ | 对比行为配置 |
+| gh-ost | github.com/github/gh-ost | 在线 DDL 工作流程 |
+| pgloader | pgloader.readthedocs.io/en/latest/ref/mysql.html | MySQL→PG 类型映射 |
+| pgroll | github.com/xataio/pgroll | 零停机回滚（Expand/Contract） |
+| pt-table-sync | docs.percona.com/percona-toolkit/pt-table-sync.html | 数据同步分层校验和算法 |
+| pt-table-checksum | docs.percona.com/percona-toolkit/pt-table-checksum.html | 自适应分块算法 |
+| SymmetricDS | symmetricds.org | 异构数据库同步架构 |
+| pg_chameleon | pgchameleon.readthedocs.io | MySQL→PG 实时复制 |
+| OWASP SQL Injection | cheatsheetseries.owasp.org | SQL 注入防护 |
+| HikariCP 配置指南 | github.com/brettwooldridge/HikariCP | 连接池参数最佳实践 |
