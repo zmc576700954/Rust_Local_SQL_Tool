@@ -1,4 +1,5 @@
 use crate::db::DbError;
+use crate::sql_util;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,11 +28,11 @@ impl CrudManager {
         let placeholders: Vec<String> = (0..columns.len()).map(|_| "?".to_string()).collect();
 
         let sql = format!(
-            "INSERT INTO `{}` ({}) VALUES ({})",
-            req.table_name,
+            "INSERT INTO {} ({}) VALUES ({})",
+            sql_util::quote_ident_mysql(&req.table_name),
             columns
                 .iter()
-                .map(|k| format!("`{}`", k))
+                .map(|k| sql_util::quote_ident_mysql(k))
                 .collect::<Vec<_>>()
                 .join(", "),
             placeholders.join(", ")
@@ -80,22 +81,22 @@ impl CrudManager {
 
         let set_clause = columns
             .iter()
-            .map(|k| format!("`{}` = ?", k))
+            .map(|k| format!("{} = ?", sql_util::quote_ident_mysql(k)))
             .collect::<Vec<_>>()
             .join(", ");
 
         let mut where_clauses = Vec::new();
         for (k, val) in condition.iter() {
             if val.is_null() {
-                where_clauses.push(format!("`{}` IS NULL", k));
+                where_clauses.push(format!("{} IS NULL", sql_util::quote_ident_mysql(k)));
             } else {
-                where_clauses.push(format!("`{}` = ?", k));
+                where_clauses.push(format!("{} = ?", sql_util::quote_ident_mysql(k)));
             }
         }
 
         let sql = format!(
-            "UPDATE `{}` SET {} WHERE {}",
-            req.table_name,
+            "UPDATE {} SET {} WHERE {}",
+            sql_util::quote_ident_mysql(&req.table_name),
             set_clause,
             where_clauses.join(" AND ")
         );
@@ -153,15 +154,15 @@ impl CrudManager {
         let mut where_clauses = Vec::new();
         for (k, val) in condition.iter() {
             if val.is_null() {
-                where_clauses.push(format!("`{}` IS NULL", k));
+                where_clauses.push(format!("{} IS NULL", sql_util::quote_ident_mysql(k)));
             } else {
-                where_clauses.push(format!("`{}` = ?", k));
+                where_clauses.push(format!("{} = ?", sql_util::quote_ident_mysql(k)));
             }
         }
 
         let sql = format!(
-            "DELETE FROM `{}` WHERE {}",
-            table_name,
+            "DELETE FROM {} WHERE {}",
+            sql_util::quote_ident_mysql(table_name),
             where_clauses.join(" AND ")
         );
 

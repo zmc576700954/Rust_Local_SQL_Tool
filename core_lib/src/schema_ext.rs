@@ -39,7 +39,7 @@ impl SchemaExtractor {
 
         let views = sqlx::query(query)
             .bind(db_name)
-            .fetch_all(&client.pool)
+            .fetch_all(client.mysql_pool()?)
             .await?;
 
         let mut result = Vec::new();
@@ -74,7 +74,7 @@ impl SchemaExtractor {
         let indexes = sqlx::query(query)
             .bind(db_name)
             .bind(table_name)
-            .fetch_all(&client.pool)
+            .fetch_all(client.mysql_pool()?)
             .await?;
 
         let mut result = Vec::new();
@@ -111,7 +111,7 @@ impl SchemaExtractor {
 
         let rows = sqlx::query(query)
             .bind(db_name)
-            .fetch_all(&client.pool)
+            .fetch_all(client.mysql_pool()?)
             .await?;
 
         let mut result: HashMap<String, Vec<IndexInfo>> = HashMap::new();
@@ -155,7 +155,7 @@ impl SchemaExtractor {
         let fks = sqlx::query(query)
             .bind(db_name)
             .bind(table_name)
-            .fetch_all(&client.pool)
+            .fetch_all(client.mysql_pool()?)
             .await?;
 
         let mut result = Vec::new();
@@ -199,7 +199,7 @@ impl SchemaExtractor {
 
         let rows = sqlx::query(query)
             .bind(db_name)
-            .fetch_all(&client.pool)
+            .fetch_all(client.mysql_pool()?)
             .await?;
 
         let mut result: HashMap<String, Vec<ForeignKeyInfo>> = HashMap::new();

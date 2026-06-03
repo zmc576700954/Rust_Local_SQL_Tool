@@ -635,6 +635,7 @@ dependencies = [
  "crc32fast",
  "csv",
  "dirs 5.0.1",
+ "futures-util",
  "reqwest 0.12.28",
  "roxmltree",
  "serde",

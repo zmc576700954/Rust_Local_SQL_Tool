@@ -205,7 +205,21 @@ impl DdlEngine {
             if alters.is_empty() {
                 return "-- No changes detected".to_string();
             }
-            format!("ALTER TABLE `{}`\n  {};", table_name, alters.join(",\n  "))
+
+            // Classify ALTER clauses for ALGORITHM hint
+            let algorithm = classify_alter_algorithm(&alters);
+            let hint = if algorithm == "DEFAULT" {
+                String::new()
+            } else {
+                format!("\n  /* {} */", algorithm)
+            };
+
+            format!(
+                "ALTER TABLE `{}`\n  {};{}\n-- ⚠ Review before executing. For large tables, consider gh-ost or pt-online-schema-change.",
+                table_name,
+                alters.join(",\n  "),
+                hint
+            )
         } else {
             // CREATE TABLE logic
             let mut cols = Vec::new();
@@ -264,6 +278,199 @@ impl DdlEngine {
                 cols.join(",\n  ")
             )
         }
+    }
+
+    /// Generate rollback DDL that reverses the forward ALTER TABLE.
+    /// Returns a SQL statement that, when executed, reverts the schema change.
+    pub fn generate_rollback(
+        old_table: Option<&TableWithDetails>,
+        new_table: &TableWithDetails,
+    ) -> String {
+        let Some(old) = old_table else {
+            // Forward was CREATE TABLE → rollback is DROP TABLE
+            return format!("DROP TABLE IF EXISTS `{}`;", new_table.table_name);
+        };
+
+        let mut rollbacks = Vec::new();
+        let table_name = &new_table.table_name;
+
+        // Columns added in forward → DROP COLUMN in rollback
+        for new_col in &new_table.columns {
+            if !old
+                .columns
+                .iter()
+                .any(|c| c.column_name == new_col.column_name)
+            {
+                rollbacks.push(format!("DROP COLUMN `{}`", new_col.column_name));
+            }
+        }
+
+        // Columns dropped in forward → ADD COLUMN (with old definition) in rollback
+        for old_col in &old.columns {
+            if !new_table
+                .columns
+                .iter()
+                .any(|c| c.column_name == old_col.column_name)
+            {
+                let mut col_def =
+                    format!("ADD COLUMN `{}` {}", old_col.column_name, old_col.column_type);
+                if old_col.is_nullable == "NO" {
+                    col_def.push_str(" NOT NULL");
+                } else {
+                    col_def.push_str(" NULL");
+                }
+                if let Some(def) = &old_col.column_default {
+                    col_def.push_str(&format!(" DEFAULT '{}'", def));
+                }
+                if old_col.extra.contains("auto_increment") {
+                    col_def.push_str(" AUTO_INCREMENT");
+                }
+                rollbacks.push(col_def);
+            }
+        }
+
+        // Columns modified in forward → MODIFY back to old definition
+        for new_col in &new_table.columns {
+            if let Some(old_col) = old
+                .columns
+                .iter()
+                .find(|c| c.column_name == new_col.column_name)
+            {
+                if old_col.column_type != new_col.column_type
+                    || old_col.is_nullable != new_col.is_nullable
+                    || old_col.column_default != new_col.column_default
+                    || old_col.extra != new_col.extra
+                {
+                    let mut col_def = format!(
+                        "MODIFY COLUMN `{}` {}",
+                        old_col.column_name, old_col.column_type
+                    );
+                    if old_col.is_nullable == "NO" {
+                        col_def.push_str(" NOT NULL");
+                    } else {
+                        col_def.push_str(" NULL");
+                    }
+                    if let Some(def) = &old_col.column_default {
+                        col_def.push_str(&format!(" DEFAULT '{}'", def));
+                    }
+                    if old_col.extra.contains("auto_increment") {
+                        col_def.push_str(" AUTO_INCREMENT");
+                    }
+                    rollbacks.push(col_def);
+                }
+            }
+        }
+
+        // Indexes added in forward → DROP INDEX
+        for new_idx in &new_table.indexes {
+            if new_idx.index_name != "PRIMARY"
+                && !old
+                    .indexes
+                    .iter()
+                    .any(|i| i.index_name == new_idx.index_name)
+            {
+                rollbacks.push(format!("DROP INDEX `{}`", new_idx.index_name));
+            }
+        }
+
+        // Indexes dropped in forward → ADD INDEX (with old definition)
+        for old_idx in &old.indexes {
+            if old_idx.index_name != "PRIMARY"
+                && !new_table
+                    .indexes
+                    .iter()
+                    .any(|i| i.index_name == old_idx.index_name)
+            {
+                let idx_type = if old_idx.non_unique {
+                    "INDEX"
+                } else {
+                    "UNIQUE INDEX"
+                };
+                rollbacks.push(format!(
+                    "ADD {} `{}` (`{}`)",
+                    idx_type, old_idx.index_name, old_idx.column_name
+                ));
+            }
+        }
+
+        // Foreign keys added in forward → DROP FOREIGN KEY
+        for new_fk in &new_table.foreign_keys {
+            if !old
+                .foreign_keys
+                .iter()
+                .any(|f| f.constraint_name == new_fk.constraint_name)
+            {
+                rollbacks.push(format!(
+                    "DROP FOREIGN KEY `{}`",
+                    new_fk.constraint_name
+                ));
+            }
+        }
+
+        // Foreign keys dropped in forward → ADD CONSTRAINT
+        for old_fk in &old.foreign_keys {
+            if !new_table
+                .foreign_keys
+                .iter()
+                .any(|f| f.constraint_name == old_fk.constraint_name)
+            {
+                rollbacks.push(format!(
+                    "ADD CONSTRAINT `{}` FOREIGN KEY (`{}`) REFERENCES `{}` (`{}`)",
+                    old_fk.constraint_name,
+                    old_fk.column_name,
+                    old_fk.referenced_table_name,
+                    old_fk.referenced_column_name,
+                ));
+            }
+        }
+
+        if rollbacks.is_empty() {
+            return "-- No rollback needed".to_string();
+        }
+        format!(
+            "-- Rollback DDL for: ALTER TABLE `{}`\nALTER TABLE `{}`\n  {};",
+            table_name,
+            table_name,
+            rollbacks.join(",\n  ")
+        )
+    }
+}
+
+/// Classify ALTER clauses and return the most appropriate MySQL ALGORITHM hint.
+/// Returns one of: "ALGORITHM=INSTANT", "ALGORITHM=INPLACE, LOCK=NONE", "ALGORITHM=DEFAULT".
+fn classify_alter_algorithm(alters: &[String]) -> String {
+    let mut has_inplace = false;
+
+    for alter in alters {
+        let upper = alter.trim().to_uppercase();
+        if upper.starts_with("ADD COLUMN") {
+            // ALGORITHM=INSTANT (MySQL 8.0.12+) — no table rebuild
+            continue;
+        } else if upper.starts_with("DROP COLUMN") {
+            // ALGORITHM=INSTANT (MySQL 8.0.29+) — no table rebuild
+            continue;
+        } else if upper.starts_with("MODIFY COLUMN") {
+            // Requires table rebuild
+            has_inplace = true;
+        } else if upper.starts_with("ADD INDEX")
+            || upper.starts_with("ADD UNIQUE INDEX")
+            || upper.starts_with("ADD INDEX")
+            || upper.starts_with("DROP INDEX")
+        {
+            has_inplace = true;
+        } else if upper.starts_with("ADD PRIMARY KEY") || upper.starts_with("DROP PRIMARY KEY") {
+            has_inplace = true;
+        } else if upper.contains("FOREIGN KEY") {
+            // Foreign key operations use DEFAULT algorithm
+            return "ALGORITHM=DEFAULT".to_string();
+        }
+    }
+
+    if has_inplace {
+        "ALGORITHM=INPLACE, LOCK=NONE".to_string()
+    } else {
+        // All operations are INSTANT-compatible
+        "ALGORITHM=INSTANT".to_string()
     }
 }
 
@@ -498,7 +705,8 @@ impl MockDataGenerator {
                 "SELECT `{}` FROM `{}` LIMIT 100",
                 fk.referenced_column_name, fk.referenced_table_name
             );
-            if let Ok(rows) = sqlx::query(&query).fetch_all(&db_client.pool).await {
+            if let Ok(pool) = db_client.mysql_pool() {
+            if let Ok(rows) = sqlx::query(&query).fetch_all(pool).await {
                 let mut values = Vec::new();
                 use sqlx::Row;
                 for row in rows {
@@ -513,6 +721,7 @@ impl MockDataGenerator {
                     values.push(val);
                 }
                 fk_data.insert(fk.column_name.clone(), values);
+            }
             }
         }
 
@@ -659,5 +868,146 @@ impl DataExporter {
             s.push_str("\n]\n");
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_col(name: &str, col_type: &str, nullable: &str, key: &str) -> ColumnInfo {
+        ColumnInfo {
+            column_name: name.to_string(),
+            data_type: col_type.to_lowercase(),
+            column_type: col_type.to_string(),
+            is_nullable: nullable.to_string(),
+            column_comment: None,
+            column_key: key.to_string(),
+            column_default: None,
+            extra: String::new(),
+        }
+    }
+
+    fn make_table(name: &str, cols: Vec<ColumnInfo>) -> TableWithDetails {
+        TableWithDetails {
+            table_name: name.to_string(),
+            columns: cols,
+            indexes: vec![],
+            foreign_keys: vec![],
+        }
+    }
+
+    #[test]
+    fn generate_preview_no_changes() {
+        let table = make_table("users", vec![make_col("id", "INT", "NO", "PRI")]);
+        let ddl = DdlEngine::generate_preview(Some(&table), &table);
+        assert_eq!(ddl, "-- No changes detected");
+    }
+
+    #[test]
+    fn generate_preview_add_column() {
+        let old = make_table("users", vec![make_col("id", "INT", "NO", "PRI")]);
+        let mut new = old.clone();
+        new.columns
+            .push(make_col("name", "VARCHAR(255)", "YES", ""));
+        let ddl = DdlEngine::generate_preview(Some(&old), &new);
+        assert!(ddl.contains("ADD COLUMN"));
+        assert!(ddl.contains("name"));
+        assert!(ddl.contains("VARCHAR(255)"));
+        assert!(ddl.contains("ALGORITHM=INSTANT"));
+    }
+
+    #[test]
+    fn generate_preview_drop_column() {
+        let mut old = make_table("users", vec![make_col("id", "INT", "NO", "PRI")]);
+        old.columns
+            .push(make_col("email", "VARCHAR(255)", "YES", ""));
+        let new = make_table("users", vec![make_col("id", "INT", "NO", "PRI")]);
+        let ddl = DdlEngine::generate_preview(Some(&old), &new);
+        assert!(ddl.contains("DROP COLUMN"));
+        assert!(ddl.contains("email"));
+    }
+
+    #[test]
+    fn generate_preview_modify_column() {
+        let old = make_table(
+            "users",
+            vec![make_col("id", "INT", "NO", "PRI"), make_col("name", "VARCHAR(100)", "YES", "")],
+        );
+        let new = make_table(
+            "users",
+            vec![make_col("id", "INT", "NO", "PRI"), make_col("name", "VARCHAR(255)", "YES", "")],
+        );
+        let ddl = DdlEngine::generate_preview(Some(&old), &new);
+        assert!(ddl.contains("MODIFY COLUMN"));
+        assert!(ddl.contains("ALGORITHM=INPLACE"));
+    }
+
+    #[test]
+    fn generate_preview_create_table() {
+        let table = make_table(
+            "orders",
+            vec![
+                make_col("id", "BIGINT", "NO", "PRI"),
+                make_col("amount", "DECIMAL(18,2)", "NO", ""),
+            ],
+        );
+        let ddl = DdlEngine::generate_preview(None, &table);
+        assert!(ddl.contains("CREATE TABLE"));
+        assert!(ddl.contains("orders"));
+        assert!(ddl.contains("BIGINT"));
+        assert!(ddl.contains("PRIMARY KEY"));
+    }
+
+    #[test]
+    fn generate_rollback_for_add_column() {
+        let old = make_table("users", vec![make_col("id", "INT", "NO", "PRI")]);
+        let mut new = old.clone();
+        new.columns
+            .push(make_col("name", "VARCHAR(255)", "YES", ""));
+        let rollback = DdlEngine::generate_rollback(Some(&old), &new);
+        assert!(rollback.contains("DROP COLUMN"));
+        assert!(rollback.contains("name"));
+    }
+
+    #[test]
+    fn generate_rollback_for_drop_column() {
+        let mut old = make_table("users", vec![make_col("id", "INT", "NO", "PRI")]);
+        old.columns
+            .push(make_col("email", "VARCHAR(255)", "YES", ""));
+        let new = make_table("users", vec![make_col("id", "INT", "NO", "PRI")]);
+        let rollback = DdlEngine::generate_rollback(Some(&old), &new);
+        assert!(rollback.contains("ADD COLUMN"));
+        assert!(rollback.contains("email"));
+        assert!(rollback.contains("VARCHAR(255)"));
+    }
+
+    #[test]
+    fn generate_rollback_for_create_table() {
+        let table = make_table("temp", vec![make_col("id", "INT", "NO", "PRI")]);
+        let rollback = DdlEngine::generate_rollback(None, &table);
+        assert!(rollback.contains("DROP TABLE IF EXISTS"));
+        assert!(rollback.contains("temp"));
+    }
+
+    #[test]
+    fn classify_alter_algorithm_instant_for_add_column() {
+        let alters = vec!["ADD COLUMN `name` VARCHAR(255)".to_string()];
+        assert_eq!(classify_alter_algorithm(&alters), "ALGORITHM=INSTANT");
+    }
+
+    #[test]
+    fn classify_alter_algorithm_inplace_for_modify() {
+        let alters = vec!["MODIFY COLUMN `name` VARCHAR(512)".to_string()];
+        assert_eq!(
+            classify_alter_algorithm(&alters),
+            "ALGORITHM=INPLACE, LOCK=NONE"
+        );
+    }
+
+    #[test]
+    fn classify_alter_algorithm_default_for_fk() {
+        let alters = vec!["ADD CONSTRAINT `fk_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)".to_string()];
+        assert_eq!(classify_alter_algorithm(&alters), "ALGORITHM=DEFAULT");
     }
 }

@@ -48,7 +48,7 @@ impl SchemaExtractor {
 
         let tables = sqlx::query(query)
             .bind(db_name)
-            .fetch_all(&client.pool)
+            .fetch_all(client.mysql_pool()?)
             .await?;
 
         // We do manual mapping because `sqlx::query_as` to struct needs #[derive(FromRow)]
@@ -91,7 +91,7 @@ impl SchemaExtractor {
         let columns = sqlx::query(query)
             .bind(db_name)
             .bind(table_name)
-            .fetch_all(&client.pool)
+            .fetch_all(client.mysql_pool()?)
             .await?;
 
         let mut result = Vec::new();
@@ -139,7 +139,7 @@ impl SchemaExtractor {
 
         let rows = sqlx::query(query)
             .bind(db_name)
-            .fetch_all(&client.pool)
+            .fetch_all(client.mysql_pool()?)
             .await?;
 
         let mut result: HashMap<String, Vec<ColumnInfo>> = HashMap::new();

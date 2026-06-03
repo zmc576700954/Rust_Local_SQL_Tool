@@ -856,24 +856,24 @@ async fn mysql_sync_flow(
     target_url: &str,
     cases: &mut Vec<PerformanceCase>,
 ) -> Result<(), String> {
-    let source = DbClient::new(source_url).await.map_err(|e| e.to_string())?;
-    let target = DbClient::new(target_url).await.map_err(|e| e.to_string())?;
+    let source = DbClient::new_default(source_url).await.map_err(|e| e.to_string())?;
+    let target = DbClient::new_default(target_url).await.map_err(|e| e.to_string())?;
 
     let ddl = "CREATE TABLE e2e_sync_items (id BIGINT PRIMARY KEY, name VARCHAR(255) NOT NULL, score DOUBLE NOT NULL, created_at DATETIME NOT NULL)";
     sqlx::query("DROP TABLE IF EXISTS e2e_sync_items")
-        .execute(&source.pool)
+        .execute(source.mysql_pool().map_err(|e| e.to_string())?)
         .await
         .map_err(|e| e.to_string())?;
     sqlx::query("DROP TABLE IF EXISTS e2e_sync_items")
-        .execute(&target.pool)
+        .execute(target.mysql_pool().map_err(|e| e.to_string())?)
         .await
         .map_err(|e| e.to_string())?;
     sqlx::query(ddl)
-        .execute(&source.pool)
+        .execute(source.mysql_pool().map_err(|e| e.to_string())?)
         .await
         .map_err(|e| e.to_string())?;
     sqlx::query(ddl)
-        .execute(&target.pool)
+        .execute(target.mysql_pool().map_err(|e| e.to_string())?)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -884,7 +884,7 @@ async fn mysql_sync_flow(
             .bind(format!("item-{}", i))
             .bind(i as f64)
             .bind(now)
-            .execute(&source.pool)
+            .execute(source.mysql_pool().map_err(|e| e.to_string())?)
             .await
             .map_err(|e| e.to_string())?;
         sqlx::query("INSERT INTO e2e_sync_items (id, name, score, created_at) VALUES (?, ?, ?, ?)")
@@ -892,17 +892,17 @@ async fn mysql_sync_flow(
             .bind(format!("item-{}", i))
             .bind(i as f64)
             .bind(now)
-            .execute(&target.pool)
+            .execute(target.mysql_pool().map_err(|e| e.to_string())?)
             .await
             .map_err(|e| e.to_string())?;
     }
 
     sqlx::query("UPDATE e2e_sync_items SET score = score + 1 WHERE id % 50 = 0")
-        .execute(&target.pool)
+        .execute(target.mysql_pool().map_err(|e| e.to_string())?)
         .await
         .map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM e2e_sync_items WHERE id % 77 = 0")
-        .execute(&target.pool)
+        .execute(target.mysql_pool().map_err(|e| e.to_string())?)
         .await
         .map_err(|e| e.to_string())?;
     for i in 501..=510i64 {
@@ -911,7 +911,7 @@ async fn mysql_sync_flow(
             .bind(format!("extra-{}", i))
             .bind(i as f64)
             .bind(now)
-            .execute(&target.pool)
+            .execute(target.mysql_pool().map_err(|e| e.to_string())?)
             .await
             .map_err(|e| e.to_string())?;
     }

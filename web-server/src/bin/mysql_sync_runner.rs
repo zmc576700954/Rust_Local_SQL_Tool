@@ -308,8 +308,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let http = Client::new();
-    let source = DbClient::new(&source_url).await?;
-    let target = DbClient::new(&target_url).await?;
+    let source = DbClient::new_default(&source_url).await?;
+    let target = DbClient::new_default(&target_url).await?;
 
     let mut report_http = Vec::new();
     let mut report_engine = Vec::new();

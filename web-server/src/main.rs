@@ -260,53 +260,82 @@ async fn import_data(
         db_col_names.push(quote_mysql_ident(db)?);
     }
     let col_list = db_col_names.join(", ");
-    let placeholders = vec!["?"; mapped_cols.len()].join(", ");
     let table_ident = quote_mysql_ident(&table_name)?;
-    let sql = format!(
-        "INSERT INTO {} ({}) VALUES ({})",
-        table_ident, col_list, placeholders
-    );
 
-    // Process in batches or row by row. For simplicity and error handling per row, we can do row by row or small batches.
-    // If skip_errors is true, we must be able to isolate errors. Row by row is safer for skip_errors.
+    let batch_size: usize = 500;
+    let mut batch_values: Vec<String> = Vec::with_capacity(batch_size);
+    let mut batch_params: Vec<serde_json::Value> =
+        Vec::with_capacity(batch_size * mapped_cols.len());
+
     for (i, row) in req.data.iter().enumerate() {
-        let mut query = sqlx::query(&sql);
+        let start_param = batch_params.len();
+        let placeholders: Vec<String> = (0..mapped_cols.len())
+            .map(|j| format!("${}", start_param + j + 1))
+            .collect();
+        batch_values.push(format!("({})", placeholders.join(", ")));
 
         for (_, src_field) in &mapped_cols {
-            if let Some(val) = row.get(src_field) {
-                match val {
-                    serde_json::Value::Null => query = query.bind(None::<String>),
-                    serde_json::Value::Bool(b) => query = query.bind(b),
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            query = query.bind(i);
-                        } else if let Some(f) = n.as_f64() {
-                            query = query.bind(f);
-                        } else {
-                            query = query.bind(n.to_string());
-                        }
-                    }
-                    serde_json::Value::String(s) => query = query.bind(s),
-                    _ => query = query.bind(val.to_string()),
-                }
-            } else {
-                // If source field is missing in data, bind null
-                query = query.bind(None::<String>);
-            }
+            let val = row
+                .get(src_field)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            batch_params.push(val);
         }
 
-        match query.execute(&db_client.pool).await {
-            Ok(_) => {
-                inserted += 1;
+        let is_last = i + 1 == req.data.len();
+        if batch_values.len() >= batch_size || is_last {
+            let batch_sql = format!(
+                "INSERT INTO {} ({}) VALUES {}",
+                table_ident,
+                col_list,
+                batch_values.join(", ")
+            );
+
+            let mut query = sqlx::query(&batch_sql);
+            for val in &batch_params {
+                query = bind_json_value_to_query(query, val);
             }
-            Err(e) => {
-                errors += 1;
-                let err_msg = format!("Row {}: {}", i + 1, e);
-                error_details.push(err_msg.clone());
-                if !req.skip_errors {
-                    return Err(AppError::BadRequest(err_msg));
+
+            match query.execute(db_client.mysql_pool()?).await {
+                Ok(_) => {
+                    inserted += batch_values.len();
+                }
+                Err(e) => {
+                    if req.skip_errors {
+                        // Fall back to row-by-row for this batch
+                        let batch_start = i + 1 - batch_values.len();
+                        for (j, chunk) in batch_values.iter().enumerate() {
+                            let row_sql = format!(
+                                "INSERT INTO {} ({}) VALUES {}",
+                                table_ident, col_list, chunk
+                            );
+                            let mut row_query = sqlx::query(&row_sql);
+                            let row_start = j * mapped_cols.len();
+                            for k in 0..mapped_cols.len() {
+                                row_query =
+                                    bind_json_value_to_query(row_query, &batch_params[row_start + k]);
+                            }
+                            match row_query.execute(db_client.mysql_pool()?).await {
+                                Ok(_) => inserted += 1,
+                                Err(row_err) => {
+                                    errors += 1;
+                                    error_details
+                                        .push(format!("Row {}: {}", batch_start + j + 1, row_err));
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(AppError::BadRequest(format!(
+                            "Batch insert failed at row {}: {}",
+                            i + 1,
+                            e
+                        )));
+                    }
                 }
             }
+
+            batch_values.clear();
+            batch_params.clear();
         }
     }
 
@@ -1645,7 +1674,7 @@ async fn get_or_open_transaction_session(
     let resolved_db_id = resolve_transaction_db_id(state, db_id).await;
     let (db_client, _) = resolve_db_client_for_request(state, db_id).await?;
     let mut conn = db_client
-        .pool
+        .mysql_pool()?
         .acquire()
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -1688,7 +1717,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize DB Client if configured
     let mut db_client = None;
     if let Some(ref url) = config.get_active_db_url() {
-        match DbClient::new(url).await {
+        match DbClient::new(url, &config.pool_config, &config.get_active_db_type_enum()).await {
             Ok(client) => {
                 tracing::info!("Connected to database");
                 db_client = Some(client);
@@ -1953,7 +1982,7 @@ async fn crud_insert(
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, Some("active".to_string()))
     } else {
-        let affected = CrudManager::insert(&db_client.pool, &crud_req)
+        let affected = CrudManager::insert(db_client.mysql_pool()?, &crud_req)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, None)
@@ -2014,7 +2043,7 @@ async fn crud_update(
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, Some("active".to_string()))
     } else {
-        let affected = CrudManager::update(&db_client.pool, &crud_req)
+        let affected = CrudManager::update(db_client.mysql_pool()?, &crud_req)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, None)
@@ -2077,7 +2106,7 @@ async fn crud_delete(
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, Some("active".to_string()))
     } else {
-        let affected = CrudManager::delete(&db_client.pool, &req.table_name, &req.condition)
+        let affected = CrudManager::delete(db_client.mysql_pool()?, &req.table_name, &req.condition)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, None)
@@ -2167,7 +2196,7 @@ async fn update_config(
 
     // Re-init DB if url changed
     if let Some(ref url) = new_config.get_active_db_url() {
-        match DbClient::new(url).await {
+        match DbClient::new(url, &new_config.pool_config, &new_config.get_active_db_type_enum()).await {
             Ok(client) => {
                 if let Some(old) = state.db_client.write().await.take() {
                     old.pool.close().await;
@@ -2839,6 +2868,28 @@ fn quote_mysql_ident(raw: &str) -> Result<String, AppError> {
     Ok(format!("`{}`", s.replace('`', "``")))
 }
 
+/// Bind a JSON value to a sqlx query — handles Null, Bool, Number, String, and fallback
+fn bind_json_value_to_query<'q>(
+    query: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    val: &serde_json::Value,
+) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    match val {
+        serde_json::Value::Null => query.bind(None::<String>),
+        serde_json::Value::Bool(b) => query.bind(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                query.bind(i)
+            } else if let Some(f) = n.as_f64() {
+                query.bind(f)
+            } else {
+                query.bind(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => query.bind(s.clone()),
+        _ => query.bind(val.to_string()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PerfProbeRequest {
     operation: Option<String>,
@@ -3035,7 +3086,7 @@ async fn open_fresh_perf_probe_client(
     db_id: Option<&str>,
 ) -> Result<DbClient, AppError> {
     let url = resolve_perf_probe_connection_url(state, db_id).await?;
-    DbClient::new(&url).await.map_err(|e| AppError::InternalError(e.to_string()))
+    DbClient::new_default(&url).await.map_err(|e| AppError::InternalError(e.to_string()))
 }
 
 async fn run_connect_warm_probe(
@@ -3112,7 +3163,7 @@ async fn run_query_select_small_probe(
     let (warm_client, _) = resolve_db_client_for_request(state, db_id).await?;
     tokio::time::timeout(
         state.timeouts.db_query,
-        sqlx::query(&sql).fetch_all(&warm_client.pool),
+        sqlx::query(&sql).fetch_all(warm_client.mysql_pool()?),
     )
     .await
     .map_err(|_| AppError::Timeout("query_select_small warmup timed out".to_string()))?
@@ -3124,7 +3175,7 @@ async fn run_query_select_small_probe(
         let started_at = Instant::now();
         let rows = tokio::time::timeout(
             state.timeouts.db_query,
-            sqlx::query(&sql).fetch_all(&db_client.pool),
+            sqlx::query(&sql).fetch_all(db_client.mysql_pool()?),
         )
         .await
         .map_err(|_| AppError::Timeout("query_select_small timed out".to_string()))?
@@ -3152,7 +3203,7 @@ async fn run_query_write_small_probe(
 ) -> Result<PerfProbeSummary, AppError> {
     let (db_client, _) = resolve_db_client_for_request(state, db_id).await?;
     let mut conn = db_client
-        .pool
+        .mysql_pool()?
         .acquire()
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -3229,7 +3280,7 @@ async fn run_explain_plan_probe(
     let (warm_client, _) = resolve_db_client_for_request(state, db_id).await?;
     tokio::time::timeout(
         state.timeouts.db_query,
-        sqlx::query(&explain_sql).fetch_all(&warm_client.pool),
+        sqlx::query(&explain_sql).fetch_all(warm_client.mysql_pool()?),
     )
     .await
     .map_err(|_| AppError::Timeout("explain_plan warmup timed out".to_string()))?
@@ -3241,7 +3292,7 @@ async fn run_explain_plan_probe(
         let started_at = Instant::now();
         let rows = tokio::time::timeout(
             state.timeouts.db_query,
-            sqlx::query(&explain_sql).fetch_all(&db_client.pool),
+            sqlx::query(&explain_sql).fetch_all(db_client.mysql_pool()?),
         )
         .await
         .map_err(|_| AppError::Timeout("explain_plan timed out".to_string()))?
@@ -3309,7 +3360,7 @@ async fn run_table_first_page_probe(
             get_cached_table_schema(state, db_id, &db_client, &db_name, &table_name).await?;
         let result_rows = tokio::time::timeout(
             state.timeouts.db_query,
-            sqlx::query(&data_sql).fetch_all(&db_client.pool),
+            sqlx::query(&data_sql).fetch_all(db_client.mysql_pool()?),
         )
         .await
         .map_err(|_| {
@@ -3361,7 +3412,7 @@ async fn run_cancel_latency_probe(
     for iteration in 0..iterations {
         let (db_client, _) = resolve_db_client_for_request(state, db_id).await?;
         let mut conn = db_client
-            .pool
+            .mysql_pool()?
             .acquire()
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -3936,7 +3987,7 @@ async fn execute_sql(
             })
         } else {
             let mut conn = db_client
-                .pool
+                .mysql_pool()?
                 .acquire()
                 .await
                 .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -3965,6 +4016,8 @@ async fn execute_sql(
         None
     };
 
+    let mysql_pool = db_client.mysql_pool().ok().cloned();
+
     let start_time = Instant::now();
     let execution_result = if is_select {
         match tokio::time::timeout(state.timeouts.db_query, async {
@@ -3974,14 +4027,18 @@ async fn execute_sql(
                     sqlx::query(&req.sql).fetch_all(&mut *session.conn).await
                 } else if let Some(conn) = active_query.owned_conn.as_mut() {
                     sqlx::query(&req.sql).fetch_all(&mut **conn).await
+                } else if let Some(pool) = &mysql_pool {
+                    sqlx::query(&req.sql).fetch_all(pool).await
                 } else {
-                    sqlx::query(&req.sql).fetch_all(&db_client.pool).await
+                    Err(sqlx::Error::PoolClosed)
                 }
             } else if let Some(transaction_session) = transaction_session.as_ref() {
                 let mut session = transaction_session.lock().await;
                 sqlx::query(&req.sql).fetch_all(&mut *session.conn).await
+            } else if let Some(pool) = &mysql_pool {
+                sqlx::query(&req.sql).fetch_all(pool).await
             } else {
-                sqlx::query(&req.sql).fetch_all(&db_client.pool).await
+                Err(sqlx::Error::PoolClosed)
             }
         })
         .await
@@ -4062,14 +4119,18 @@ async fn execute_sql(
                     sqlx::query(&req.sql).execute(&mut *session.conn).await
                 } else if let Some(conn) = active_query.owned_conn.as_mut() {
                     sqlx::query(&req.sql).execute(&mut **conn).await
+                } else if let Some(pool) = &mysql_pool {
+                    sqlx::query(&req.sql).execute(pool).await
                 } else {
-                    sqlx::query(&req.sql).execute(&db_client.pool).await
+                    Err(sqlx::Error::PoolClosed)
                 }
             } else if let Some(transaction_session) = transaction_session.as_ref() {
                 let mut session = transaction_session.lock().await;
                 sqlx::query(&req.sql).execute(&mut *session.conn).await
+            } else if let Some(pool) = &mysql_pool {
+                sqlx::query(&req.sql).execute(pool).await
             } else {
-                sqlx::query(&req.sql).execute(&db_client.pool).await
+                Err(sqlx::Error::PoolClosed)
             }
         })
         .await
@@ -4373,7 +4434,7 @@ async fn get_table_data(
     let mut rows = Vec::new();
     let result_rows = match tokio::time::timeout(
         state.timeouts.db_query,
-        data_query.fetch_all(&db_client.pool),
+        data_query.fetch_all(db_client.mysql_pool()?),
     )
     .await
     {
@@ -4468,7 +4529,7 @@ async fn execute_ddl(
     let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
     let result = sqlx::query(&req.sql)
-        .execute(&db_client.pool)
+        .execute(db_client.mysql_pool()?)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
     clear_metadata_caches(&state).await;
@@ -4569,6 +4630,7 @@ async fn export_data(
     let table_name = req.table_name.clone();
     let export_type = req.export_type.clone();
     let data_sql = format!("SELECT * FROM {}", table_name);
+    let mysql_pool = db_client.mysql_pool().ok().cloned();
 
     let (tx, rx) =
         tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(100);
@@ -4579,7 +4641,11 @@ async fn export_data(
         use sqlx::Column;
         use sqlx::Row;
 
-        let mut stream = sqlx::query(&data_sql).fetch(&db_client.pool);
+        let pool = match mysql_pool {
+            Some(p) => p,
+            None => return,
+        };
+        let mut stream = sqlx::query(&data_sql).fetch(&pool);
         let mut headers_sent = false;
         let mut headers = Vec::new();
         let mut is_first_json = true;
@@ -5972,14 +6038,14 @@ async fn run_go_live_job(
                 if let Some(c) = clients.get(&conn_id).cloned() {
                     Ok(c)
                 } else {
-                    DbClient::new(&conn.url).await.map_err(|e| e.to_string())
+                    DbClient::new_default(&conn.url).await.map_err(|e| e.to_string())
                 };
 
             let mut client_opt: Option<DbClient> = None;
             match client_res {
                 Ok(c) => {
                     let r: Result<(i64,), sqlx::Error> =
-                        sqlx::query_as("SELECT 1").fetch_one(&c.pool).await;
+                        sqlx::query_as("SELECT 1").fetch_one(c.mysql_pool()?).await;
                     if let Err(e) = r {
                         errors.push(e.to_string());
                     } else {
@@ -5995,7 +6061,7 @@ async fn run_go_live_job(
                     details = Some(serde_json::json!({ "db_type": conn.db_type.display_name() }));
                 } else if s == "sql_smoke" {
                     if let Some(client) = &client_opt {
-                        match client.pool.acquire().await {
+                        match client.mysql_pool()?.acquire().await {
                             Ok(mut sql_conn) => {
                                 let r: Result<(i64,), sqlx::Error> =
                                     sqlx::query_as("SELECT 1").fetch_one(&mut *sql_conn).await;
@@ -6062,7 +6128,7 @@ async fn run_go_live_job(
                         let src_table = format!("go_live_smoke_items_{}", suffix);
                         let dst_table = format!("go_live_smoke_items_imported_{}", suffix);
 
-                        let pool = client.pool.clone();
+                        let pool = client.mysql_pool()?.clone();
                         let drop_all = async {
                             let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{}`", dst_table))
                                 .execute(&pool)
@@ -6466,7 +6532,7 @@ async fn run_export_job(
         )));
     }
 
-    let headers = fetch_table_columns(&db_client.pool, &req.table_name)
+    let headers = fetch_table_columns(db_client.mysql_pool()?, &req.table_name)
         .await
         .unwrap_or_default();
 
@@ -6603,7 +6669,7 @@ async fn run_export_job(
         .await?;
     }
 
-    let mut stream = sqlx::query(&data_sql).fetch(&db_client.pool);
+    let mut stream = sqlx::query(&data_sql).fetch(db_client.mysql_pool()?);
     let mut processed: u64 = 0;
     let mut is_first_json = true;
     let mut previous_row: Option<serde_json::Map<String, serde_json::Value>> = None;
@@ -6928,7 +6994,7 @@ async fn run_import_job(
             }
         }
 
-        match query.execute(&db_client.pool).await {
+        match query.execute(db_client.mysql_pool()?).await {
             Ok(_) => inserted += 1,
             Err(e) => {
                 errors += 1;
@@ -7032,7 +7098,7 @@ async fn run_import_sql_job(
     .await;
 
     let result = sqlx::query(&req.sql)
-        .execute(&db_client.pool)
+        .execute(db_client.mysql_pool()?)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
@@ -7063,7 +7129,7 @@ async fn get_temp_db_client(state: &AppState, db_id: &str) -> Result<(DbClient, 
         }
     }
 
-    let client = DbClient::new(&conn.url)
+    let client = DbClient::new_default(&conn.url)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
     let entry = CachedDbClient {
@@ -7186,7 +7252,7 @@ async fn fetch_all_table_data(
 
     let data_sql = format!("SELECT * FROM `{}` LIMIT 50000", table_name);
     let result_rows = sqlx::query(&data_sql)
-        .fetch_all(&db_client.pool)
+        .fetch_all(db_client.mysql_pool()?)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
@@ -7857,7 +7923,7 @@ async fn perf_sync_check(
 async fn fetch_table_count(db: &DbClient, table: &str) -> Result<u64, AppError> {
     let policy = TimeoutPolicy::default();
     let sql = format!("SELECT COUNT(*) FROM `{}`", table);
-    let fut = sqlx::query_scalar::<_, i64>(&sql).fetch_one(&db.pool);
+    let fut = sqlx::query_scalar::<_, i64>(&sql).fetch_one(db.mysql_pool()?);
     let v = tokio::time::timeout(policy.db_query, fut)
         .await
         .map_err(|_| AppError::Timeout(format!("统计表 {} 行数超时", table)))?
@@ -8501,7 +8567,7 @@ async fn explain_sql(
     use sqlx::Row;
 
     let result_rows = sqlx::query(&explain_sql)
-        .fetch_all(&db_client.pool)
+        .fetch_all(db_client.mysql_pool()?)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
@@ -8560,14 +8626,14 @@ async fn session_info(
                 VERSION() AS server_version, \
                 DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:%s') AS server_time",
         )
-        .fetch_one(&db_client.pool),
+        .fetch_one(db_client.mysql_pool()?),
     )
     .await
     .map_err(|_| AppError::InternalError("Session info query timed out".to_string()))?
     .map_err(|e| AppError::InternalError(e.to_string()))?;
 
     let session_map = fetch_mysql_variable_map(
-        &db_client.pool,
+        db_client.mysql_pool()?,
         "SESSION",
         &[
             "autocommit",
@@ -8583,7 +8649,7 @@ async fn session_info(
     .await?;
 
     let global_map = fetch_mysql_variable_map(
-        &db_client.pool,
+        db_client.mysql_pool()?,
         "GLOBAL",
         &[
             "version_comment",

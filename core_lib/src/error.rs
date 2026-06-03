@@ -29,6 +29,13 @@ fn is_zh_locale() -> bool {
 pub enum AppError {
     #[error("Database connection error: {0}")]
     DbConnectionError(String),
+    #[error("Database query error: {message} (code: {code:?})")]
+    DbQueryError {
+        message: String,
+        code: Option<String>,
+    },
+    #[error("Database connection lost: {0}")]
+    DbConnectionLost(String),
     #[error("SQL syntax error: {0}")]
     SqlSyntaxError(String),
     #[error("AI agent timeout or error: {0}")]
@@ -91,6 +98,31 @@ impl IntoResponse for AppError {
                     "数据库连接失败"
                 } else {
                     "Database connection failed"
+                },
+                msg.clone(),
+            ),
+            AppError::DbQueryError { message, code } => (
+                StatusCode::BAD_REQUEST,
+                "ERR_DB_QUERY",
+                "db",
+                if zh {
+                    "数据库查询错误"
+                } else {
+                    "Database query error"
+                },
+                match code {
+                    Some(c) => format!("{} (code: {})", message, c),
+                    None => message.clone(),
+                },
+            ),
+            AppError::DbConnectionLost(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ERR_DB_CONNECTION_LOST",
+                "db",
+                if zh {
+                    "数据库连接已断开"
+                } else {
+                    "Database connection lost"
                 },
                 msg.clone(),
             ),
@@ -323,7 +355,48 @@ impl IntoResponse for AppError {
 // Convert from other error types if convenient
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
-        AppError::InternalError(err.to_string())
+        match &err {
+            sqlx::Error::Database(db_err) => {
+                let code = db_err.code().map(|c| c.into_owned());
+                let message = db_err.message().to_string();
+
+                // Deadlock detection: MySQL error 1213, PostgreSQL 40P01
+                if let Some(ref c) = code {
+                    if c == "1213" || c == "40P01" {
+                        return AppError::DbQueryError {
+                            message: format!(
+                                "Deadlock detected: {}. Please retry the transaction.",
+                                message
+                            ),
+                            code: Some(c.clone()),
+                        };
+                    }
+                }
+
+                AppError::DbQueryError { message, code }
+            }
+            sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => {
+                AppError::DbConnectionLost(err.to_string())
+            }
+            sqlx::Error::RowNotFound => AppError::NotFound("No rows returned".into()),
+            _ => AppError::InternalError(err.to_string()),
+        }
+    }
+}
+
+impl From<crate::db::DbError> for AppError {
+    fn from(err: crate::db::DbError) -> Self {
+        match err {
+            crate::db::DbError::Sqlx(e) => AppError::from(e),
+            crate::db::DbError::Timeout => {
+                AppError::Timeout("Database connection timeout".into())
+            }
+            crate::db::DbError::MissingUrl => {
+                AppError::BadRequest("Connection string is missing".into())
+            }
+            crate::db::DbError::MissingData(msg) => AppError::BadRequest(msg),
+            crate::db::DbError::Unsupported(msg) => AppError::BadRequest(msg),
+        }
     }
 }
 
@@ -449,5 +522,32 @@ mod tests {
         assert!(!details.contains("password=\"pp\""));
         assert!(details.contains("Bearer ******"));
         assert!(details.contains("mysql://u:******@"));
+    }
+
+    #[test]
+    fn db_query_error_preserves_code() {
+        let err = AppError::DbQueryError {
+            message: "Duplicate entry".to_string(),
+            code: Some("1062".to_string()),
+        };
+        // Verify error display includes the code
+        let display = format!("{}", err);
+        assert!(display.contains("1062"));
+        assert!(display.contains("Duplicate entry"));
+    }
+
+    #[test]
+    fn db_connection_lost_returns_503() {
+        let err = AppError::DbConnectionLost("connection refused".to_string());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn db_error_unsupported_converts_to_bad_request() {
+        let db_err = crate::db::DbError::Unsupported("MongoDB".to_string());
+        let app_err = AppError::from(db_err);
+        let resp = app_err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 }

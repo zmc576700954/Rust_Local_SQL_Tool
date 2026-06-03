@@ -1,10 +1,10 @@
 use crate::db::DbClient;
 use crate::error::AppError;
+use crate::sql_util;
 use crate::timeout_policy::TimeoutPolicy;
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Column, Row};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -315,7 +315,7 @@ impl MySqlDataSyncEngine {
         progress: impl Fn(usize, usize) + Send + Sync,
     ) -> Result<u64, AppError> {
         let policy = TimeoutPolicy::default();
-        let mut tx = tokio::time::timeout(policy.db_query, target.pool.begin())
+        let mut tx = tokio::time::timeout(policy.db_query, target.mysql_pool()?.begin())
             .await
             .map_err(|_| AppError::Timeout("开启事务超时".to_string()))?
             .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -347,6 +347,12 @@ impl MySqlDataSyncEngine {
 }
 
 fn compare_pk_str(a: &str, b: &str) -> std::cmp::Ordering {
+    // Try integer comparison first (i128 handles up to 2^127, no precision loss)
+    match (a.parse::<i128>(), b.parse::<i128>()) {
+        (Ok(aa), Ok(bb)) => return aa.cmp(&bb),
+        _ => {}
+    }
+    // Fall back to float for decimal PKs
     match (a.parse::<f64>(), b.parse::<f64>()) {
         (Ok(aa), Ok(bb)) => aa.partial_cmp(&bb).unwrap_or(a.cmp(b)),
         _ => a.cmp(b),
@@ -359,18 +365,20 @@ async fn fetch_min_max_pk(
     primary_key: &str,
 ) -> Result<(Option<String>, Option<String>), AppError> {
     let policy = TimeoutPolicy::default();
+    let pk_ident = sql_util::quote_ident_mysql(primary_key);
+    let tbl_ident = sql_util::quote_ident_mysql(table_name);
     let sql = format!(
-        "SELECT MIN(`{pk}`) AS min_pk, MAX(`{pk}`) AS max_pk FROM `{table}`",
-        pk = primary_key,
-        table = table_name
+        "SELECT MIN({pk}) AS min_pk, MAX({pk}) AS max_pk FROM {table}",
+        pk = pk_ident,
+        table = tbl_ident
     );
-    let row = tokio::time::timeout(policy.db_query, sqlx::query(&sql).fetch_one(&db.pool))
+    let row = tokio::time::timeout(policy.db_query, sqlx::query(&sql).fetch_one(db.mysql_pool()?))
         .await
         .map_err(|_| AppError::Timeout("获取PK范围超时".to_string()))?
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
-    let min_pk = value_to_string(&row, 0);
-    let max_pk = value_to_string(&row, 1);
+    let min_pk = sql_util::mysql_cell_to_string(&row, 0);
+    let max_pk = sql_util::mysql_cell_to_string(&row, 1);
     Ok((min_pk, max_pk))
 }
 
@@ -382,29 +390,27 @@ async fn fetch_pk_list_after(
     limit: usize,
 ) -> Result<Vec<String>, AppError> {
     let policy = TimeoutPolicy::default();
-    let mut sql = format!(
-        "SELECT `{pk}` FROM `{table}`",
-        pk = primary_key,
-        table = table_name
-    );
+    let pk_ident = sql_util::quote_ident_mysql(primary_key);
+    let tbl_ident = sql_util::quote_ident_mysql(table_name);
+    let mut sql = format!("SELECT {pk} FROM {table}", pk = pk_ident, table = tbl_ident);
     if last_pk.is_some() {
-        sql.push_str(&format!(" WHERE `{}` > ?", primary_key));
+        sql.push_str(&format!(" WHERE {pk} > ?", pk = pk_ident));
     }
-    sql.push_str(&format!(" ORDER BY `{}` LIMIT {}", primary_key, limit));
+    sql.push_str(&format!(" ORDER BY {pk} LIMIT {limit}", pk = pk_ident, limit = limit));
 
     let mut q = sqlx::query(&sql);
     if let Some(v) = last_pk {
         q = q.bind(v);
     }
 
-    let rows = tokio::time::timeout(policy.db_query, q.fetch_all(&db.pool))
+    let rows = tokio::time::timeout(policy.db_query, q.fetch_all(db.mysql_pool()?))
         .await
         .map_err(|_| AppError::Timeout("拉取PK分块超时".to_string()))?
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        if let Some(v) = value_to_string(&row, 0) {
+        if let Some(v) = sql_util::mysql_cell_to_string(&row, 0) {
             out.push(v);
         }
     }
@@ -418,41 +424,47 @@ async fn fetch_rows_in_range(
     range: &PkRange,
 ) -> Result<Vec<Value>, AppError> {
     let policy = TimeoutPolicy::default();
-    let mut sql = format!("SELECT * FROM `{}`", table_name);
+    let pk_ident = sql_util::quote_ident_mysql(primary_key);
+    let tbl_ident = sql_util::quote_ident_mysql(table_name);
+    let mut sql = format!("SELECT * FROM {table}", table = tbl_ident);
     let mut has_where = false;
 
     if let Some(_start) = &range.start {
         sql.push_str(&format!(
-            " WHERE `{}` {} ?",
-            primary_key,
-            if range.start_inclusive { ">=" } else { ">" }
+            " WHERE {pk} {op} ?",
+            pk = pk_ident,
+            op = if range.start_inclusive { ">=" } else { ">" }
         ));
         has_where = true;
         if let Some(_end) = &range.end {
             sql.push_str(&format!(
-                " AND `{}` {} ?",
-                primary_key,
-                if range.end_inclusive { "<=" } else { "<" }
+                " AND {pk} {op} ?",
+                pk = pk_ident,
+                op = if range.end_inclusive { "<=" } else { "<" }
             ));
         }
     } else if let Some(_end) = &range.end {
         sql.push_str(&format!(
-            " WHERE `{}` {} ?",
-            primary_key,
-            if range.end_inclusive { "<=" } else { "<" }
+            " WHERE {pk} {op} ?",
+            pk = pk_ident,
+            op = if range.end_inclusive { "<=" } else { "<" }
         ));
         has_where = true;
     }
 
     if !has_where && range.end.is_some() {
         sql.push_str(&format!(
-            " WHERE `{}` {} ?",
-            primary_key,
-            if range.end_inclusive { "<=" } else { "<" }
+            " WHERE {pk} {op} ?",
+            pk = pk_ident,
+            op = if range.end_inclusive { "<=" } else { "<" }
         ));
     }
 
-    sql.push_str(&format!(" ORDER BY `{}`", primary_key));
+    sql.push_str(&format!(" ORDER BY {pk}", pk = pk_ident));
+
+    // Safety: enforce max rows per chunk to prevent OOM on large tables
+    let max_rows = max_rows_per_chunk();
+    sql.push_str(&format!(" LIMIT {}", max_rows));
 
     let mut q = sqlx::query(&sql);
     if let Some(start) = &range.start {
@@ -464,14 +476,14 @@ async fn fetch_rows_in_range(
         q = q.bind(end.clone());
     }
 
-    let rows = tokio::time::timeout(policy.db_query_long, q.fetch_all(&db.pool))
+    let rows = tokio::time::timeout(policy.db_query_long, q.fetch_all(db.mysql_pool()?))
         .await
         .map_err(|_| AppError::Timeout("拉取数据分块超时".to_string()))?
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        out.push(row_to_json(&row));
+        out.push(sql_util::mysql_row_to_json(&row));
     }
     Ok(out)
 }
@@ -503,94 +515,18 @@ fn checksum_rows(primary_key: &str, rows: &[Value]) -> u32 {
     hasher.finalize()
 }
 
-fn row_to_json(row: &sqlx::mysql::MySqlRow) -> Value {
-    let mut map = serde_json::Map::new();
-    for col in row.columns() {
-        let col_name = col.name().to_string();
-
-        if let Ok(val) = row.try_get::<Option<i64>, _>(col.ordinal()) {
-            map.insert(col_name, serde_json::json!(val));
-        } else if let Ok(val) = row.try_get::<Option<f64>, _>(col.ordinal()) {
-            map.insert(col_name, serde_json::json!(val));
-        } else if let Ok(val) = row.try_get::<Option<bool>, _>(col.ordinal()) {
-            map.insert(col_name, serde_json::json!(val));
-        } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDateTime>, _>(col.ordinal()) {
-            map.insert(col_name, serde_json::json!(val.map(|dt| dt.to_string())));
-        } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDate>, _>(col.ordinal()) {
-            map.insert(col_name, serde_json::json!(val.map(|d| d.to_string())));
-        } else if let Ok(val) = row.try_get::<Option<chrono::NaiveTime>, _>(col.ordinal()) {
-            map.insert(col_name, serde_json::json!(val.map(|t| t.to_string())));
-        } else if let Ok(val) = row.try_get::<Option<String>, _>(col.ordinal()) {
-            map.insert(col_name, serde_json::json!(val));
-        } else {
-            let val: Option<Vec<u8>> = row.try_get(col.ordinal()).unwrap_or(None);
-            if let Some(bytes) = val {
-                let s = String::from_utf8_lossy(&bytes).into_owned();
-                map.insert(col_name, serde_json::json!(s));
-            } else {
-                map.insert(col_name, Value::Null);
-            }
-        }
-    }
-    Value::Object(map)
-}
-
-fn value_to_string(row: &sqlx::mysql::MySqlRow, ordinal: usize) -> Option<String> {
-    if let Ok(v) = row.try_get::<Option<String>, _>(ordinal) {
-        return v;
-    }
-    if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<f64>, _>(ordinal) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<bool>, _>(ordinal) {
-        return v.map(|x| x.to_string());
-    }
-    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(ordinal) {
-        return v.map(|x| String::from_utf8_lossy(&x).into_owned());
-    }
-    None
-}
-
-fn format_value(v: &Value) -> String {
-    match v {
-        Value::Null => "NULL".to_string(),
-        Value::Bool(b) => {
-            if *b {
-                "TRUE".to_string()
-            } else {
-                "FALSE".to_string()
-            }
-        }
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("'{}'", s.replace("'", "''")),
-        Value::Array(a) => format!(
-            "'{}'",
-            serde_json::to_string(a)
-                .unwrap_or_default()
-                .replace("'", "''")
-        ),
-        Value::Object(o) => format!(
-            "'{}'",
-            serde_json::to_string(o)
-                .unwrap_or_default()
-                .replace("'", "''")
-        ),
-    }
-}
-
 fn generate_statements(diff: &RowDiff) -> Vec<String> {
     let mut stmts = Vec::new();
 
     if diff.mode == SyncMode::Mirror && !diff.deletes.is_empty() {
         for row in &diff.deletes {
             if let Some(pk_val) = row.get(&diff.primary_key) {
-                let pk = format_value(pk_val);
+                let pk = sql_util::format_sql_value(pk_val);
                 stmts.push(format!(
-                    "DELETE FROM `{}` WHERE `{}` = {};",
-                    diff.table_name, diff.primary_key, pk
+                    "DELETE FROM {} WHERE {} = {};",
+                    sql_util::quote_ident_mysql(&diff.table_name),
+                    sql_util::quote_ident_mysql(&diff.primary_key),
+                    pk
                 ));
             }
         }
@@ -606,23 +542,27 @@ fn generate_statements(diff: &RowDiff) -> Vec<String> {
             let mut vals = Vec::new();
             let mut updates = Vec::new();
             for (k, v) in obj {
-                cols.push(format!("`{}`", k));
-                vals.push(format_value(v));
+                cols.push(sql_util::quote_ident_mysql(k));
+                vals.push(sql_util::format_sql_value(v));
                 if k != &diff.primary_key {
-                    updates.push(format!("`{}` = new.`{}`", k, k));
+                    updates.push(format!(
+                        "{} = new.{}",
+                        sql_util::quote_ident_mysql(k),
+                        sql_util::quote_ident_mysql(k)
+                    ));
                 }
             }
             if updates.is_empty() {
                 stmts.push(format!(
-                    "INSERT IGNORE INTO `{}` ({}) VALUES ({});",
-                    diff.table_name,
+                    "INSERT IGNORE INTO {} ({}) VALUES ({});",
+                    sql_util::quote_ident_mysql(&diff.table_name),
                     cols.join(", "),
                     vals.join(", ")
                 ));
             } else {
                 stmts.push(format!(
-                    "INSERT INTO `{}` ({}) VALUES ({}) AS new ON DUPLICATE KEY UPDATE {};",
-                    diff.table_name,
+                    "INSERT INTO {} ({}) VALUES ({}) AS new ON DUPLICATE KEY UPDATE {};",
+                    sql_util::quote_ident_mysql(&diff.table_name),
                     cols.join(", "),
                     vals.join(", "),
                     updates.join(", ")
@@ -632,4 +572,229 @@ fn generate_statements(diff: &RowDiff) -> Vec<String> {
     }
 
     stmts
+}
+
+/// Maximum rows per chunk for fetch_rows_in_range.
+/// Defaults to 100,000; override via LOCAL_AI_SQL_SYNC_MAX_ROWS_PER_CHUNK env var.
+fn max_rows_per_chunk() -> usize {
+    std::env::var("LOCAL_AI_SQL_SYNC_MAX_ROWS_PER_CHUNK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100_000)
+        .max(1)
+}
+
+/// Stream rows in a PK range one at a time — O(1) memory for large exports.
+/// Calls `on_row` for each row; returns total count processed.
+pub async fn fetch_rows_in_range_stream<F>(
+    db: &DbClient,
+    table_name: &str,
+    primary_key: &str,
+    range: &PkRange,
+    on_row: F,
+) -> Result<usize, AppError>
+where
+    F: FnMut(Value) + Send,
+{
+    use futures_util::TryStreamExt;
+
+    let _policy = TimeoutPolicy::default();
+    let pk_ident = sql_util::quote_ident_mysql(primary_key);
+    let tbl_ident = sql_util::quote_ident_mysql(table_name);
+    let mut sql = format!("SELECT * FROM {table}", table = tbl_ident);
+    let mut has_where = false;
+
+    if range.start.is_some() {
+        sql.push_str(&format!(
+            " WHERE {pk} {op} ?",
+            pk = pk_ident,
+            op = if range.start_inclusive { ">=" } else { ">" }
+        ));
+        has_where = true;
+        if range.end.is_some() {
+            sql.push_str(&format!(
+                " AND {pk} {op} ?",
+                pk = pk_ident,
+                op = if range.end_inclusive { "<=" } else { "<" }
+            ));
+        }
+    } else if range.end.is_some() {
+        sql.push_str(&format!(
+            " WHERE {pk} {op} ?",
+            pk = pk_ident,
+            op = if range.end_inclusive { "<=" } else { "<" }
+        ));
+        has_where = true;
+    }
+
+    if !has_where && range.end.is_some() {
+        sql.push_str(&format!(
+            " WHERE {pk} {op} ?",
+            pk = pk_ident,
+            op = if range.end_inclusive { "<=" } else { "<" }
+        ));
+    }
+
+    sql.push_str(&format!(" ORDER BY {pk}", pk = pk_ident));
+    sql.push_str(&format!(" LIMIT {}", max_rows_per_chunk()));
+
+    let mut q = sqlx::query(&sql);
+    if let Some(start) = &range.start {
+        q = q.bind(start.clone());
+        if let Some(end) = &range.end {
+            q = q.bind(end.clone());
+        }
+    } else if let Some(end) = &range.end {
+        q = q.bind(end.clone());
+    }
+
+    let pool = db.mysql_pool()?;
+    let mut stream = q.fetch(pool);
+    let mut count = 0usize;
+    let mut on_row = on_row;
+
+    while let Some(row) = stream
+        .try_next()
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?
+    {
+        on_row(sql_util::mysql_row_to_json(&row));
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+/// Generate a NULL-safe row-level checksum expression for the given columns.
+/// MySQL uses CRC32(CONCAT_WS(...)), PostgreSQL uses md5(concat_ws(...)).
+pub fn row_checksum_expr(columns: &[String], db_type: &crate::config::DbType) -> String {
+    let coalesced: Vec<String> = columns
+        .iter()
+        .map(|col| {
+            format!(
+                "COALESCE(CAST({} AS CHAR), '<NULL>')",
+                sql_util::quote_ident(col, db_type.clone())
+            )
+        })
+        .collect();
+    match db_type {
+        crate::config::DbType::MySQL | crate::config::DbType::MariaDB => {
+            format!("CRC32(CONCAT_WS('#', {}))", coalesced.join(", "))
+        }
+        _ => format!("md5(concat_ws('#', {}))", coalesced.join(", ")),
+    }
+}
+
+/// Adaptive chunk sizing for data sync operations.
+/// Adjusts chunk size based on observed throughput to target a specific duration per chunk.
+#[derive(Debug, Clone)]
+pub struct AdaptiveChunker {
+    /// Target duration per chunk in milliseconds
+    pub target_duration_ms: u64,
+    /// Current chunk size (rows)
+    pub current_chunk_size: usize,
+    /// Minimum chunk size
+    pub min_chunk_size: usize,
+    /// Maximum chunk size
+    pub max_chunk_size: usize,
+    /// Exponential moving average throughput (rows/sec)
+    ema_throughput: f64,
+    /// EMA smoothing factor
+    alpha: f64,
+}
+
+impl AdaptiveChunker {
+    pub fn new(target_duration_ms: u64) -> Self {
+        Self {
+            target_duration_ms,
+            current_chunk_size: 1000,
+            min_chunk_size: 100,
+            max_chunk_size: 100_000,
+            ema_throughput: 0.0,
+            alpha: 0.3,
+        }
+    }
+
+    /// Adjust chunk size based on observed performance.
+    /// Call after each chunk completes with the actual row count and elapsed time.
+    pub fn adjust(&mut self, actual_rows: usize, actual_duration_ms: u64) {
+        let duration = (actual_duration_ms as f64).max(1.0);
+        let throughput = (actual_rows as f64) * 1000.0 / duration;
+
+        if self.ema_throughput == 0.0 {
+            // First measurement — seed the EMA
+            self.ema_throughput = throughput;
+        } else {
+            self.ema_throughput =
+                self.alpha * throughput + (1.0 - self.alpha) * self.ema_throughput;
+        }
+
+        let ideal_rows =
+            (self.ema_throughput * (self.target_duration_ms as f64) / 1000.0) as usize;
+        self.current_chunk_size = ideal_rows.clamp(self.min_chunk_size, self.max_chunk_size);
+    }
+
+    /// Returns the current recommended chunk size.
+    pub fn chunk_size(&self) -> usize {
+        self.current_chunk_size
+    }
+}
+
+impl Default for AdaptiveChunker {
+    fn default() -> Self {
+        Self::new(500)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_chunker_increases_on_fast_throughput() {
+        let mut c = AdaptiveChunker::new(500);
+        // Simulate: 1000 rows in 100ms = 10,000 rows/sec
+        c.adjust(1000, 100);
+        // Ideal: 10000 * 0.5 = 5000 rows
+        assert_eq!(c.chunk_size(), 5000);
+    }
+
+    #[test]
+    fn adaptive_chunker_decreases_on_slow_throughput() {
+        let mut c = AdaptiveChunker::new(500);
+        // First: fast
+        c.adjust(1000, 100);
+        // Then: slow — 100 rows in 5000ms = 20 rows/sec
+        c.adjust(100, 5000);
+        // EMA: 0.3 * 20 + 0.7 * 10000 = 7006 -> ideal = 3503
+        // But after many slow iterations it converges down
+        for _ in 0..10 {
+            c.adjust(100, 5000);
+        }
+        // After many slow iterations, chunk_size converges toward min
+        assert!(c.chunk_size() <= 150, "chunk_size {} should be near min 100", c.chunk_size());
+    }
+
+    #[test]
+    fn row_checksum_expr_mysql_uses_crc32() {
+        let cols = vec!["id".to_string(), "name".to_string()];
+        let expr = row_checksum_expr(&cols, &crate::config::DbType::MySQL);
+        assert!(expr.contains("CRC32"));
+        assert!(expr.contains("CONCAT_WS"));
+        assert!(expr.contains("COALESCE"));
+    }
+
+    #[test]
+    fn row_checksum_expr_pg_uses_md5() {
+        let cols = vec!["id".to_string(), "name".to_string()];
+        let expr = row_checksum_expr(&cols, &crate::config::DbType::PostgreSQL);
+        assert!(expr.contains("md5"));
+        assert!(expr.contains("concat_ws"));
+    }
+
+    #[test]
+    fn max_rows_per_chunk_default_is_100k() {
+        // Without env var, default should be 100_000
+        assert_eq!(max_rows_per_chunk(), 100_000);
+    }
 }

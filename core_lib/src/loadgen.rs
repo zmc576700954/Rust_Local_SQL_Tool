@@ -1,5 +1,6 @@
 use crate::db::DbClient;
 use crate::error::AppError;
+use crate::sql_util;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::Executor;
@@ -191,7 +192,8 @@ fn make_payload(rng: &mut XorShift64, id: u64) -> String {
 }
 
 async fn exec(db: &DbClient, sql: &str) -> Result<(), AppError> {
-    db.pool
+    db.mysql_pool()
+        .map_err(|e| AppError::InternalError(e.to_string()))?
         .execute(sql)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -514,7 +516,7 @@ async fn diverge_target_mirror(target: &DbClient, tier: LoadgenTier) -> Result<(
     let ins_users = tier.rows_users() / 100;
     if ins_users > 0 {
         let max_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM users")
-            .fetch_one(&target.pool)
+            .fetch_one(target.mysql_pool().map_err(|e| AppError::InternalError(e.to_string()))?)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         let start = (max_id as u64) + 1;
@@ -587,14 +589,19 @@ async fn diverge_target_upsert_only(target: &DbClient, tier: LoadgenTier) -> Res
 }
 
 async fn table_count(db: &DbClient, table: &str) -> Result<u64, AppError> {
-    let q = format!("SELECT COUNT(*) FROM {}", table);
-    let v: i64 = sqlx::query_scalar(&q).fetch_one(&db.pool).await?;
+    let pool = db.mysql_pool()?;
+    let q = format!("SELECT COUNT(*) FROM {}", sql_util::quote_ident_mysql(table));
+    let v: i64 = sqlx::query_scalar(&q).fetch_one(pool).await?;
     Ok(v.max(0) as u64)
 }
 
 async fn table_max_id(db: &DbClient, table: &str) -> Result<u64, AppError> {
-    let q = format!("SELECT COALESCE(MAX(id), 0) FROM {}", table);
-    let v: i64 = sqlx::query_scalar(&q).fetch_one(&db.pool).await?;
+    let pool = db.mysql_pool()?;
+    let q = format!(
+        "SELECT COALESCE(MAX(id), 0) FROM {}",
+        sql_util::quote_ident_mysql(table)
+    );
+    let v: i64 = sqlx::query_scalar(&q).fetch_one(pool).await?;
     Ok(v.max(0) as u64)
 }
 

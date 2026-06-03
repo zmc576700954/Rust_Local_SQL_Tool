@@ -30,8 +30,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let t0 = Instant::now();
-    let source = DbClient::new(&source_url).await?;
-    let target = DbClient::new(&target_url).await?;
+    let source = DbClient::new_default(&source_url).await?;
+    let target = DbClient::new_default(&target_url).await?;
     let connect_ms = t0.elapsed().as_millis();
 
     let t1 = Instant::now();

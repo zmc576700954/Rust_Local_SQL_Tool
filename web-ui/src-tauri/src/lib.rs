@@ -400,7 +400,7 @@ async fn get_db_client(
         }
     }
 
-    let client = DbClient::new(&resolved.url)
+    let client = DbClient::new_default(&resolved.url)
         .await
         .map_err(|e| format!("Failed to connect database: {e}"))?;
 
@@ -458,7 +458,7 @@ fn normalize_perf_probe_table_name(raw: Option<&str>) -> Result<String, String> 
 
 async fn get_fresh_db_client(db_id: Option<&str>) -> Result<(DbClient, String), String> {
     let resolved = resolve_connection(db_id).await?;
-    let client = DbClient::new(&resolved.url)
+    let client = DbClient::new_default(&resolved.url)
         .await
         .map_err(|e| format!("Failed to connect database: {e}"))?;
     Ok((client, resolved.url))
@@ -566,7 +566,7 @@ async fn run_query_select_small_probe(
     let sql = normalize_perf_probe_sql(sql)?;
     let (warm_client, _) = get_db_client(state, db_id).await?;
     sqlx::query(&sql)
-        .fetch_all(&warm_client.pool)
+        .fetch_all(warm_client.mysql_pool().map_err(|e| e.to_string())?)
         .await
         .map_err(|e| format!("query_select_small warmup failed: {e}"))?;
 
@@ -575,7 +575,7 @@ async fn run_query_select_small_probe(
         let (db_client, _) = get_db_client(state, db_id).await?;
         let started_at = Instant::now();
         let rows = sqlx::query(&sql)
-            .fetch_all(&db_client.pool)
+            .fetch_all(db_client.mysql_pool().map_err(|e| e.to_string())?)
             .await
             .map_err(|e| format!("query_select_small failed: {e}"))?;
         samples.push(PerfSample {
@@ -599,7 +599,7 @@ async fn run_query_write_small_probe(
     iterations: u32,
 ) -> Result<PerfProbeSummary, String> {
     let (db_client, _) = get_db_client(state, db_id).await?;
-    let mut conn = db_client.pool.acquire().await.map_err(|e| e.to_string())?;
+    let mut conn = db_client.mysql_pool().map_err(|e| e.to_string())?.acquire().await.map_err(|e| e.to_string())?;
     let temp_table = "__perf_probe_write_small";
     let drop_sql = format!("DROP TEMPORARY TABLE IF EXISTS {temp_table}");
     let create_sql = format!(
@@ -655,7 +655,7 @@ async fn run_explain_plan_probe(
     let explain_sql = build_perf_probe_explain_sql(sql)?;
     let (warm_client, _) = get_db_client(state, db_id).await?;
     sqlx::query(&explain_sql)
-        .fetch_all(&warm_client.pool)
+        .fetch_all(warm_client.mysql_pool().map_err(|e| e.to_string())?)
         .await
         .map_err(|e| format!("explain_plan warmup failed: {e}"))?;
 
@@ -664,7 +664,7 @@ async fn run_explain_plan_probe(
         let (db_client, _) = get_db_client(state, db_id).await?;
         let started_at = Instant::now();
         let rows = sqlx::query(&explain_sql)
-            .fetch_all(&db_client.pool)
+            .fetch_all(db_client.mysql_pool().map_err(|e| e.to_string())?)
             .await
             .map_err(|e| format!("explain_plan failed: {e}"))?;
         samples.push(PerfSample {
@@ -775,7 +775,7 @@ async fn run_table_first_page_probe(
         )
         .map_err(|e| e.to_string())?;
 
-        let result_rows = tokio::time::timeout(policy.db_query, sqlx::query(&data_sql).fetch_all(&db_client.pool))
+        let result_rows = tokio::time::timeout(policy.db_query, sqlx::query(&data_sql).fetch_all(db_client.mysql_pool().map_err(|e| e.to_string())?))
             .await
             .map_err(|_| "Query timed out after 30 seconds. Please optimize SQL or add indexes.".to_string())?
             .map_err(|e| e.to_string())?;
@@ -821,7 +821,7 @@ async fn run_cancel_latency_probe(
 
     for iteration in 0..iterations {
         let (db_client, _) = get_db_client(state, db_id).await?;
-        let mut conn = db_client.pool.acquire().await.map_err(|e| e.to_string())?;
+        let mut conn = db_client.mysql_pool().map_err(|e| e.to_string())?.acquire().await.map_err(|e| e.to_string())?;
         let connection_id = DbClient::connection_id_for_session(&mut conn)
             .await
             .map_err(|e| e.to_string())?;
@@ -941,6 +941,7 @@ async fn get_or_open_transaction_session(
             return Err("Transaction session is bound to a different database connection".to_string());
         }
         session.last_accessed = Instant::now();
+        drop(session);
         return Ok(existing);
     }
 
@@ -951,7 +952,7 @@ async fn get_or_open_transaction_session(
     let resolved_db_id = resolve_transaction_db_id(db_id).await?;
     let (db_client, _) = get_db_client(state, db_id).await?;
     let mut conn = db_client
-        .pool
+        .mysql_pool().map_err(|e| format!("Not MySQL: {e}"))?
         .acquire()
         .await
         .map_err(|e| format!("Failed to acquire connection: {e}"))?;
@@ -1079,7 +1080,7 @@ async fn workbench_run(
             })
         } else {
             let mut conn = db_client
-                .pool
+                .mysql_pool().map_err(|e| format!("Not MySQL: {e}"))?
                 .acquire()
                 .await
                 .map_err(|e| format!("Failed to acquire connection: {e}"))?;
@@ -1116,6 +1117,8 @@ async fn workbench_run(
     let mut status = "success".to_string();
     let mut err_msg = None;
 
+    let mysql_pool = db_client.mysql_pool().ok().cloned();
+
     if is_select {
         let result = match tokio::time::timeout(policy.db_query, async {
             if let Some(active_query) = active_query.as_mut() {
@@ -1124,14 +1127,18 @@ async fn workbench_run(
                     sqlx::query(&sql).fetch_all(&mut *session.conn).await
                 } else if let Some(conn) = active_query.owned_conn.as_mut() {
                     sqlx::query(&sql).fetch_all(&mut **conn).await
+                } else if let Some(pool) = &mysql_pool {
+                    sqlx::query(&sql).fetch_all(pool).await
                 } else {
-                    sqlx::query(&sql).fetch_all(&db_client.pool).await
+                    Err(sqlx::Error::PoolClosed)
                 }
             } else if let Some(transaction_session) = transaction_session.as_ref() {
                 let mut session = transaction_session.lock().await;
                 sqlx::query(&sql).fetch_all(&mut *session.conn).await
+            } else if let Some(pool) = &mysql_pool {
+                sqlx::query(&sql).fetch_all(pool).await
             } else {
-                sqlx::query(&sql).fetch_all(&db_client.pool).await
+                Err(sqlx::Error::PoolClosed)
             }
         })
         .await
@@ -1204,14 +1211,18 @@ async fn workbench_run(
                     sqlx::query(&sql).execute(&mut *session.conn).await
                 } else if let Some(conn) = active_query.owned_conn.as_mut() {
                     sqlx::query(&sql).execute(&mut **conn).await
+                } else if let Some(pool) = &mysql_pool {
+                    sqlx::query(&sql).execute(pool).await
                 } else {
-                    sqlx::query(&sql).execute(&db_client.pool).await
+                    Err(sqlx::Error::PoolClosed)
                 }
             } else if let Some(transaction_session) = transaction_session.as_ref() {
                 let mut session = transaction_session.lock().await;
                 sqlx::query(&sql).execute(&mut *session.conn).await
+            } else if let Some(pool) = &mysql_pool {
+                sqlx::query(&sql).execute(pool).await
             } else {
-                sqlx::query(&sql).execute(&db_client.pool).await
+                Err(sqlx::Error::PoolClosed)
             }
         })
         .await
@@ -1442,7 +1453,7 @@ async fn table_page(
     }
 
     let policy = TimeoutPolicy::default();
-    let result_rows = tokio::time::timeout(policy.db_query, query.fetch_all(&db_client.pool))
+    let result_rows = tokio::time::timeout(policy.db_query, query.fetch_all(db_client.mysql_pool().map_err(|e| e.to_string())?))
         .await
         .map_err(|_| "Query timed out after 30 seconds. Please optimize SQL or add indexes.".to_string())?
         .map_err(|e| e.to_string())?;

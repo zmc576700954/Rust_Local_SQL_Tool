@@ -46,8 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let source = core_lib::db::DbClient::new(&source_url).await?;
-    let target = core_lib::db::DbClient::new(&target_url).await?;
+    let source = core_lib::db::DbClient::new_default(&source_url).await?;
+    let target = core_lib::db::DbClient::new_default(&target_url).await?;
 
     let report = core_lib::loadgen::LoadgenEngine::run(
         &source,

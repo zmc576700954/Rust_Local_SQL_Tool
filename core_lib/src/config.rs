@@ -288,6 +288,61 @@ pub struct DbConnection {
     pub is_read_only: bool,
 }
 
+/// 可配置的数据库连接池参数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolConfig {
+    /// 最大连接数，默认 10
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+    /// 最小连接数，默认 1
+    #[serde(default = "default_min_connections")]
+    pub min_connections: u32,
+    /// 获取连接超时（毫秒），默认 5000
+    #[serde(default = "default_acquire_timeout_ms")]
+    pub acquire_timeout_ms: u64,
+    /// 空闲连接超时（毫秒），默认 600000 (10min)
+    #[serde(default = "default_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
+    /// 连接最大生命周期（毫秒），默认 1800000 (30min)
+    #[serde(default = "default_max_lifetime_ms")]
+    pub max_lifetime_ms: u64,
+    /// 获取连接前是否健康检查，默认 true
+    #[serde(default = "default_test_before_acquire")]
+    pub test_before_acquire: bool,
+}
+
+fn default_max_connections() -> u32 {
+    10
+}
+fn default_min_connections() -> u32 {
+    1
+}
+fn default_acquire_timeout_ms() -> u64 {
+    5000
+}
+fn default_idle_timeout_ms() -> u64 {
+    600_000
+}
+fn default_max_lifetime_ms() -> u64 {
+    1_800_000
+}
+fn default_test_before_acquire() -> bool {
+    true
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: default_max_connections(),
+            min_connections: default_min_connections(),
+            acquire_timeout_ms: default_acquire_timeout_ms(),
+            idle_timeout_ms: default_idle_timeout_ms(),
+            max_lifetime_ms: default_max_lifetime_ms(),
+            test_before_acquire: default_test_before_acquire(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     /// MySQL connection string, e.g. "mysql://user:pass@127.0.0.1:3306/db"
@@ -333,6 +388,10 @@ pub struct AppConfig {
 
     #[serde(default = "default_active_tier")]
     pub active_tier: String,
+
+    /// 连接池配置，缺失时使用默认值
+    #[serde(default)]
+    pub pool_config: PoolConfig,
 }
 
 fn default_active_tier() -> String {
@@ -409,6 +468,7 @@ impl Default for AppConfig {
             ai_models,
             active_model_id: Some("gpt-4o-mini".to_string()),
             active_tier: "balanced".to_string(),
+            pool_config: PoolConfig::default(),
         }
     }
 }
@@ -475,6 +535,38 @@ impl AppConfig {
         }
 
         (self.model_name.clone(), None)
+    }
+
+    /// 从环境变量覆盖 PoolConfig 参数（LOCAL_AI_SQL_POOL_* 前缀）
+    pub fn apply_pool_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("LOCAL_AI_SQL_POOL_MAX_CONNECTIONS") {
+            if let Ok(n) = v.parse::<u32>() {
+                self.pool_config.max_connections = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LOCAL_AI_SQL_POOL_MIN_CONNECTIONS") {
+            if let Ok(n) = v.parse::<u32>() {
+                self.pool_config.min_connections = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LOCAL_AI_SQL_POOL_ACQUIRE_TIMEOUT_MS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.pool_config.acquire_timeout_ms = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LOCAL_AI_SQL_POOL_IDLE_TIMEOUT_MS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.pool_config.idle_timeout_ms = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LOCAL_AI_SQL_POOL_MAX_LIFETIME_MS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.pool_config.max_lifetime_ms = n;
+            }
+        }
+        if let Ok(v) = std::env::var("LOCAL_AI_SQL_POOL_TEST_BEFORE_ACQUIRE") {
+            self.pool_config.test_before_acquire = v == "true" || v == "1";
+        }
     }
 
     fn ensure_defaults(&mut self) {
@@ -596,6 +688,7 @@ impl AppConfig {
 
         let content = fs::read_to_string(&path).await?;
         let mut config: AppConfig = serde_json::from_str(&content)?;
+        config.apply_pool_env_overrides();
         config.ensure_defaults();
         Ok(config)
     }

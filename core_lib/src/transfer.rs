@@ -1,7 +1,7 @@
+use crate::sql_util;
 use csv::ReaderBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::Row;
 use std::fs::File;
 use std::io::Read;
 use thiserror::Error;
@@ -129,71 +129,6 @@ impl TransferEngine {
     pub async fn execute_transfer_with_report(
         config: &TransferConfig,
     ) -> Result<TransferExecuteReport, TransferError> {
-        fn escape_sql_string(v: &str) -> String {
-            v.replace('\'', "''")
-        }
-
-        fn quoted_ident(v: &str) -> String {
-            format!("`{}`", v.replace('`', "``"))
-        }
-
-        fn value_to_sql(v: &Value) -> String {
-            match v {
-                Value::Null => "NULL".to_string(),
-                Value::Bool(b) => {
-                    if *b {
-                        "TRUE".to_string()
-                    } else {
-                        "FALSE".to_string()
-                    }
-                }
-                Value::Number(n) => n.to_string(),
-                Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                Value::Array(a) => format!(
-                    "'{}'",
-                    serde_json::to_string(a)
-                        .unwrap_or_default()
-                        .replace('\'', "''")
-                ),
-                Value::Object(o) => format!(
-                    "'{}'",
-                    serde_json::to_string(o)
-                        .unwrap_or_default()
-                        .replace('\'', "''")
-                ),
-            }
-        }
-
-        fn row_cell_to_value(row: &sqlx::mysql::MySqlRow, idx: usize) -> Value {
-            if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
-                return serde_json::json!(v);
-            }
-            if let Ok(v) = row.try_get::<Option<f64>, _>(idx) {
-                return serde_json::json!(v);
-            }
-            if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
-                return serde_json::json!(v);
-            }
-            if let Ok(v) = row.try_get::<Option<chrono::NaiveDateTime>, _>(idx) {
-                return serde_json::json!(v.map(|x| x.to_string()));
-            }
-            if let Ok(v) = row.try_get::<Option<chrono::NaiveDate>, _>(idx) {
-                return serde_json::json!(v.map(|x| x.to_string()));
-            }
-            if let Ok(v) = row.try_get::<Option<chrono::NaiveTime>, _>(idx) {
-                return serde_json::json!(v.map(|x| x.to_string()));
-            }
-            if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
-                return serde_json::json!(v);
-            }
-            if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
-                if let Some(bytes) = v {
-                    return serde_json::json!(String::from_utf8_lossy(&bytes).to_string());
-                }
-            }
-            Value::Null
-        }
-
         fn value_key(v: &Value) -> String {
             match v {
                 Value::Null => "null".to_string(),
@@ -213,7 +148,7 @@ impl TransferEngine {
 
         if let TransferMode::Replace = config.mode {
             out.push_str("TRUNCATE TABLE ");
-            out.push_str(&quoted_ident(&config.target_table));
+            out.push_str(&sql_util::quote_ident_mysql(&config.target_table));
             out.push_str(";\n");
         }
 
@@ -268,10 +203,10 @@ impl TransferEngine {
 
                 let insert_cols: Vec<String> = mapping_idx
                     .iter()
-                    .map(|(tgt, _)| quoted_ident(tgt))
+                    .map(|(tgt, _)| sql_util::quote_ident_mysql(tgt))
                     .collect();
 
-                let target_ident = quoted_ident(&config.target_table);
+                let target_ident = sql_util::quote_ident_mysql(&config.target_table);
                 let batch_rows: usize = std::env::var("LOCAL_AI_SQL_TRANSFER_INSERT_BATCH_ROWS")
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
@@ -286,7 +221,7 @@ impl TransferEngine {
                     for (_tgt, idx_opt) in &mapping_idx {
                         if let Some(idx) = idx_opt {
                             let v = record.get(*idx).unwrap_or_default();
-                            vals.push(format!("'{}'", escape_sql_string(v)));
+                            vals.push(format!("'{}'", sql_util::escape_sql_string(v)));
                         } else {
                             vals.push("NULL".to_string());
                         }
@@ -345,7 +280,7 @@ impl TransferEngine {
             let source_cols: Vec<String> = config
                 .mappings
                 .iter()
-                .map(|m| quoted_ident(&m.source_col))
+                .map(|m| sql_util::quote_ident_mysql(&m.source_col))
                 .collect();
             let query = format!("SELECT {} FROM `{}`", source_cols.join(", "), source_table);
 
@@ -357,10 +292,10 @@ impl TransferEngine {
             let insert_cols: Vec<String> = config
                 .mappings
                 .iter()
-                .map(|m| quoted_ident(&m.target_col))
+                .map(|m| sql_util::quote_ident_mysql(&m.target_col))
                 .collect();
 
-            let target_ident = quoted_ident(&config.target_table);
+            let target_ident = sql_util::quote_ident_mysql(&config.target_table);
             let batch_rows: usize = std::env::var("LOCAL_AI_SQL_TRANSFER_INSERT_BATCH_ROWS")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
@@ -373,7 +308,7 @@ impl TransferEngine {
             let target_cols: Vec<String> = config
                 .mappings
                 .iter()
-                .map(|m| quoted_ident(&m.target_col))
+                .map(|m| sql_util::quote_ident_mysql(&m.target_col))
                 .collect();
 
             if let Some(pk_idx) = pk_idx {
@@ -393,7 +328,7 @@ impl TransferEngine {
                 for row in target_rows {
                     let mut vals = Vec::with_capacity(config.mappings.len());
                     for i in 0..config.mappings.len() {
-                        vals.push(row_cell_to_value(&row, i));
+                        vals.push(sql_util::mysql_cell_to_value(&row, i));
                     }
                     let pk = value_key(vals.get(pk_idx).unwrap_or(&Value::Null));
                     target_map.insert(pk, vals);
@@ -402,7 +337,7 @@ impl TransferEngine {
                 for row in rows {
                     let mut src_vals = Vec::with_capacity(config.mappings.len());
                     for i in 0..config.mappings.len() {
-                        src_vals.push(row_cell_to_value(&row, i));
+                        src_vals.push(sql_util::mysql_cell_to_value(&row, i));
                     }
                     let pk = value_key(src_vals.get(pk_idx).unwrap_or(&Value::Null));
                     if let Some(tgt_vals) = target_map.get(&pk) {
@@ -418,8 +353,8 @@ impl TransferEngine {
                             }
                             sets.push(format!(
                                 "{} = {}",
-                                quoted_ident(&m.target_col),
-                                value_to_sql(&src_vals[i])
+                                sql_util::quote_ident_mysql(&m.target_col),
+                                sql_util::format_sql_value(&src_vals[i])
                             ));
                         }
                         out.push_str("UPDATE ");
@@ -427,13 +362,13 @@ impl TransferEngine {
                         out.push_str(" SET ");
                         out.push_str(&sets.join(", "));
                         out.push_str(" WHERE ");
-                        out.push_str(&quoted_ident(&config.mappings[pk_idx].target_col));
+                        out.push_str(&sql_util::quote_ident_mysql(&config.mappings[pk_idx].target_col));
                         out.push_str(" = ");
-                        out.push_str(&value_to_sql(&src_vals[pk_idx]));
+                        out.push_str(&sql_util::format_sql_value(&src_vals[pk_idx]));
                         out.push_str(";\n");
                     } else {
                         insert_count += 1;
-                        let vals = src_vals.iter().map(value_to_sql).collect::<Vec<_>>();
+                        let vals = src_vals.iter().map(sql_util::format_sql_value).collect::<Vec<_>>();
                         out.push_str("INSERT INTO ");
                         out.push_str(&target_ident);
                         out.push_str(" (");
@@ -448,8 +383,8 @@ impl TransferEngine {
                 for row in rows {
                     let mut vals = Vec::new();
                     for i in 0..config.mappings.len() {
-                        let v = row_cell_to_value(&row, i);
-                        vals.push(value_to_sql(&v));
+                        let v = sql_util::mysql_cell_to_value(&row, i);
+                        vals.push(sql_util::format_sql_value(&v));
                     }
                     batch.push(format!("({})", vals.join(", ")));
                     insert_count += 1;
