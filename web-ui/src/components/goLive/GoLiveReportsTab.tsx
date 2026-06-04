@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
 import { useToast } from '../Toast'
 import { parseError } from '../../utils'
+import { tr } from '../../i18n'
 
 type StepStatus = 'pass' | 'fail' | 'skip' | 'unknown'
 
@@ -83,7 +84,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
       setRows(Array.isArray(data) ? data : [])
     } catch (e: any) {
       const err = parseError(e)
-      toast('加载门禁报告失败：' + (err.message || String(e)), 'error')
+      toast(tr('加载门禁报告失败：', 'Failed to load reports: ') + (err.message || String(e)), 'error')
     } finally {
       setLoadingList(false)
     }
@@ -99,11 +100,11 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
         setDetail(data as any)
       } else {
         setDetail(null)
-        toast('报告内容不是有效 JSON', 'error')
+        toast(tr('报告内容不是有效 JSON', 'Report is not valid JSON'), 'error')
       }
     } catch (e: any) {
       const err = parseError(e)
-      toast('加载报告详情失败：' + (err.message || String(e)), 'error')
+      toast(tr('加载报告详情失败：', 'Failed to load report detail: ') + (err.message || String(e)), 'error')
       setDetail(null)
     } finally {
       setLoadingDetail(false)
@@ -171,7 +172,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
     const bId = compareB.trim()
     if (!aId || !bId) return
     if (aId === bId) {
-      toast('请选择两个不同的 job_id', 'error')
+      toast(tr('请选择两个不同的 job_id', 'Please select two different job_ids'), 'error')
       return
     }
     setCompareLoading(true)
@@ -181,14 +182,14 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
         api.toolJobArtifactData(bId, 'data'),
       ])
       if (!a || typeof a !== 'object' || Array.isArray(a) || !b || typeof b !== 'object' || Array.isArray(b)) {
-        toast('对比报告内容不是有效 JSON', 'error')
+        toast(tr('对比报告内容不是有效 JSON', 'Comparison report is not valid JSON'), 'error')
         setCompareData(null)
         return
       }
       setCompareData({ a: a as any, b: b as any })
     } catch (e: any) {
       const err = parseError(e)
-      toast('对比加载失败：' + (err.message || String(e)), 'error')
+      toast(tr('对比加载失败：', 'Comparison load failed: ') + (err.message || String(e)), 'error')
       setCompareData(null)
     } finally {
       setCompareLoading(false)
@@ -204,19 +205,19 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
     <div className="flex h-full bg-dark-bg">
       <div className="w-[380px] border-r border-dark-border flex flex-col">
         <div className="h-10 border-b border-dark-border flex items-center justify-between px-4 bg-dark-panel shrink-0">
-          <div className="text-sm font-medium text-gray-200">门禁报告</div>
+          <div className="text-sm font-medium text-gray-200">{tr('门禁报告', 'Go-Live Reports')}</div>
           <button
             onClick={loadList}
             disabled={loadingList}
             className="px-2 py-1 rounded text-xs font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
           >
-            刷新
+            {tr('刷新', 'Refresh')}
           </button>
         </div>
 
         <div className="flex-1 overflow-auto">
           {sortedRows.length === 0 && (
-            <div className="p-4 text-sm text-gray-500">暂无报告</div>
+            <div className="p-4 text-sm text-gray-500">{tr('暂无报告', 'No reports')}</div>
           )}
           {sortedRows.map((r, idx) => {
             const id = String(r?.job_id || '').trim()
@@ -246,14 +247,14 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
 
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="h-10 border-b border-dark-border flex items-center justify-between px-4 bg-dark-panel shrink-0">
-          <div className="text-sm font-medium text-gray-200">详情</div>
+          <div className="text-sm font-medium text-gray-200">{tr('详情', 'Details')}</div>
           <div className="flex items-center gap-2">
             {selectedJobId && (
               <button
                 onClick={() => downloadGoLiveReport(selectedJobId)}
                 className="px-2 py-1 rounded text-xs font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d]"
               >
-                下载 artifacts/data
+                {tr('下载 artifacts/data', 'Download artifacts/data')}
               </button>
             )}
             {selectedJobId && (
@@ -262,7 +263,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
                 disabled={loadingDetail}
                 className="px-2 py-1 rounded text-xs font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
               >
-                重新加载
+                {tr('重新加载', 'Reload')}
               </button>
             )}
           </div>
@@ -270,7 +271,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
 
         <div className="flex-1 overflow-auto p-4 flex flex-col gap-4">
           {!selectedJobId && (
-            <div className="text-sm text-gray-500">从左侧选择一条报告查看详情</div>
+            <div className="text-sm text-gray-500">{tr('从左侧选择一条报告查看详情', 'Select a report from the left to view details')}</div>
           )}
 
           {selectedJobId && (
@@ -321,7 +322,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
                     ))}
                     {detailSteps.length === 0 && (
                       <tr>
-                        <td className="px-3 py-3 text-gray-500" colSpan={6}>暂无 steps</td>
+                        <td className="px-3 py-3 text-gray-500" colSpan={6}>{tr('暂无 steps', 'No steps')}</td>
                       </tr>
                     )}
                   </tbody>
@@ -332,13 +333,13 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
 
           <div className="border border-[#30363d] bg-[#0d1117] rounded-lg overflow-hidden">
             <div className="px-3 py-2 border-b border-[#30363d] flex items-center justify-between gap-3">
-              <div className="text-sm font-medium text-gray-200">对比两次</div>
+              <div className="text-sm font-medium text-gray-200">{tr('对比两次', 'Compare two')}</div>
               <button
                 onClick={runCompare}
                 disabled={compareLoading || !compareA.trim() || !compareB.trim()}
                 className="px-2 py-1 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50"
               >
-                对比
+                {tr('对比', 'Compare')}
               </button>
             </div>
             <div className="p-3 flex flex-col gap-3">
@@ -350,7 +351,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
                     onChange={e => setCompareA(e.target.value)}
                     className="h-9 bg-[#0d1117] border border-[#30363d] rounded px-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                   >
-                    <option value="">请选择</option>
+                    <option value="">{tr('请选择', 'Please select')}</option>
                     {sortedRows.map(r => {
                       const id = String(r?.job_id || '').trim()
                       return <option key={id} value={id}>{id}</option>
@@ -364,7 +365,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
                     onChange={e => setCompareB(e.target.value)}
                     className="h-9 bg-[#0d1117] border border-[#30363d] rounded px-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                   >
-                    <option value="">请选择</option>
+                    <option value="">{tr('请选择', 'Please select')}</option>
                     {sortedRows.map(r => {
                       const id = String(r?.job_id || '').trim()
                       return <option key={id} value={id}>{id}</option>
@@ -401,7 +402,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
                       ))}
                       {compareRows.length === 0 && (
                         <tr>
-                          <td className="px-3 py-3 text-gray-500" colSpan={7}>暂无对比数据</td>
+                          <td className="px-3 py-3 text-gray-500" colSpan={7}>{tr('暂无对比数据', 'No comparison data')}</td>
                         </tr>
                       )}
                     </tbody>

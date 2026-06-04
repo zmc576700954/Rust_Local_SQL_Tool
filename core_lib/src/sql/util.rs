@@ -28,6 +28,18 @@ pub fn quote_ident_mysql(s: &str) -> String {
     format!("`{}`", s.replace('`', "``"))
 }
 
+/// MySQL 标识符引用（带长度/空值校验），用于对外暴露的 API 端点
+pub fn quote_ident_mysql_checked(s: &str) -> Result<String, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("Invalid identifier".into());
+    }
+    if trimmed.len() > 512 {
+        return Err("Identifier too long".into());
+    }
+    Ok(quote_ident_mysql(trimmed))
+}
+
 /// PostgreSQL / SQLite 标识符引用：双引号包裹，内部双引号转义为 ""
 pub fn quote_ident_pg(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
@@ -157,6 +169,57 @@ pub fn is_mutation_sql(sql: &str) -> bool {
             | "REPLACE"
             | "GRANT"
             | "REVOKE"
+    )
+}
+
+/// AST-level check: whether a parsed statement is read-only (SELECT, SHOW, DESCRIBE, EXPLAIN, etc.)
+/// Shared by executor, execute_sql, and explain_sql handlers.
+pub fn is_read_only_statement(stmt: &sqlparser::ast::Statement) -> bool {
+    use sqlparser::ast::Statement;
+    matches!(
+        stmt,
+        Statement::Query(_)
+            | Statement::Explain { .. }
+            | Statement::ExplainTable { .. }
+            | Statement::ShowVariable { .. }
+            | Statement::ShowCreate { .. }
+            | Statement::ShowTables { .. }
+            | Statement::ShowDatabases { .. }
+            | Statement::ShowColumns { .. }
+            | Statement::ShowStatus { .. }
+            | Statement::ShowVariables { .. }
+            | Statement::ShowCollation { .. }
+            | Statement::ShowCharset(_)
+            | Statement::ShowSchemas { .. }
+            | Statement::ShowViews { .. }
+            | Statement::ShowFunctions { .. }
+            | Statement::ShowObjects(_)
+    )
+}
+
+/// AST-level check: whether a parsed statement is dangerous (DDL, DCL, or DML mutations).
+/// Used to gate execution behind confirmation prompts.
+pub fn is_dangerous_statement(stmt: &sqlparser::ast::Statement) -> bool {
+    use sqlparser::ast::Statement;
+    matches!(
+        stmt,
+        Statement::Insert { .. }
+            | Statement::Update { .. }
+            | Statement::Delete { .. }
+            | Statement::Drop { .. }
+            | Statement::Truncate { .. }
+            | Statement::AlterTable { .. }
+            | Statement::CreateTable(..)
+            | Statement::CreateView(..)
+            | Statement::CreateIndex(..)
+            | Statement::CreateSchema { .. }
+            | Statement::CreateFunction(..)
+            | Statement::CreateTrigger(..)
+            | Statement::Grant(..)
+            | Statement::Revoke(..)
+            | Statement::RenameTable(..)
+            | Statement::Call(..)
+            | Statement::Set(..)
     )
 }
 

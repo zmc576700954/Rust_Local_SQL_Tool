@@ -87,3 +87,4 @@ GitHub Actions (`.github/workflows/ci.yml`):
 - `web-server/src/bin/` contains standalone binaries for MySQL sync benchmarking and performance CI gates
 - `sqlx` is configured with MySQL, PostgreSQL, and SQLite features; the runtime is `tokio-rustls`
 - Test files: `core_lib/tests/timeout_policy_test.rs`, `web-ui/src/sqlStatements.test.ts`, `web-ui/src/utils.test.ts`
+- **CORS**: web-server allows `localhost:3000`, `localhost:5173`, `127.0.0.1:*`, and Tauri origins by default. Set `CORS_EXTRA_ORIGINS` (comma-separated) to add custom origins when deploying to non-localhost addresses

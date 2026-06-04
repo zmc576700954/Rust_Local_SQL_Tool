@@ -51,15 +51,7 @@ impl ExecuteSqlTool {
 
         // Validate all statements are read-only (AST-level, not keyword matching)
         for stmt in &statements {
-            let safe = matches!(
-                stmt,
-                Statement::Query(_)
-                    | Statement::Explain { .. }
-                    | Statement::ExplainTable { .. }
-                    | Statement::ShowVariable { .. }
-                    | Statement::ShowCreate { .. }
-            );
-            if !safe {
+            if !crate::sql::util::is_read_only_statement(stmt) {
                 return Err(ExecutorToolError(
                     "Only read-only queries (SELECT, SHOW, DESCRIBE, EXPLAIN, WITH) are allowed."
                         .to_string(),

@@ -3694,6 +3694,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlparser",
  "sqlx",
  "ssh2",
  "tokio",

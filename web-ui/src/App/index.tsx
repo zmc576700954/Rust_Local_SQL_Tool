@@ -40,6 +40,30 @@ const SessionInfoPanel = React.lazy(() => import('../components/SessionInfoPanel
 const QueryBuilder = React.lazy(() => import('../components/QueryBuilder').then(m => ({ default: m.QueryBuilder })));
 const TableWorkspace = React.lazy(() => import('../components/TableWorkspace').then(m => ({ default: m.TableWorkspace })));
 
+/** Replace :variable placeholders in SQL with user-supplied values. */
+function substituteSqlVariables(
+  sql: string,
+  variables: Array<{ name: string; value: string }>
+): string {
+  let result = sql;
+  for (const { name, value } of variables) {
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`:${escapedName}\\b`, 'g');
+    const trimmed = value.trim();
+    const isLiteral =
+      trimmed !== '' &&
+      (!isNaN(Number(trimmed)) ||
+        trimmed.toLowerCase() === 'true' ||
+        trimmed.toLowerCase() === 'false' ||
+        trimmed.toLowerCase() === 'null');
+    const val = isLiteral
+      ? value
+      : `'${value.replace(/'/g, "''")}'`;
+    result = result.replace(regex, val);
+  }
+  return result;
+}
+
 function App() {
   useAutoI18nDom()
   const { toast } = useToast()
@@ -2401,20 +2425,7 @@ function App() {
                       if (e.key === 'Enter') {
                         const allFilled = sqlVariables.every(v => v.value.trim() !== '');
                         if (allFilled) {
-                          let finalSql = pendingSqlWithVars;
-                          sqlVariables.forEach(variable => {
-                            // Only replace variables outside of quotes, but since we are doing a dumb replace here
-                            // we assume the user intends to replace all occurrences.
-                            const regex = new RegExp(`:${variable.name}\\b`, 'g');
-                            // If value looks like a number or boolean, maybe don't quote? 
-                            // But usually values are safely replaced via prepared statements. Since we are doing client side:
-                            // If it's just a string replacement:
-                            let val = variable.value;
-                            if (isNaN(Number(val)) && val.toLowerCase() !== 'true' && val.toLowerCase() !== 'false' && val.toLowerCase() !== 'null') {
-                              val = `'${val.replace(/'/g, "''")}'`;
-                            }
-                            finalSql = finalSql.replace(regex, val);
-                          });
+                          const finalSql = substituteSqlVariables(pendingSqlWithVars, sqlVariables);
                           setShowVariablesModal(false);
                           handleExecute(false, finalSql);
                         }
@@ -2433,15 +2444,7 @@ function App() {
               </button>
               <button
                 onClick={() => {
-                  let finalSql = pendingSqlWithVars;
-                  sqlVariables.forEach(variable => {
-                    const regex = new RegExp(`:${variable.name}\\b`, 'g');
-                    let val = variable.value;
-                    if (isNaN(Number(val)) && val.toLowerCase() !== 'true' && val.toLowerCase() !== 'false' && val.toLowerCase() !== 'null') {
-                      val = `'${val.replace(/'/g, "''")}'`;
-                    }
-                    finalSql = finalSql.replace(regex, val);
-                  });
+                  const finalSql = substituteSqlVariables(pendingSqlWithVars, sqlVariables);
                   setShowVariablesModal(false);
                   handleExecute(false, finalSql);
                 }}

@@ -1031,23 +1031,39 @@ pub async fn execute_sql(
         .next()
         .map(|part| part.to_uppercase());
 
-    let is_select = upper_sql.starts_with("SELECT")
-        || upper_sql.starts_with("SHOW")
-        || upper_sql.starts_with("DESCRIBE")
-        || upper_sql.starts_with("EXPLAIN");
+    // AST-level SQL classification (immune to comment-based bypasses)
+    let dialect = sqlparser::dialect::GenericDialect {};
+    let parsed = sqlparser::parser::Parser::parse_sql(&dialect, clean_sql.trim());
+    let (is_select, is_dangerous) = if let Ok(stmts) = parsed.as_ref() {
+        if stmts.len() != 1 {
+            (false, true)
+        } else {
+            let stmt = &stmts[0];
+            (
+                core_lib::sql::util::is_read_only_statement(stmt),
+                core_lib::sql::util::is_dangerous_statement(stmt),
+            )
+        }
+    } else {
+        // Parse failure: fall back to keyword detection as a safety net
+        let sel = upper_sql.starts_with("SELECT")
+            || upper_sql.starts_with("SHOW")
+            || upper_sql.starts_with("DESCRIBE")
+            || upper_sql.starts_with("EXPLAIN");
+        let dangerous = upper_sql.contains("INSERT ")
+            || upper_sql.contains("UPDATE ")
+            || upper_sql.contains("DELETE ")
+            || upper_sql.contains("DROP ")
+            || upper_sql.contains("TRUNCATE ")
+            || upper_sql.contains("ALTER ");
+        (sel, dangerous)
+    };
 
     if is_read_only && !is_select {
         return Err(AppError::Forbidden(
             "当前连接为只读模式，禁止执行非查询操作！".to_string(),
         ));
     }
-
-    // Safety check for dangerous operations
-    let is_dangerous = upper_sql.contains("UPDATE ")
-        || upper_sql.contains("DELETE ")
-        || upper_sql.contains("DROP ")
-        || upper_sql.contains("TRUNCATE ")
-        || upper_sql.contains("ALTER ");
 
     if is_dangerous && req.force != Some(true) {
         let body = serde_json::json!({

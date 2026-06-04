@@ -136,14 +136,8 @@ pub fn encode_mysql_row(row: &MySqlRow, encoder: &MySqlRowJsonEncoder) -> serde_
 }
 
 pub fn quote_mysql_ident(raw: &str) -> Result<String, crate::AppError> {
-    let s = raw.trim();
-    if s.is_empty() {
-        return Err(crate::AppError::BadRequest("Invalid identifier".to_string()));
-    }
-    if s.len() > 512 {
-        return Err(crate::AppError::BadRequest("Identifier too long".to_string()));
-    }
-    Ok(format!("`{}`", s.replace('`', "``")))
+    core_lib::sql::util::quote_ident_mysql_checked(raw)
+        .map_err(crate::AppError::BadRequest)
 }
 
 /// Bind a JSON value to a sqlx query — handles Null, Bool, Number, String, and fallback

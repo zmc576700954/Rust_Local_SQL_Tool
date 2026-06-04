@@ -237,9 +237,37 @@ export function translateDom(root: ParentNode = document.body) {
 
 export function useAutoI18nDom() {
   useEffect(() => {
-    const apply = () => translateDom(document.body)
-    apply()
-    const observer = new MutationObserver(() => apply())
+    // Translate only the changed subtree, not the entire document body
+    const translateNode = (node: Node) => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        translateDom(node as Element)
+      } else if (node.parentElement) {
+        translateDom(node.parentElement)
+      }
+    }
+
+    // Debounce to avoid excessive re-translations during rapid DOM updates (e.g. virtual scroll)
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const pending = new Set<Node>()
+    const flush = () => {
+      timer = null
+      const nodes = [...pending]
+      pending.clear()
+      for (const n of nodes) translateNode(n)
+    }
+    const schedule = (nodes: Node[]) => {
+      for (const n of nodes) pending.add(n)
+      if (timer !== null) return
+      timer = setTimeout(flush, 200)
+    }
+
+    // Initial full pass
+    translateDom(document.body)
+
+    const observer = new MutationObserver((mutations) => {
+      const targets = mutations.map(m => m.target)
+      schedule(targets)
+    })
     observer.observe(document.body, {
       childList: true,
       subtree: true,
@@ -247,10 +275,11 @@ export function useAutoI18nDom() {
       attributes: true,
       attributeFilter: ['title', 'placeholder', 'aria-label'],
     })
-    const onLocaleChange = () => apply()
+    const onLocaleChange = () => { translateDom(document.body) }
     window.addEventListener('app-locale-change', onLocaleChange)
     return () => {
       observer.disconnect()
+      if (timer !== null) clearTimeout(timer)
       window.removeEventListener('app-locale-change', onLocaleChange)
     }
   }, [])

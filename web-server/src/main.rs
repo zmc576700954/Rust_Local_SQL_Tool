@@ -1001,10 +1001,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index_path = std::path::Path::new(&dist_dir).join("index.html");
     let static_service = ServeDir::new(dist_dir).not_found_service(ServeFile::new(index_path));
 
+    let mut cors_origins: Vec<axum::http::HeaderValue> = [
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+        "tauri://localhost",
+        "https://tauri.localhost",
+    ]
+    .iter()
+    .map(|s| s.parse::<axum::http::HeaderValue>().unwrap())
+    .collect();
+    if let Ok(extra) = std::env::var("CORS_EXTRA_ORIGINS") {
+        for origin in extra.split(',') {
+            let trimmed = origin.trim();
+            if !trimmed.is_empty() {
+                if let Ok(val) = trimmed.parse::<axum::http::HeaderValue>() {
+                    cors_origins.push(val);
+                }
+            }
+        }
+    }
+
     let app = Router::new()
         .nest("/backend", api)
         .fallback_service(static_service)
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(cors_origins)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        )
         .with_state(state.clone());
 
     let state_for_cleanup = state.clone();
@@ -1012,26 +1041,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let mut sessions_to_remove = Vec::new();
-            {
-                let sessions = state_for_cleanup.transaction_sessions.read().await;
-                for (id, session_arc) in sessions.iter() {
-                    let session = session_arc.lock().await;
-                    if session.last_accessed.elapsed() > std::time::Duration::from_secs(600) {
-                        sessions_to_remove.push(id.clone());
+            // Use a single write lock for both check and removal to avoid TOCTOU race
+            let mut sessions = state_for_cleanup.transaction_sessions.write().await;
+            let expired: Vec<String> = sessions
+                .iter()
+                .filter_map(|(id, session_arc)| {
+                    // We can't await inside filter_map, but since this runs every 60s
+                    // and sessions are short-lived, we check via try_lock
+                    if let Ok(session) = session_arc.try_lock() {
+                        if session.last_accessed.elapsed() > std::time::Duration::from_secs(600) {
+                            return Some(id.clone());
+                        }
                     }
-                }
-            }
+                    None
+                })
+                .collect();
 
-            if !sessions_to_remove.is_empty() {
-                let mut sessions = state_for_cleanup.transaction_sessions.write().await;
-                for id in sessions_to_remove {
-                    if let Some(session_arc) = sessions.remove(&id) {
-                        let mut session = session_arc.lock().await;
-                        // Try to rollback just in case, though it might fail if connection is broken
-                        let _ = sqlx::query("ROLLBACK").execute(&mut *session.conn).await;
-                        tracing::info!("Cleaned up idle transaction session: {}", id);
-                    }
+            for id in expired {
+                if let Some(session_arc) = sessions.remove(&id) {
+                    let mut session = session_arc.lock().await;
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *session.conn).await;
+                    tracing::info!("Cleaned up idle transaction session: {}", id);
                 }
             }
         }
@@ -1494,14 +1524,27 @@ pub(crate) async fn get_cached_schema(
     db_name: &str,
 ) -> Option<SchemaResponse> {
     let key = schema_cache_key(db_id, db_name);
-    if let Some(entry) = state.schema_cache.read().await.get(&key).cloned() {
+    // Fast path: read lock allows concurrent cache hits
+    {
+        let cache = state.schema_cache.read().await;
+        if let Some(entry) = cache.get(&key) {
+            if entry.expires_at > Instant::now() {
+                return Some(entry.schema.clone());
+            }
+        }
+    }
+
+    // Acquire write lock, then double-check (another thread may have refreshed)
+    let mut cache = state.schema_cache.write().await;
+    if let Some(entry) = cache.get(&key) {
         if entry.expires_at > Instant::now() {
-            return Some(entry.schema);
+            return Some(entry.schema.clone());
         }
     }
 
     let schema = fetch_schema_for_db(db_client, db_name).await?;
-    state.schema_cache.write().await.insert(
+    cache.retain(|_, v| v.expires_at > Instant::now());
+    cache.insert(
         key,
         CachedSchemaEntry {
             schema: schema.clone(),
@@ -1519,9 +1562,21 @@ pub(crate) async fn get_cached_table_schema(
     table_name: &str,
 ) -> Result<TableWithDetails, AppError> {
     let key = table_schema_cache_key(db_id, db_name, table_name);
-    if let Some(entry) = state.table_schema_cache.read().await.get(&key).cloned() {
+    // Fast path: read lock allows concurrent cache hits
+    {
+        let cache = state.table_schema_cache.read().await;
+        if let Some(entry) = cache.get(&key) {
+            if entry.expires_at > Instant::now() {
+                return Ok(entry.table.clone());
+            }
+        }
+    }
+
+    // Acquire write lock, then double-check (another thread may have refreshed)
+    let mut cache = state.table_schema_cache.write().await;
+    if let Some(entry) = cache.get(&key) {
         if entry.expires_at > Instant::now() {
-            return Ok(entry.table);
+            return Ok(entry.table.clone());
         }
     }
 
@@ -1541,11 +1596,13 @@ pub(crate) async fn get_cached_table_schema(
         foreign_keys,
     };
 
-    state.table_schema_cache.write().await.insert(
+    let now = Instant::now();
+    cache.retain(|_, v| v.expires_at > now);
+    cache.insert(
         key,
         CachedTableSchemaEntry {
             table: table.clone(),
-            expires_at: Instant::now() + TABLE_SCHEMA_CACHE_TTL,
+            expires_at: now + TABLE_SCHEMA_CACHE_TTL,
         },
     );
     Ok(table)
@@ -2229,7 +2286,8 @@ async fn export_data(
 
     let table_name = req.table_name.clone();
     let export_type = req.export_type.clone();
-    let data_sql = format!("SELECT * FROM {}", table_name);
+    let safe_table = quote_mysql_ident(&table_name)?;
+    let data_sql = format!("SELECT * FROM {}", safe_table);
     let mysql_pool = db_client.mysql_pool().ok().cloned();
 
     let (tx, rx) =
@@ -2747,6 +2805,16 @@ async fn explain_sql(
         .clone()
         .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
 
+    // Validate SQL is a single read-only statement before prepending EXPLAIN
+    let dialect = sqlparser::dialect::GenericDialect {};
+    let statements = sqlparser::parser::Parser::parse_sql(&dialect, req.sql.trim())
+        .map_err(|e| AppError::BadRequest(format!("SQL parse error: {}", e)))?;
+    if statements.len() != 1 {
+        return Err(AppError::BadRequest("EXPLAIN only supports a single statement".to_string()));
+    }
+    if !core_lib::sql::util::is_read_only_statement(&statements[0]) {
+        return Err(AppError::BadRequest("EXPLAIN only supports read-only queries (SELECT, SHOW, DESCRIBE)".to_string()));
+    }
     let explain_sql = format!("EXPLAIN {}", req.sql);
     use sqlx::Column;
     use sqlx::Row;

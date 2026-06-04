@@ -308,14 +308,7 @@ fn fallback_required(reason: &str) -> String {
 }
 
 fn quote_mysql_ident(raw: &str) -> Result<String, String> {
-    let s = raw.trim();
-    if s.is_empty() {
-        return Err("Invalid identifier".to_string());
-    }
-    if s.len() > 512 {
-        return Err("Identifier too long".to_string());
-    }
-    Ok(format!("`{}`", s.replace('`', "``")))
+    core_lib::sql::util::quote_ident_mysql_checked(raw)
 }
 
 fn strip_leading_sql_comments(sql: &str) -> String {

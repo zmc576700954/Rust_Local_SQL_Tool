@@ -76,6 +76,9 @@ impl CrudManager {
             .condition
             .as_ref()
             .ok_or_else(|| DbError::MissingData("missing condition".into()))?;
+        if condition.is_empty() {
+            return Err(DbError::MissingData("condition must not be empty — refusing UPDATE without WHERE".into()));
+        }
 
         let columns: Vec<&String> = obj.keys().collect();
 
@@ -151,6 +154,10 @@ impl CrudManager {
     where
         E: sqlx::Executor<'e, Database = sqlx::MySql>,
     {
+        if condition.is_empty() {
+            return Err(DbError::MissingData("condition must not be empty — refusing DELETE without WHERE".into()));
+        }
+
         let mut where_clauses = Vec::new();
         for (k, val) in condition.iter() {
             if val.is_null() {

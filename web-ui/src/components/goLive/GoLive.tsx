@@ -33,11 +33,11 @@ function stepStatusClass(status: GoLiveStepStatus): string {
 
 function jobStatusLabel(status: string): string {
   const s = String(status || '').toLowerCase()
-  if (s === 'pending') return '排队中'
-  if (s === 'running') return '执行中'
-  if (s === 'completed') return '已完成'
-  if (s === 'error') return '失败'
-  if (s === 'canceled') return '已取消'
+  if (s === 'pending') return tr('排队中', 'Pending')
+  if (s === 'running') return tr('执行中', 'Running')
+  if (s === 'completed') return tr('已完成', 'Completed')
+  if (s === 'error') return tr('失败', 'Error')
+  if (s === 'canceled') return tr('已取消', 'Canceled')
   return String(status || '')
 }
 
@@ -72,11 +72,11 @@ export function GoLive({ onCancel }: GoLiveProps) {
         const activeId = String(cfg?.active_db_id || '').trim()
         const withActive =
           activeId
-            ? [{ id: 'active', name: `Active（${activeId}）` }, ...conns]
+            ? [{ id: 'active', name: `Active (${activeId})` }, ...conns]
             : [{ id: 'active', name: 'Active' }, ...conns]
         setDbConnections(withActive)
       } catch (e: any) {
-        toast('加载配置失败：' + (e?.message || String(e)), 'error')
+        toast(tr('加载配置失败：', 'Failed to load config: ') + (e?.message || String(e)), 'error')
       }
     }
     fetchConfig()
@@ -139,7 +139,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
       if (maxTotal) {
         const v = Number(maxTotal)
         if (!Number.isFinite(v) || v < 0) {
-          toast('max_total_ms 需要是非负数字', 'error')
+          toast(tr('max_total_ms 需要是非负数字', 'max_total_ms must be a non-negative number'), 'error')
           return
         }
         thresholds.max_total_ms = Math.round(v)
@@ -151,7 +151,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
         if (!t) continue
         const v = Number(t)
         if (!Number.isFinite(v) || v < 0) {
-          toast(`per_step_max_ms[${k}] 需要是非负数字`, 'error')
+          toast(tr(`per_step_max_ms[${k}] 需要是非负数字`, `per_step_max_ms[${k}] must be a non-negative number`), 'error')
           return
         }
         perStep[k] = Math.round(v)
@@ -173,21 +173,21 @@ export function GoLive({ onCancel }: GoLiveProps) {
         if (advanced && typeof advanced === 'object' && !Array.isArray(advanced)) {
           payload = { ...basePayload, ...advanced }
         } else {
-          toast('高级 payload 必须是 JSON 对象', 'error')
+          toast(tr('高级 payload 必须是 JSON 对象', 'Advanced payload must be a JSON object'), 'error')
           return
         }
       }
       const res = await api.goLiveJobStart(payload)
       const id = String(res?.job_id || '').trim()
       if (!id) {
-        toast('启动失败：缺少 job_id', 'error')
+        toast(tr('启动失败：缺少 job_id', 'Start failed: missing job_id'), 'error')
         return
       }
-      toast('上线门禁任务已启动', 'success')
+      toast(tr('上线门禁任务已启动', 'Go-live job started'), 'success')
       startPolling(id)
     } catch (e: any) {
       const err = parseError(e)
-      toast('启动失败：' + (err.message || String(e)), 'error')
+      toast(tr('启动失败：', 'Start failed: ') + (err.message || String(e)), 'error')
     } finally {
       setIsLoading(false)
     }
@@ -198,11 +198,11 @@ export function GoLive({ onCancel }: GoLiveProps) {
     setIsLoading(true)
     try {
       await api.toolJobCancel(jobId)
-      toast('Job 已取消', 'success')
+      toast(tr('Job 已取消', 'Job canceled'), 'success')
       startPolling(jobId)
     } catch (e: any) {
       const err = parseError(e)
-      toast('取消失败：' + (err.message || String(e)), 'error')
+      toast(tr('取消失败：', 'Cancel failed: ') + (err.message || String(e)), 'error')
     } finally {
       setIsLoading(false)
     }
@@ -266,34 +266,34 @@ export function GoLive({ onCancel }: GoLiveProps) {
 
   const stepOptions = useMemo(() => {
     return [
-      { id: 'config', label: 'config（配置/环境检查）' },
-      { id: 'mysql_connect', label: 'mysql_connect（连接检查）' },
-      { id: 'sql_smoke', label: 'sql_smoke（SQL Smoke）' },
-      { id: 'export_import_smoke', label: 'export_import_smoke（导入导出 Smoke）' },
-      { id: 'ai_smoke', label: 'ai_smoke（AI Smoke）' },
+      { id: 'config', label: `config (${tr('配置/环境检查', 'Config/Env check')})` },
+      { id: 'mysql_connect', label: `mysql_connect (${tr('连接检查', 'Connection check')})` },
+      { id: 'sql_smoke', label: `sql_smoke (${tr('SQL Smoke', 'SQL Smoke')})` },
+      { id: 'export_import_smoke', label: `export_import_smoke (${tr('导入导出 Smoke', 'Import/Export Smoke')})` },
+      { id: 'ai_smoke', label: `ai_smoke (${tr('AI Smoke', 'AI Smoke')})` },
     ]
   }, [])
 
   const steps: WizardStep[] = [
     {
       id: 'go-live',
-      title: '上线门禁',
+      title: tr('上线门禁', 'Go-Live Gate'),
       isValid: canRun,
       content: (
         <div className="flex flex-col gap-4 h-full">
           <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
-            <div className="text-sm font-medium text-gray-200">Operator（可选）</div>
+            <div className="text-sm font-medium text-gray-200">{tr('Operator（可选）', 'Operator (optional)')}</div>
             <input
               value={operator}
               onChange={e => setOperator(e.target.value)}
-              placeholder="填写操作人，如：alice"
+              placeholder={tr('填写操作人，如：alice', 'Enter operator, e.g. alice')}
               className="mt-2 w-full px-3 py-2 rounded bg-[#0d1117] border border-[#30363d] text-gray-100 text-sm outline-none focus:border-blue-500"
               disabled={isLoading || String(job?.status || '').toLowerCase() === 'running'}
             />
           </div>
 
           <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
-            <div className="text-sm font-medium text-gray-200">Steps（多选）</div>
+            <div className="text-sm font-medium text-gray-200">{tr('Steps（多选）', 'Steps (multi-select)')}</div>
             <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
               {stepOptions.map(opt => (
                 <label key={opt.id} className="flex items-center gap-2 text-sm text-gray-200 select-none">
@@ -311,19 +311,19 @@ export function GoLive({ onCancel }: GoLiveProps) {
               ))}
             </div>
             <div className="mt-2 text-xs text-gray-500">
-              不选择任何 step 将按后端默认 steps 执行
+              {tr('不选择任何 step 将按后端默认 steps 执行', 'If no steps selected, backend defaults will be used')}
             </div>
           </div>
 
           <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
-            <div className="text-sm font-medium text-gray-200">Thresholds（可选）</div>
+            <div className="text-sm font-medium text-gray-200">{tr('Thresholds（可选）', 'Thresholds (optional)')}</div>
             <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="flex flex-col gap-1">
                 <div className="text-xs text-gray-400">max_total_ms</div>
                 <input
                   value={maxTotalMs}
                   onChange={e => setMaxTotalMs(e.target.value)}
-                  placeholder="例如：30000"
+                  placeholder={tr('例如：30000', 'e.g. 30000')}
                   className="px-3 py-2 rounded bg-[#0d1117] border border-[#30363d] text-gray-100 text-sm outline-none focus:border-blue-500"
                   disabled={isLoading || String(job?.status || '').toLowerCase() === 'running'}
                 />
@@ -349,7 +349,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
           </div>
 
           <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
-            <div className="text-sm font-medium text-gray-200">Connections（多选）</div>
+            <div className="text-sm font-medium text-gray-200">{tr('Connections（多选）', 'Connections (multi-select)')}</div>
             <div className="mt-2 flex flex-col gap-2">
               {dbConnections.map((c: any) => {
                 const id = String(c?.id || '').trim()
@@ -372,7 +372,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
               })}
             </div>
             <div className="mt-2 text-xs text-gray-500">
-              不选择任何连接将默认使用 Active
+              {tr('不选择任何连接将默认使用 Active', 'If no connections selected, Active will be used by default')}
             </div>
           </div>
 
@@ -382,11 +382,11 @@ export function GoLive({ onCancel }: GoLiveProps) {
               className="text-sm font-medium text-blue-400 hover:text-blue-300"
               type="button"
             >
-              {showAdvanced ? '隐藏高级选项' : '显示高级选项'}
+              {showAdvanced ? tr('隐藏高级选项', 'Hide advanced options') : tr('显示高级选项', 'Show advanced options')}
             </button>
             {showAdvanced && (
               <div className="mt-3">
-                <div className="text-sm font-medium text-gray-200">高级 Payload（JSON）</div>
+                <div className="text-sm font-medium text-gray-200">{tr('高级 Payload（JSON）', 'Advanced Payload (JSON)')}</div>
                 <textarea
                   value={payloadText}
                   onChange={e => setPayloadText(e.target.value)}
@@ -397,17 +397,17 @@ export function GoLive({ onCancel }: GoLiveProps) {
               </div>
             )}
             <div className="mt-2 text-xs text-gray-500">
-              Run 会调用 /backend/tools/jobs/go-live/start；高级 payload 会覆盖同名字段
+              {tr('Run 会调用 /backend/tools/jobs/go-live/start；高级 payload 会覆盖同名字段', 'Run calls /backend/tools/jobs/go-live/start; advanced payload overrides matching fields')}
             </div>
           </div>
 
           <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
-            <div className="text-sm font-medium text-gray-200">恢复 Job</div>
+            <div className="text-sm font-medium text-gray-200">{tr('恢复 Job', 'Resume Job')}</div>
             <div className="mt-2 flex items-center gap-2">
               <input
                 value={resumeJobId}
                 onChange={e => setResumeJobId(e.target.value)}
-                placeholder="输入 job_id"
+                placeholder={tr('输入 job_id', 'Enter job_id')}
                 className="flex-1 px-3 py-2 rounded bg-[#0d1117] border border-[#30363d] text-gray-100 text-sm"
                 disabled={isLoading}
               />
@@ -416,21 +416,21 @@ export function GoLive({ onCancel }: GoLiveProps) {
                 disabled={!resumeJobId.trim() || isLoading}
                 className="px-3 py-2 rounded text-sm font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
               >
-                恢复查看
+                {tr('恢复查看', 'Resume')}
               </button>
             </div>
           </div>
 
           {pollInterrupted && (
             <div className="border border-yellow-500/30 bg-yellow-500/10 rounded-lg p-3">
-              <div className="text-sm font-medium text-yellow-200">轮询中断</div>
+              <div className="text-sm font-medium text-yellow-200">{tr('轮询中断', 'Polling interrupted')}</div>
               <div className="mt-1 text-xs text-yellow-100 whitespace-pre-wrap">{pollInterrupted.message}</div>
               <div className="mt-2 flex items-center gap-2">
                 <button
                   onClick={() => startPolling(pollInterrupted.job_id)}
                   className="px-3 py-2 rounded text-sm font-medium bg-blue-600 hover:bg-blue-500 text-white"
                 >
-                  继续轮询
+                  {tr('继续轮询', 'Resume polling')}
                 </button>
                 <div className="text-xs text-yellow-100 font-mono">job_id={pollInterrupted.job_id}</div>
               </div>
@@ -484,7 +484,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
                   disabled={!canDownload}
                   className="px-3 py-2 rounded text-sm font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
                 >
-                  下载 artifacts/data
+                  {tr('下载 artifacts/data', 'Download artifacts/data')}
                 </button>
                 <button
                   onClick={handleCancelJob}
@@ -499,7 +499,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
 
           {reportJson && (
             <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3 flex flex-col">
-              <div className="text-sm font-medium text-gray-200">报告（JSON）</div>
+              <div className="text-sm font-medium text-gray-200">{tr('报告（JSON）', 'Report (JSON)')}</div>
               <textarea
                 readOnly
                 value={reportJson}
@@ -514,7 +514,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
 
   return (
     <StepWizard
-      title="上线门禁"
+      title={tr('上线门禁', 'Go-Live Gate')}
       steps={steps}
       onFinish={handleRun}
       onCancel={onCancel}

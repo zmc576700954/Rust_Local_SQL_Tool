@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../../api'
 import { useToast } from '../Toast'
 import { parseError } from '../../utils'
+import { tr } from '../../i18n'
 
 type AuditRow = {
   ts?: number
@@ -35,7 +36,7 @@ export function GoLiveAuditTab({ isActive }: { isActive: boolean }) {
       setRows(Array.isArray(data) ? data : [])
     } catch (e: any) {
       const err = parseError(e)
-      toast('加载门禁审计失败：' + (err.message || String(e)), 'error')
+      toast(tr('加载门禁审计失败：', 'Failed to load audit: ') + (err.message || String(e)), 'error')
     } finally {
       setLoading(false)
     }
@@ -64,19 +65,19 @@ export function GoLiveAuditTab({ isActive }: { isActive: boolean }) {
     <div className="flex h-full bg-dark-bg">
       <div className="w-[420px] border-r border-dark-border flex flex-col">
         <div className="h-10 border-b border-dark-border flex items-center justify-between px-4 bg-dark-panel shrink-0">
-          <div className="text-sm font-medium text-gray-200">门禁审计</div>
+          <div className="text-sm font-medium text-gray-200">{tr('门禁审计', 'Go-Live Audit')}</div>
           <button
             onClick={load}
             disabled={loading}
             className="px-2 py-1 rounded text-xs font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
           >
-            刷新
+            {tr('刷新', 'Refresh')}
           </button>
         </div>
 
         <div className="flex-1 overflow-auto">
           {sorted.length === 0 && (
-            <div className="p-4 text-sm text-gray-500">暂无审计记录</div>
+            <div className="p-4 text-sm text-gray-500">{tr('暂无审计记录', 'No audit records')}</div>
           )}
           {sorted.map((r, idx) => {
             const key = `${String(r?.ts || '')}:${String(r?.job_id || '')}:${idx}`
@@ -108,11 +109,11 @@ export function GoLiveAuditTab({ isActive }: { isActive: boolean }) {
 
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="h-10 border-b border-dark-border flex items-center px-4 bg-dark-panel shrink-0">
-          <div className="text-sm font-medium text-gray-200">详情</div>
+          <div className="text-sm font-medium text-gray-200">{tr('详情', 'Details')}</div>
         </div>
         <div className="flex-1 overflow-auto p-4">
           {!selected && (
-            <div className="text-sm text-gray-500">从左侧选择一条审计记录查看详情</div>
+            <div className="text-sm text-gray-500">{tr('从左侧选择一条审计记录查看详情', 'Select an audit record from the left to view details')}</div>
           )}
           {selected && (
             <textarea
