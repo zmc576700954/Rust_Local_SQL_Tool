@@ -543,3 +543,91 @@ pub async fn delete_knowledge(
         .map_err(|e| AppError::InternalError(e.to_string()))?;
     Ok(StatusCode::OK)
 }
+
+// ── SSE Streaming Agent Handler ──────────────────────────────────────────
+
+use axum::response::sse::{Event, Sse};
+use futures::stream::Stream;
+use futures::StreamExt;
+use std::convert::Infallible;
+
+pub async fn chat_to_sql_stream(
+    State(state): State<AppState>,
+    Json(req): Json<ChatRequest>,
+) -> Result<Sse<std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>, AppError> {
+    let ChatRequest {
+        query,
+        mode,
+        current_sql,
+        chat_history,
+    } = req;
+
+    let config = state.config.read().await.clone();
+    let db_client = state.db_client.read().await.clone();
+    let rule_store = state.rule_store.read().await.clone();
+    let policy = state.policy.read().await.clone();
+    let knowledge_base = state.knowledge_base.read().await.clone();
+
+    let url = config.get_active_db_url().unwrap_or_default();
+    let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
+    let normalized_mode = normalize_ai_mode(mode.as_deref());
+    let scoped_query = build_mode_scoped_query(&query, normalized_mode, current_sql.as_deref());
+
+    // Rule fast-path: skip agent if direct match
+    if let Some(result) = core_lib::ai::agent::try_rule_fast_path(&scoped_query, &rule_store, &policy) {
+        let stream = futures::stream::once(async move {
+            let data = serde_json::to_string(&serde_json::json!({
+                "type": "final_sql",
+                "data": { "sql": result.sql, "task_type": result.task_type }
+            })).unwrap_or_default();
+            Ok(Event::default().data(data))
+        });
+        return Ok(Sse::new(Box::pin(stream)));
+    }
+
+    // Pre-flight: validate API key before creating agent (fail fast)
+    core_lib::ai::agent::validate_ai_profile(&config).map_err(|e| match e {
+        core_lib::ai::agent::AgentError::MissingApiKey => {
+            AppError::AiAuth("Missing API key. Please configure your AI token.".to_string())
+        }
+        other => AppError::InternalError(other.to_string()),
+    })?;
+
+    let extra_guidance = "Prefer concise SQL. First resolve entities, filters, time range, grouping, ordering, and output columns from the user's request.";
+
+    let agent_stream = core_lib::ai::agent::run_agent_streaming(
+        &config,
+        db_client.as_ref(),
+        &db_name,
+        &scoped_query,
+        &rule_store,
+        &knowledge_base,
+        &policy,
+        chat_history.as_deref(),
+        Some(extra_guidance),
+    )
+    .await
+    .map_err(|e| match e {
+        core_lib::ai::agent::AgentError::MissingApiKey => {
+            AppError::AiAuth("Missing API key. Please configure your AI token.".to_string())
+        }
+        core_lib::ai::agent::AgentError::Auth(msg) => {
+            let body = serde_json::json!({
+                "error": "ai_auth_failed",
+                "message": "AI 鉴权失败，请在引导页里更新 AI Token / Relay 配置后重试。",
+                "detail": msg,
+            })
+            .to_string();
+            AppError::AiAuth(body)
+        }
+        _ => AppError::InternalError(e.to_string()),
+    })?;
+
+    let sse_stream = agent_stream.map(|event| {
+        let event_type = event.event_type().to_string();
+        let json_str = serde_json::to_string(&event.data_json()).unwrap_or_default();
+        Ok(Event::default().event(event_type).data(json_str))
+    });
+
+    Ok(Sse::new(Box::pin(sse_stream)))
+}

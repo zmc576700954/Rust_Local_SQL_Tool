@@ -8,6 +8,8 @@ import { useToast } from '../components/Toast'
 import { SkeletonLoader } from '../components/Skeleton'
 import { CommandPalette } from '../components/CommandPalette'
 import { QueryEditorActionPanel } from '../components/QueryEditorActionPanel'
+import AgentProcessPanel from '../components/AgentProcessPanel'
+import type { AgentStep } from '../components/AgentProcessPanel'
 import { QueryResultsPanel } from '../components/QueryResultsPanel'
 import { Tabs, type TabItem } from '../components/Tabs'
 import { TableContextMenu } from '../components/TableContextMenu'
@@ -20,7 +22,7 @@ import { SqlHistory } from '../components/SqlHistory'
 import { AiTrainingPanel } from '../components/ai'
 import { DbExplorerSidebar } from '../components/DbExplorerSidebar'
 import { api } from '../api'
-import { runAiExplain, runAiOptimize, runExplainErrorWithAi, runFixWithAi, runGenerateSql } from '../queryAiActions'
+import { runAiExplain, runAiOptimize, runExplainErrorWithAi, runFixWithAi, runGenerateSqlStream } from '../queryAiActions'
 import { getStatementKind, getStatementLabel, isPotentiallyDangerousSql, splitSqlStatements } from '../sqlStatements'
   
 import { parseError, formatErr, sanitizeForLog } from '../utils'
@@ -83,7 +85,8 @@ function App() {
     compareBaselineResult: null as QueryExecutionResult | null,
     compareBaselineCapturedAt: null as number | null,
     resultsView: 'table' as const,
-    chatHistory: []
+    chatHistory: [],
+    agentSteps: [] as AgentStep[],
   })
   
   // Per-tab state
@@ -112,6 +115,7 @@ function App() {
     compareBaselineCapturedAt?: number | null;
     resultsView: 'table' | 'chart';
     chatHistory: any[];
+    agentSteps: AgentStep[];
   }>>({
     'query-1': createDefaultQueryTabState()
   })
@@ -1156,7 +1160,7 @@ function App() {
     }
   }
   const handleGenerate = async (overrideQuery?: string) => {
-    await runGenerateSql({
+    await runGenerateSqlStream({
       overrideQuery,
       activeTabState,
       updateActiveTabState,
@@ -2017,6 +2021,10 @@ function App() {
               <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? 'z-10 opacity-100 pointer-events-auto' : 'z-0 opacity-0 pointer-events-none'}`} style={{ display: isActive ? 'flex' : 'none' }}>
                 {tab.type === 'query' ? (
                   <div ref={isActive ? queryPaneRef : undefined} className="flex flex-col h-full min-h-0">
+                    <AgentProcessPanel
+                      steps={tabState.agentSteps || []}
+                      isRunning={tabState.isGenerating}
+                    />
                     <QueryEditorActionPanel
                       tabState={tabState}
                       dbType={dbType}

@@ -26,6 +26,7 @@ pub struct Policy {
     pub structured_output_enabled: bool,
     pub extractor_pipeline_level: ExtractorPipelineLevel,
     pub dangerous_sql_policy: DangerousSqlPolicy,
+    pub agent_max_turns: u32,
 }
 
 impl Default for Policy {
@@ -40,6 +41,7 @@ impl Default for Policy {
             structured_output_enabled: true,
             extractor_pipeline_level: ExtractorPipelineLevel::JsonThenMarkdownThenSql,
             dangerous_sql_policy: DangerousSqlPolicy::AllowWithForce,
+            agent_max_turns: 5,
         }
     }
 }
@@ -55,6 +57,7 @@ pub struct PolicyOverride {
     pub structured_output_enabled: Option<bool>,
     pub extractor_pipeline_level: Option<ExtractorPipelineLevel>,
     pub dangerous_sql_policy: Option<DangerousSqlPolicy>,
+    pub agent_max_turns: Option<u32>,
 }
 
 impl PolicyOverride {
@@ -85,6 +88,7 @@ impl PolicyOverride {
                 .dangerous_sql_policy
                 .clone()
                 .unwrap_or_else(|| base.dangerous_sql_policy.clone()),
+            agent_max_turns: self.agent_max_turns.unwrap_or(base.agent_max_turns),
         }
     }
 }
@@ -294,6 +298,11 @@ impl PolicyStore {
             },
             dangerous_sql_policy: if snapshot.dangerous_sql_policy != base.dangerous_sql_policy {
                 Some(snapshot.dangerous_sql_policy)
+            } else {
+                None
+            },
+            agent_max_turns: if snapshot.agent_max_turns != base.agent_max_turns {
+                Some(snapshot.agent_max_turns)
             } else {
                 None
             },

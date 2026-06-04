@@ -7,5 +7,6 @@
   "llm_max_tokens": 4096,
   "structured_output_enabled": true,
   "extractor_pipeline_level": "json_then_markdown_then_sql",
-  "dangerous_sql_policy": "allow_with_force"
+  "dangerous_sql_policy": "allow_with_force",
+  "agent_max_turns": 5
 }

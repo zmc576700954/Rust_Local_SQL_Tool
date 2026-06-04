@@ -1,5 +1,6 @@
 import { api } from './api'
 import type { ToastType } from './components/Toast'
+import type { AgentStep } from './components/AgentProcessPanel'
 import type { QueryErrorInsight } from './types'
 import { formatErr, parseError } from './utils'
 import type { AppError } from './utils'
@@ -24,6 +25,7 @@ type QueryAiTabPatch = {
   lastQuery?: string
   query?: string
   chatHistory?: QueryAiHistoryItem[]
+  agentSteps?: AgentStep[]
 }
 
 type UpdateQueryAiTabState = (patch: QueryAiTabPatch) => void
@@ -203,6 +205,133 @@ export async function runGenerateSql(params: {
     updateActiveTabState({
       sql: result.sql,
       lastExplanation: result.explanation || null,
+      lastQuery: q,
+      query: '',
+      chatHistory: newHistory,
+    })
+    setShowCommandPalette(false)
+  } catch (e: unknown) {
+    const err = parseError(e)
+    updateActiveTabState({ errorObj: err })
+    if (err.title.includes('Auth Error')) {
+      setTimeout(() => setShowOnboarding(true), 1500)
+    }
+  } finally {
+    updateActiveTabState({ isGenerating: false })
+  }
+}
+
+export async function runGenerateSqlStream(params: {
+  overrideQuery?: string
+  activeTabState: QueryAiTabState
+  updateActiveTabState: UpdateQueryAiTabState
+  setShowCommandPalette: (show: boolean) => void
+  setShowOnboarding: (show: boolean) => void
+}) {
+  const {
+    overrideQuery,
+    activeTabState,
+    updateActiveTabState,
+    setShowCommandPalette,
+    setShowOnboarding,
+  } = params
+
+  const q = overrideQuery || activeTabState.query
+  if (!q.trim()) return
+
+  const steps: AgentStep[] = []
+  updateActiveTabState({ isGenerating: true, errorObj: null, lastExplanation: null, agentSteps: [] })
+
+  try {
+    const chatHistory = Array.isArray(activeTabState.chatHistory) ? activeTabState.chatHistory : []
+    const historyToPass = chatHistory.slice(-5).filter(msg => msg && Object.keys(msg).length > 0)
+    const body = await api.chatToSqlStream(q, historyToPass)
+    if (!body) throw new Error('No response body')
+
+    const reader = body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let finalSql = ''
+    let finalExplanation = ''
+
+    const flushStep = (eventType: string, data: Record<string, unknown>) => {
+      const step: AgentStep = { type: eventType as AgentStep['type'], ...data } as AgentStep
+      steps.push(step)
+      updateActiveTabState({ agentSteps: [...steps] })
+    }
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+
+      // SSE events are delimited by double newlines.
+      // Split on \n\n to get complete event blocks, handling payloads that contain \n.
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() || '' // Keep incomplete trailing block
+
+      for (const block of parts) {
+        if (!block.trim()) continue
+        let eventType = 'message'
+        let dataStr = ''
+
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim()
+          } else if (line.startsWith('data: ')) {
+            dataStr = line.slice(6)
+          }
+        }
+
+        if (!dataStr) continue
+        try {
+          const data = JSON.parse(dataStr)
+
+          switch (eventType) {
+            case 'thinking':
+              flushStep('thinking', { text: data.text })
+              break
+            case 'tool_call':
+              flushStep('tool_call', { tool: data.tool, args: data.args })
+              break
+            case 'tool_result':
+              flushStep('tool_result', { tool: data.tool, result: data.result, callId: data.call_id })
+              break
+            case 'sql_draft':
+              flushStep('sql_draft', { sql: data.sql })
+              break
+            case 'final_sql':
+              finalSql = data.sql || ''
+              flushStep('final_sql', { sql: data.sql, taskType: data.task_type })
+              break
+            case 'explanation':
+              finalExplanation = data.text || ''
+              flushStep('explanation', { text: data.text })
+              break
+            case 'error':
+              flushStep('error', { message: data.message })
+              break
+            case 'done':
+              // Stream complete
+              break
+            default:
+              // Fallback: try to extract from data fields
+              if (data.sql && !finalSql) finalSql = data.sql
+              if (data.text && !finalExplanation) finalExplanation = data.text
+              if (data.message) {
+                flushStep('error', { message: data.message })
+              }
+              break
+          }
+        } catch { /* ignore parse errors in stream */ }
+      }
+    }
+
+    const newHistory = [...chatHistory, { role: 'user', content: q }, { role: 'assistant', content: finalSql || '' }]
+    updateActiveTabState({
+      sql: finalSql || activeTabState.query,
+      lastExplanation: finalExplanation || null,
       lastQuery: q,
       query: '',
       chatHistory: newHistory,

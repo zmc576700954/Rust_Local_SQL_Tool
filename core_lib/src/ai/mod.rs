@@ -1,6 +1,9 @@
+pub mod agent;
+pub mod events;
 pub mod extractor;
 pub mod gateway;
 pub mod planner;
 pub mod policy_store;
 pub mod prompting;
+pub mod tools;
 pub mod types;

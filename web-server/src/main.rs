@@ -917,6 +917,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/schema", get(get_schema))
         .route("/schema/parse", post(parse_schema))
         .route("/chat", post(ai_handlers::chat_to_sql))
+        .route("/chat/stream", post(ai_handlers::chat_to_sql_stream))
         .route("/execute", post(execute_sql))
         .route("/execute/transaction", post(execute_transaction))
         .route("/execute/cancel", post(execute_cancel))

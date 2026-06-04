@@ -227,7 +227,25 @@ export const api = {
     client.post('/diagnostics/perf/suite-diffs', report).then(res => res.data),
   getSchema: (db_id?: string) => client.get('/schema', { params: { db_id } }).then(res => res.data),
   parseSchema: (sqlContent: string) => client.post('/schema/parse', { sql_content: sqlContent }).then(res => res.data),
-  chatToSql: (query: string, chatHistory?: any[]) => client.post('/chat', { query, chat_history: chatHistory }).then(res => res.data),
+  chatToSql: (query: string, chatHistory?: any[], mode?: string, currentSql?: string) =>
+    client.post('/chat', { query, chat_history: chatHistory, mode, current_sql: currentSql }).then(res => res.data),
+  chatToSqlStream: async (query: string, chatHistory?: any[], mode?: string, currentSql?: string) => {
+    const locale = getLocale()
+    const response = await fetch('/backend/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept-Language': locale,
+        'x-locale': locale,
+      },
+      body: JSON.stringify({ query, chat_history: chatHistory, mode, current_sql: currentSql }),
+    })
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      throw new Error(text || `HTTP ${response.status}`)
+    }
+    return response.body
+  },
   executeSql: (sql: string, force?: boolean, db_id?: string, cancel_token?: string, transaction_id?: string) =>
     runExecuteRequest(sql, force, db_id, undefined, undefined, cancel_token, transaction_id),
   executeSqlChunk: (sql: string, chunk_offset: number, chunk_size: number, db_id?: string, transaction_id?: string) =>
