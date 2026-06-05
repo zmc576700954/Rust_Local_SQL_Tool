@@ -1338,11 +1338,13 @@ pub async fn run_go_live_job(
                         let dst_table = format!("go_live_smoke_items_imported_{}", suffix);
 
                         let pool = client.mysql_pool()?.clone();
+                        let safe_src = quote_mysql_ident(&src_table)?;
+                        let safe_dst = quote_mysql_ident(&dst_table)?;
                         let drop_all = async {
-                            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{}`", dst_table))
+                            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {}", safe_dst))
                                 .execute(&pool)
                                 .await;
-                            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{}`", src_table))
+                            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {}", safe_src))
                                 .execute(&pool)
                                 .await;
                         };
@@ -1363,26 +1365,26 @@ pub async fn run_go_live_job(
                         };
 
                         let r: Result<(usize, usize, u64), AppError> = async {
-                            sqlx::query(&format!("DROP TABLE IF EXISTS `{}`", dst_table))
+                            sqlx::query(&format!("DROP TABLE IF EXISTS {}", safe_dst))
                                 .execute(&pool)
                                 .await
                                 .map_err(|e| AppError::InternalError(e.to_string()))?;
-                            sqlx::query(&format!("DROP TABLE IF EXISTS `{}`", src_table))
+                            sqlx::query(&format!("DROP TABLE IF EXISTS {}", safe_src))
                                 .execute(&pool)
                                 .await
                                 .map_err(|e| AppError::InternalError(e.to_string()))?;
 
                             sqlx::query(&format!(
-                                "CREATE TABLE `{}` (id BIGINT PRIMARY KEY, name VARCHAR(255) NOT NULL, score DOUBLE NOT NULL, created_at DATETIME NOT NULL)",
-                                src_table
+                                "CREATE TABLE {} (id BIGINT PRIMARY KEY, name VARCHAR(255) NOT NULL, score DOUBLE NOT NULL, created_at DATETIME NOT NULL)",
+                                safe_src
                             ))
                             .execute(&pool)
                             .await
                             .map_err(|e| AppError::InternalError(e.to_string()))?;
 
                             sqlx::query(&format!(
-                                "CREATE TABLE `{}` (id BIGINT PRIMARY KEY, name VARCHAR(255) NOT NULL, score DOUBLE NOT NULL, created_at DATETIME NOT NULL)",
-                                dst_table
+                                "CREATE TABLE {} (id BIGINT PRIMARY KEY, name VARCHAR(255) NOT NULL, score DOUBLE NOT NULL, created_at DATETIME NOT NULL)",
+                                safe_dst
                             ))
                             .execute(&pool)
                             .await
@@ -1391,8 +1393,8 @@ pub async fn run_go_live_job(
                             let now = chrono::Utc::now().naive_utc();
                             for i in 1..=25i64 {
                                 sqlx::query(&format!(
-                                    "INSERT INTO `{}` (id, name, score, created_at) VALUES (?, ?, ?, ?)",
-                                    src_table
+                                    "INSERT INTO {} (id, name, score, created_at) VALUES (?, ?, ?, ?)",
+                                    safe_src
                                 ))
                                 .bind(i)
                                 .bind(format!("item-{}", i))
@@ -1442,7 +1444,7 @@ pub async fn run_go_live_job(
                             let import_res = run_import_job(client, &nop_state, &dummy_job_id, import_req).await?;
                             let inserted = import_res.get("inserted").and_then(|v| v.as_u64()).unwrap_or(0);
 
-                            let (c,): (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM `{}`", dst_table))
+                            let (c,): (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", safe_dst))
                                 .fetch_one(&pool)
                                 .await
                                 .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -1752,14 +1754,15 @@ pub async fn run_export_job(
         }
     }
     if let Some(pk) = &req.primary_key {
+        let safe_pk = quote_mysql_ident(pk)?;
         if let Some(s) = &req.pk_start {
             if !s.trim().is_empty() {
-                conditions.push(format!("`{}` >= {}", pk, sql_literal(s)));
+                conditions.push(format!("{} >= {}", safe_pk, sql_literal(s)));
             }
         }
         if let Some(s) = &req.pk_end {
             if !s.trim().is_empty() {
-                conditions.push(format!("`{}` <= {}", pk, sql_literal(s)));
+                conditions.push(format!("{} <= {}", safe_pk, sql_literal(s)));
             }
         }
     }
@@ -1773,7 +1776,10 @@ pub async fn run_export_job(
     let order_sql = req
         .primary_key
         .as_ref()
-        .map(|pk| format!(" ORDER BY `{}`", pk))
+        .map(|pk| {
+            quote_mysql_ident(pk).map(|safe_pk| format!(" ORDER BY {}", safe_pk))
+        })
+        .transpose()?
         .unwrap_or_default();
 
     let mut limit_sql = String::new();
@@ -1784,9 +1790,10 @@ pub async fn run_export_job(
         }
     }
 
+    let safe_table = quote_mysql_ident(&req.table_name)?;
     let data_sql = format!(
-        "SELECT * FROM `{}`{}{}{}",
-        req.table_name, where_sql, order_sql, limit_sql
+        "SELECT * FROM {}{}{}{}",
+        safe_table, where_sql, order_sql, limit_sql
     );
 
     let file = tokio::fs::File::create(data_path)

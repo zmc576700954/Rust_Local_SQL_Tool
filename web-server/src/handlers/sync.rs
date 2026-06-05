@@ -13,6 +13,8 @@ use core_lib::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::quote_mysql_ident;
+
 use crate::state::*;
 use crate::{resolve_db_client_for_request, get_temp_db_client, GAP_TOO_LARGE_MSG};
 
@@ -588,7 +590,8 @@ pub async fn perf_sync_check(
 
 pub async fn fetch_table_count(db: &DbClient, table: &str) -> Result<u64, AppError> {
     let policy = TimeoutPolicy::default();
-    let sql = format!("SELECT COUNT(*) FROM `{}`", table);
+    let safe_table = quote_mysql_ident(table)?;
+    let sql = format!("SELECT COUNT(*) FROM {}", safe_table);
     let fut = sqlx::query_scalar::<_, i64>(&sql).fetch_one(db.mysql_pool()?);
     let v = tokio::time::timeout(policy.db_query, fut)
         .await

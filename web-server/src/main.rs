@@ -1031,8 +1031,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(
             CorsLayer::new()
                 .allow_origin(cors_origins)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::ACCEPT,
+                    axum::http::header::ACCEPT_LANGUAGE,
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::HeaderName::from_static("x-locale"),
+                    axum::http::HeaderName::from_static("x-silent-error"),
+                ]),
         )
         .with_state(state.clone());
 
@@ -1067,8 +1080,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    tracing::info!("Server listening on http://0.0.0.0:3000");
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    tracing::info!("Server listening on http://{}", bind_addr);
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -2165,6 +2179,27 @@ struct PreviewDdlResponse {
     sql: String,
 }
 
+fn is_ddl_statement(stmt: &sqlparser::ast::Statement) -> bool {
+    use sqlparser::ast::Statement;
+    matches!(
+        stmt,
+        Statement::CreateTable(..)
+            | Statement::CreateView { .. }
+            | Statement::CreateIndex { .. }
+            | Statement::CreateSchema { .. }
+            | Statement::CreateFunction(..)
+            | Statement::CreateTrigger(..)
+            | Statement::CreateSequence { .. }
+            | Statement::CreateType { .. }
+            | Statement::AlterTable { .. }
+            | Statement::AlterIndex { .. }
+            | Statement::AlterView { .. }
+            | Statement::Drop { .. }
+            | Statement::Truncate { .. }
+            | Statement::RenameTable(..)
+    )
+}
+
 async fn preview_ddl(
     Json(req): Json<PreviewDdlRequest>,
 ) -> Result<Json<PreviewDdlResponse>, AppError> {
@@ -2181,6 +2216,27 @@ async fn execute_ddl(
         return Err(AppError::Forbidden(
             "当前连接为只读模式，禁止执行非查询操作！".to_string(),
         ));
+    }
+
+    // Validate SQL is a DDL statement (not arbitrary SQL)
+    let dialect = sqlparser::dialect::GenericDialect {};
+    match sqlparser::parser::Parser::parse_sql(&dialect, req.sql.trim()) {
+        Ok(stmts) => {
+            if stmts.len() != 1 {
+                return Err(AppError::BadRequest(
+                    "DDL endpoint only supports a single statement".to_string(),
+                ));
+            }
+            if !is_ddl_statement(&stmts[0]) {
+                return Err(AppError::BadRequest(
+                    "DDL endpoint only supports DDL statements (CREATE/ALTER/DROP/TRUNCATE/RENAME TABLE, VIEW, INDEX, SCHEMA, FUNCTION, TRIGGER, SEQUENCE, TYPE)"
+                        .to_string(),
+                ));
+            }
+        }
+        Err(e) => {
+            tracing::warn!("DDL SQL parse failed ({}), deferring to database engine", e);
+        }
     }
 
     let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
@@ -2581,7 +2637,8 @@ async fn fetch_all_table_data(
     use sqlx::Column;
     use sqlx::Row;
 
-    let data_sql = format!("SELECT * FROM `{}` LIMIT 50000", table_name);
+    let safe_table = quote_mysql_ident(table_name)?;
+    let data_sql = format!("SELECT * FROM {} LIMIT 50000", safe_table);
     let result_rows = sqlx::query(&data_sql)
         .fetch_all(db_client.mysql_pool()?)
         .await
@@ -3107,6 +3164,7 @@ mod tests {
             .route("/execute", post(execute_sql))
             .route("/execute/transaction", post(execute_transaction))
             .route("/execute/cancel", post(execute_cancel))
+            .route("/table/ddl", post(execute_ddl))
             .route("/sql/session-info", get(session_info))
             .route("/tools/schema-sync/diff", post(sync_schema_diff))
             .route("/tools/data-transfer/execute", post(transfer_execute))
@@ -4030,5 +4088,52 @@ mod tests {
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let s = String::from_utf8_lossy(&body);
         assert!(s.contains("Database connection a not found"));
+    }
+
+    #[tokio::test]
+    async fn execute_ddl_rejects_non_ddl_sql() {
+        let app = test_app(test_state());
+
+        // SELECT should be rejected by DDL endpoint
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/backend/table/ddl")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sql":"SELECT * FROM users"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let s = String::from_utf8_lossy(&body);
+        assert!(s.contains("DDL statements"));
+    }
+
+    #[tokio::test]
+    async fn execute_ddl_rejects_insert_statements() {
+        let app = test_app(test_state());
+
+        // INSERT should be rejected by DDL endpoint
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/backend/table/ddl")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sql":"INSERT INTO users (name) VALUES ('hack')"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let s = String::from_utf8_lossy(&body);
+        assert!(s.contains("DDL statements"));
     }
 }
