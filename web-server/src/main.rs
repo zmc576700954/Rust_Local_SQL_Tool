@@ -197,7 +197,29 @@ async fn transfer_execute(
 
     if config.source_type == "local_file" {
         if let Some(p) = config.source_path.as_ref() {
-            let _ = tokio::fs::remove_file(p).await;
+            // Validate source_path is within the temp directory and has a UUID filename
+            let temp_base = state.limits.temp_dir.trim_end_matches('/');
+            let canonical = std::path::Path::new(p)
+                .canonicalize()
+                .unwrap_or_default();
+            let canonical_str = canonical.to_string_lossy();
+            if !canonical_str.starts_with(temp_base) {
+                return Err(AppError::BadRequest(
+                    "source_path must be within the temp directory".into(),
+                ));
+            }
+            if let Some(filename) = canonical.file_name().and_then(|f| f.to_str()) {
+                if uuid::Uuid::parse_str(filename).is_err() {
+                    return Err(AppError::BadRequest(
+                        "source_path filename must be a valid UUID".into(),
+                    ));
+                }
+            } else {
+                return Err(AppError::BadRequest(
+                    "source_path has an invalid filename".into(),
+                ));
+            }
+            let _ = tokio::fs::remove_file(&canonical).await;
         }
     }
     let dml = report.dml;
@@ -368,7 +390,10 @@ async fn save_rule(
     let planner = state.planner.read().await.clone();
     let sql_template = match planner.generate_rule_template(&req.prompt, &req.sql).await {
         Ok(res) => res,
-        Err(_e) => req.sql.clone(), // Fallback to raw sql if AI extraction fails
+        Err(e) => {
+            tracing::warn!("AI template extraction failed, falling back to raw SQL: {:?}", e);
+            req.sql.clone()
+        }
     };
 
     let new_rule = Rule {
@@ -2391,39 +2416,7 @@ async fn export_data(
                     headers_sent = true;
                 }
 
-                let mut map = serde_json::Map::new();
-                for col in row.columns() {
-                    let col_name = col.name().to_string();
-                    if let Ok(val) = row.try_get::<Option<i64>, _>(col.ordinal()) {
-                        map.insert(col_name, serde_json::json!(val));
-                    } else if let Ok(val) = row.try_get::<Option<f64>, _>(col.ordinal()) {
-                        map.insert(col_name, serde_json::json!(val));
-                    } else if let Ok(val) = row.try_get::<Option<bool>, _>(col.ordinal()) {
-                        map.insert(col_name, serde_json::json!(val));
-                    } else if let Ok(val) =
-                        row.try_get::<Option<chrono::NaiveDateTime>, _>(col.ordinal())
-                    {
-                        map.insert(col_name, serde_json::json!(val.map(|dt| dt.to_string())));
-                    } else if let Ok(val) =
-                        row.try_get::<Option<chrono::NaiveDate>, _>(col.ordinal())
-                    {
-                        map.insert(col_name, serde_json::json!(val.map(|d| d.to_string())));
-                    } else if let Ok(val) =
-                        row.try_get::<Option<chrono::NaiveTime>, _>(col.ordinal())
-                    {
-                        map.insert(col_name, serde_json::json!(val.map(|t| t.to_string())));
-                    } else if let Ok(val) = row.try_get::<Option<String>, _>(col.ordinal()) {
-                        map.insert(col_name, serde_json::json!(val));
-                    } else {
-                        let val: Option<Vec<u8>> = row.try_get(col.ordinal()).unwrap_or(None);
-                        if let Some(bytes) = val {
-                            let s = String::from_utf8_lossy(&bytes).into_owned();
-                            map.insert(col_name, serde_json::json!(s));
-                        } else {
-                            map.insert(col_name, serde_json::Value::Null);
-                        }
-                    }
-                }
+                let map = row_to_json(&row);
 
                 if spawn_export_type == "csv" {
                     let _ = tx
@@ -2637,9 +2630,6 @@ async fn fetch_all_table_data(
     db_client: &DbClient,
     table_name: &str,
 ) -> Result<Vec<serde_json::Value>, AppError> {
-    use sqlx::Column;
-    use sqlx::Row;
-
     let safe_table = quote_mysql_ident(table_name)?;
     let data_sql = format!("SELECT * FROM {} LIMIT 50000", safe_table);
     let result_rows = sqlx::query(&data_sql)
@@ -2649,33 +2639,7 @@ async fn fetch_all_table_data(
 
     let mut rows = Vec::new();
     for row in result_rows {
-        let mut map = serde_json::Map::new();
-        for col in row.columns() {
-            let col_name = col.name().to_string();
-            if let Ok(val) = row.try_get::<Option<i64>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val));
-            } else if let Ok(val) = row.try_get::<Option<f64>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val));
-            } else if let Ok(val) = row.try_get::<Option<bool>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val));
-            } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDateTime>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val.map(|dt| dt.to_string())));
-            } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDate>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val.map(|d| d.to_string())));
-            } else if let Ok(val) = row.try_get::<Option<chrono::NaiveTime>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val.map(|t| t.to_string())));
-            } else if let Ok(val) = row.try_get::<Option<String>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val));
-            } else {
-                let val: Option<Vec<u8>> = row.try_get(col.ordinal()).unwrap_or(None);
-                if let Some(bytes) = val {
-                    let s = String::from_utf8_lossy(&bytes).into_owned();
-                    map.insert(col_name, serde_json::json!(s));
-                } else {
-                    map.insert(col_name, serde_json::Value::Null);
-                }
-            }
-        }
+        let map = row_to_json(&row);
         rows.push(serde_json::Value::Object(map));
     }
     Ok(rows)

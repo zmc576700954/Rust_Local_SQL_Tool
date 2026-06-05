@@ -704,6 +704,14 @@ impl AppConfig {
 
         let content = serde_json::to_string_pretty(self)?;
         fs::write(&path, content).await?;
+
+        // Restrict file permissions on Unix to protect secrets
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+
         Ok(())
     }
 }

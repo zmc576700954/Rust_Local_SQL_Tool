@@ -49,16 +49,15 @@ function substituteSqlVariables(
   for (const { name, value } of variables) {
     const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(`:${escapedName}\\b`, 'g');
-    const trimmed = value.trim();
-    const isLiteral =
-      trimmed !== '' &&
-      (!isNaN(Number(trimmed)) ||
-        trimmed.toLowerCase() === 'true' ||
-        trimmed.toLowerCase() === 'false' ||
-        trimmed.toLowerCase() === 'null');
-    const val = isLiteral
-      ? value
-      : `'${value.replace(/'/g, "''")}'`;
+    const trimmed = value.trim().toLowerCase();
+    let val: string;
+    if (trimmed === 'null' || trimmed === 'true' || trimmed === 'false') {
+      val = trimmed;
+    } else if (trimmed !== '' && !isNaN(Number(trimmed))) {
+      val = String(Number(trimmed));
+    } else {
+      val = `'${value.replace(/'/g, "''").replace(/\\/g, '\\\\')}'`;
+    }
     result = result.replace(regex, val);
   }
   return result;

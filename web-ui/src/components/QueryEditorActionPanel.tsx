@@ -118,7 +118,7 @@ export function QueryEditorActionPanel({
           <Skeleton className="h-6 w-5/6" />
           <div className="flex items-center justify-center h-full text-blue-400 font-medium animate-pulse flex-col gap-3">
             <Sparkles className="w-8 h-8" />
-            <span>{'AI \u6b63\u5728\u601d\u8003\u5e76\u751f\u6210 SQL...'}</span>
+            <span>{tr('AI \u6b63\u5728\u601d\u8003\u5e76\u751f\u6210 SQL...', 'AI is thinking and generating SQL...')}</span>
           </div>
         </div>
       )}
@@ -217,7 +217,7 @@ export function QueryEditorActionPanel({
               onChange={(e) => onTierChange(e.target.value)}
               disabled={isAiSwitching || !activeModelSupportsTier}
               className="h-9 bg-dark-panel border border-dark-border hover:border-gray-500 text-gray-200 rounded px-2 text-xs transition-colors disabled:opacity-60"
-              title={activeModelSupportsTier ? '\u5feb\u901f\u5207\u6362 tier' : '\u8be5\u6a21\u578b\u4e0d\u652f\u6301 tier'}
+              title={activeModelSupportsTier ? tr('\u5feb\u901f\u5207\u6362 tier', 'Quick switch tier') : tr('\u8be5\u6a21\u578b\u4e0d\u652f\u6301 tier', 'This model does not support tier')}
             >
               <option value="fast">fast</option>
               <option value="balanced">balanced</option>
@@ -235,7 +235,7 @@ export function QueryEditorActionPanel({
 
         {(!tabState.sql || tabState.sql.trim() === '-- Generated SQL will appear here') && !tabState.isGenerating && (
           <span className="text-xs text-gray-500 hidden sm:inline-block border border-gray-700/50 bg-gray-800/30 px-2 py-1 rounded-full mr-1">
-            {'\u6309 '}<kbd className="font-mono bg-black/50 px-1 rounded mx-0.5 text-gray-400">Cmd+K</kbd>{' \u5524\u8d77 AI \u6307\u4ee4'}
+            {tr('\u6309 ', 'Press ')}<kbd className="font-mono bg-black/50 px-1 rounded mx-0.5 text-gray-400">Cmd+K</kbd>{tr(' \u5524\u8d77 AI \u6307\u4ee4', ' to activate AI')}
           </span>
         )}
 
@@ -274,7 +274,7 @@ export function QueryEditorActionPanel({
               disabled={disableAiSqlActions}
             >
               <Sparkles className="w-4 h-4" />
-              <span className="whitespace-nowrap">{'AI \u4f18\u5316 (Optimize)'}</span>
+              <span className="whitespace-nowrap">{tr('AI \u4f18\u5316 (Optimize)', 'AI Optimize')}</span>
             </motion.button>
             <motion.button
               whileHover={{ scale: 1.02 }}
@@ -284,7 +284,7 @@ export function QueryEditorActionPanel({
               disabled={disableAiSqlActions}
             >
               <Sparkles className="w-4 h-4" />
-              <span className="whitespace-nowrap">{'AI \u89e3\u91ca (Explain)'}</span>
+              <span className="whitespace-nowrap">{tr('AI \u89e3\u91ca (Explain)', 'AI Explain')}</span>
             </motion.button>
             <motion.button
               whileHover={{ scale: 1.02 }}
@@ -294,7 +294,7 @@ export function QueryEditorActionPanel({
               title="Execution Plan"
               disabled={!tabState.sql.trim() || !dbConnected}
             >
-              <span className="whitespace-nowrap">{'Explain (\u6267\u884c\u8ba1\u5212)'}</span>
+              <span className="whitespace-nowrap">{tr('\u6267\u884c\u8ba1\u5212 (Explain)', 'Execution Plan')}</span>
             </motion.button>
             <motion.button
               whileHover={{ scale: 1.02 }}
@@ -330,7 +330,7 @@ export function QueryEditorActionPanel({
             <button
               className="flex items-center justify-center h-9 w-9 bg-[#21262d] border border-dark-border hover:bg-[#30363d] hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm"
               onClick={onToggleMoreActions}
-              title={'\u66f4\u591a\u64cd\u4f5c'}
+              title={tr('\u66f4\u591a\u64cd\u4f5c', 'More actions')}
             >
               <MoreHorizontal className="w-4 h-4" />
             </button>
@@ -354,7 +354,7 @@ export function QueryEditorActionPanel({
                       onChange={(e) => onTierChange(e.target.value)}
                       disabled={isAiSwitching || !activeModelSupportsTier}
                       className="h-8 w-full bg-dark-panel border border-dark-border hover:border-gray-500 text-gray-200 rounded px-2 text-xs transition-colors disabled:opacity-60"
-                      title={activeModelSupportsTier ? '\u5feb\u901f\u5207\u6362 tier' : '\u8be5\u6a21\u578b\u4e0d\u652f\u6301 tier'}
+                      title={activeModelSupportsTier ? tr('\u5feb\u901f\u5207\u6362 tier', 'Quick switch tier') : tr('\u8be5\u6a21\u578b\u4e0d\u652f\u6301 tier', 'This model does not support tier')}
                     >
                       <option value="fast">fast</option>
                       <option value="balanced">balanced</option>

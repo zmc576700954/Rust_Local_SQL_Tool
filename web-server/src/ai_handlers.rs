@@ -56,9 +56,8 @@ pub async fn ai_models(State(state): State<AppState>) -> Result<Json<AiModelsRes
 }
 
 pub async fn ai_health(State(state): State<AppState>) -> Result<Json<AiHealthReport>, AppError> {
-    let config = state.config.read().await.clone();
-    let gateway = core_lib::ai::gateway::AiGateway::new(config);
-    let report = gateway.health_check().await.map_err(map_ai_error)?;
+    let planner = state.planner.read().await;
+    let report = planner.gateway.health_check().await.map_err(map_ai_error)?;
     Ok(Json(report))
 }
 
@@ -193,7 +192,7 @@ pub async fn ai_query(
         kb.retrieve(db_conn_id.as_deref(), &query, 5)
     };
 
-    let gateway = core_lib::ai::gateway::AiGateway::new(config);
+    let gateway = state.planner.read().await.gateway.clone();
     let router = AiRouter::new(gateway);
 
     match router
@@ -280,7 +279,7 @@ pub async fn ai_explain_error(
 
     let schema = get_schema_internal(&state).await;
 
-    let gateway = core_lib::ai::gateway::AiGateway::new(config);
+    let gateway = state.planner.read().await.gateway.clone();
     let router = AiRouter::new(gateway);
 
     match router

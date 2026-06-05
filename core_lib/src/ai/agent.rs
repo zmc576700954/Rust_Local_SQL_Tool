@@ -11,7 +11,7 @@ use crate::rule_engine::RuleStore;
 use futures_util::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
-use rig::completion::Prompt;
+use rig::completion::{Chat, Prompt};
 use rig::streaming::{StreamedUserContent, StreamingChat};
 use rig::tool::ToolDyn;
 use std::pin::Pin;
@@ -318,12 +318,13 @@ pub async fn run_agent(
     rule_store: &RuleStore,
     knowledge_base: &KnowledgeBase,
     policy: &Policy,
-    _chat_history: Option<&[serde_json::Value]>,
+    chat_history: Option<&[serde_json::Value]>,
     extra_guidance: Option<&str>,
 ) -> Result<AgentResult, AgentError> {
     let (profile, model_id, tools, preamble, max_turns) = prepare_agent_context(
         config, db_client, db_name, rule_store, knowledge_base, policy, extra_guidance,
     )?;
+    let history = build_history(chat_history);
 
     // Per-agent timeout: 120s per turn × max_turns
     let timeout_secs = (max_turns as u64).saturating_mul(120);
@@ -333,7 +334,7 @@ pub async fn run_agent(
                 build_anthropic_agent(&profile, &model_id, &preamble, tools, max_turns)?;
             tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
-                agent.prompt(user_input),
+                agent.chat(user_input, history.clone()),
             )
             .await
             .map_err(|_| AgentError::Agent("Agent timed out".to_string()))?
@@ -344,7 +345,7 @@ pub async fn run_agent(
                 build_openai_agent(&profile, &model_id, &preamble, tools, max_turns)?;
             tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
-                agent.prompt(user_input),
+                agent.chat(user_input, history.clone()),
             )
             .await
             .map_err(|_| AgentError::Agent("Agent timed out".to_string()))?

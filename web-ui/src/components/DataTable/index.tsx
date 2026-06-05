@@ -278,7 +278,7 @@ export function DataTable({
       if (val === null || val === undefined) return 'NULL';
       if (typeof val === 'number' || typeof val === 'boolean') return String(val);
       const normalized = typeof val === 'object' ? stringifyJson(val) : String(val);
-      return `'${normalized.replace(/'/g, "''")}'`;
+      return `'${normalized.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
     });
 
     return `INSERT INTO \`${tableName}\` (${columns.map((column: string) => `\`${column}\``).join(', ')}) VALUES (${values.join(', ')});`;
