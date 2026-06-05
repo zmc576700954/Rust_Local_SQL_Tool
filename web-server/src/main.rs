@@ -2235,7 +2235,10 @@ async fn execute_ddl(
             }
         }
         Err(e) => {
-            tracing::warn!("DDL SQL parse failed ({}), deferring to database engine", e);
+            return Err(AppError::BadRequest(format!(
+                "SQL parsing failed ({}), only valid DDL statements are allowed",
+                e
+            )));
         }
     }
 
@@ -4135,5 +4138,28 @@ mod tests {
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let s = String::from_utf8_lossy(&body);
         assert!(s.contains("DDL statements"));
+    }
+
+    #[tokio::test]
+    async fn execute_ddl_rejects_malformed_sql() {
+        let app = test_app(test_state());
+
+        // Malformed SQL that sqlparser cannot parse should also be rejected
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/backend/table/ddl")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sql":"NOT VALID SQL ;;"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let s = String::from_utf8_lossy(&body);
+        assert!(s.contains("SQL parsing failed"));
     }
 }

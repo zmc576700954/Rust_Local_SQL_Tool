@@ -1,6 +1,7 @@
 use core_lib::perf_report::{
     PerformanceCase, PerformanceMetrics, PerformanceReport, PerformanceStage,
 };
+use core_lib::sql::util::quote_ident_mysql;
 use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -267,14 +268,14 @@ async fn main() -> Result<(), AnyError> {
 
     if run_import {
         let mut ddl = String::new();
-        ddl.push_str("CREATE TABLE IF NOT EXISTS `");
-        ddl.push_str(&target_table.replace('`', "``"));
-        ddl.push_str("` (");
+        ddl.push_str("CREATE TABLE IF NOT EXISTS ");
+        ddl.push_str(&quote_ident_mysql(&target_table));
+        ddl.push_str(" (");
         for i in 0..csv_cols.max(1) {
             if i > 0 {
                 ddl.push(',');
             }
-            ddl.push_str(&format!("`c{}` VARCHAR(255) NOT NULL", i + 1));
+            ddl.push_str(&format!("{} VARCHAR(255) NOT NULL", quote_ident_mysql(&format!("c{}", i + 1))));
         }
         ddl.push_str(") ENGINE=InnoDB;");
         execute_sql(&http, &base, &ddl).await?;
