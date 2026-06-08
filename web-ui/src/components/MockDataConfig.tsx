@@ -31,10 +31,10 @@ export function MockDataConfig({ tableName, rules, onChangeRules }: MockDataConf
         setTable(res);
         setLoading(false);
       }
-    }).catch((e: any) => {
+    }).catch((e: unknown) => {
       if (active) {
         setLoading(false);
-        toast(e.message || 'Failed to load schema', 'error');
+        toast((e instanceof Error ? e.message : String(e)) || 'Failed to load schema', 'error');
       }
     });
     return () => { active = false; };

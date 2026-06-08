@@ -8,6 +8,7 @@ use crate::config::{AiConnectionMode, AiProvider, AppConfig, ResolvedAiProfile};
 use crate::db::DbClient;
 use crate::knowledge_base::KnowledgeBase;
 use crate::rule_engine::RuleStore;
+use tokio_util::sync::CancellationToken;
 use futures_util::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
@@ -15,6 +16,11 @@ use rig::completion::{Chat, Prompt};
 use rig::streaming::{StreamedUserContent, StreamingChat};
 use rig::tool::ToolDyn;
 use std::pin::Pin;
+
+use serde::{Deserialize, Serialize};
+
+use std::sync::Arc;
+use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -41,6 +47,68 @@ impl AgentError {
 }
 
 type AgentStream = Pin<Box<dyn futures_util::Stream<Item = AgentEvent> + Send>>;
+
+/// Task type classification for differentiated preamble and max_turns
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TaskType {
+    #[serde(rename = "generate_sql")]
+    Generate,
+    #[serde(rename = "explain_sql")]
+    Explain,
+    #[serde(rename = "optimize_sql")]
+    Optimize,
+    #[serde(rename = "fix_sql")]
+    Fix,
+    #[serde(rename = "general")]
+    General,
+}
+
+impl TaskType {
+    /// Convert a normalized mode string to TaskType
+    pub fn from_mode(mode: Option<&str>) -> Self {
+        match mode {
+            Some("generate") => TaskType::Generate,
+            Some("optimize") => TaskType::Optimize,
+            Some("explain") => TaskType::Explain,
+            Some("fix") => TaskType::Fix,
+            _ => TaskType::General,
+        }
+    }
+}
+
+fn build_task_specific_guidance(task_type: &TaskType, dialect: &str) -> String {
+    match task_type {
+        TaskType::Generate => format!(
+            "Focus on generating {} SQL from natural language. \
+             Use query_schema to discover tables, then compose the query. \
+             Always validate with execute_sql before returning.", dialect),
+        TaskType::Explain =>
+            "Focus on explaining the provided SQL. Break down each clause, \
+             identify tables, joins, filters, and aggregations. \
+             sql field should echo the input SQL. No execute_sql needed.".to_string(),
+        TaskType::Optimize =>
+            "Focus on optimizing the provided SQL. Analyze potential \
+             performance issues (missing indexes, unnecessary joins, N+1 patterns). \
+             Use execute_sql with EXPLAIN to compare before/after plans.".to_string(),
+        TaskType::Fix =>
+            "Focus on fixing the SQL error. Analyze the error message, \
+             identify the root cause, and provide a minimal correction. \
+             Always validate the fix with execute_sql.".to_string(),
+        TaskType::General =>
+            "Determine the task type from the user's request.".to_string(),
+    }
+}
+
+fn resolve_max_turns(task_type: &TaskType, policy_max: u32) -> usize {
+    let base = match task_type {
+        TaskType::Explain => 2,      // explain doesn't need multi-turn tool calls
+        TaskType::Generate => 5,     // generate needs exploration
+        TaskType::Optimize => 6,     // optimize needs EXPLAIN comparison
+        TaskType::Fix => 4,          // fix needs validation retry
+        TaskType::General => 5,
+    };
+    base.min(policy_max as usize)
+}
 
 /// Pre-flight check: validate that the AI profile has an API key configured.
 /// Call this before building tools or creating agents to fail fast.
@@ -76,7 +144,12 @@ fn build_tools(
     tools
 }
 
-fn build_preamble(dialect: &str, extra_guidance: Option<&str>) -> String {
+fn build_preamble(
+    dialect: &str,
+    schema_briefing: Option<&str>,
+    extra_guidance: Option<&str>,
+    task_type: &TaskType,
+) -> String {
     let mut preamble = format!(
         "You are a careful {} SQL assistant with access to tools.\n\n\
         You can use the following tools:\n\
@@ -86,7 +159,8 @@ fn build_preamble(dialect: &str, extra_guidance: Option<&str>) -> String {
         - query_knowledge: Search business context and field descriptions\n\n\
         <workflow>\n\
         1. Understand the user's request and determine the task type (generate_sql, explain_sql, optimize_sql, fix_sql).\n\
-        2. Use query_schema to discover relevant tables and columns if needed.\n\
+        2. If the <schema_context> section lists relevant tables, use them as your starting point. \
+           Call query_schema for deeper details only when needed.\n\
         3. Use query_rules to check for matching proven patterns.\n\
         4. Use query_knowledge to understand business terminology if needed.\n\
         5. Generate the SQL query.\n\
@@ -108,10 +182,25 @@ fn build_preamble(dialect: &str, extra_guidance: Option<&str>) -> String {
         dialect
     );
 
+    // Inject schema briefing — gives the agent a global view of the database
+    if let Some(briefing) = schema_briefing.filter(|s| !s.trim().is_empty()) {
+        preamble.push_str("\n\n<schema_context>\n");
+        preamble.push_str(briefing.trim());
+        preamble.push_str("\n</schema_context>");
+    }
+
     if let Some(guidance) = extra_guidance.filter(|s| !s.trim().is_empty()) {
         preamble.push_str("\n\n<extra_guidance>\n");
         preamble.push_str(guidance.trim());
         preamble.push_str("\n</extra_guidance>");
+    }
+
+    // Inject task-type-specific guidance
+    let task_guidance = build_task_specific_guidance(&task_type, &dialect);
+    if !task_guidance.is_empty() {
+        preamble.push_str("\n\n<task_guidance>\n");
+        preamble.push_str(task_guidance.trim());
+        preamble.push_str("\n</task_guidance>");
     }
 
     preamble
@@ -162,6 +251,11 @@ pub fn try_rule_fast_path(
             task_type: Some("generate_sql".to_string()),
             sql_empty_reason: None,
             missing_information: Vec::new(),
+            grounding_evidence: Vec::new(),
+            assumptions: Vec::new(),
+            referenced_tables: Vec::new(),
+            risk_level: None,
+            needs_confirmation: None,
             events: vec![AgentEvent::FinalSql {
                 sql: rule.sql_template,
                 task_type: Some("generate_sql".to_string()),
@@ -171,46 +265,59 @@ pub fn try_rule_fast_path(
     }
 }
 
-fn map_stream_item(
+fn map_stream_items(
     item: Result<
         MultiTurnStreamItem<impl rig::completion::GetTokenUsage>,
         impl std::fmt::Display,
     >,
-) -> Option<AgentEvent> {
+) -> Vec<AgentEvent> {
     match item {
         Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+            let mut events = Vec::new();
+
+            // Extract token usage from FinalResponse
+            let usage = response.usage();
+            if usage.total_tokens > 0 {
+                events.push(AgentEvent::TokenUsage {
+                    prompt_tokens: usage.input_tokens,
+                    completion_tokens: usage.output_tokens,
+                    total_tokens: usage.total_tokens,
+                });
+            }
+
             let text = response.response();
             let intent = crate::ai::extractor::extract_sql_intent(text);
             if !intent.sql.is_empty() {
-                Some(AgentEvent::FinalSql {
+                events.push(AgentEvent::FinalSql {
                     sql: intent.sql,
                     task_type: intent.task_type,
-                })
+                });
             } else if let Some(ref explanation) = intent.explanation {
-                Some(AgentEvent::Explanation {
+                events.push(AgentEvent::Explanation {
                     text: explanation.clone(),
-                })
+                });
             } else if !text.is_empty() {
-                Some(AgentEvent::Thinking {
+                events.push(AgentEvent::Thinking {
                     text: text.to_string(),
-                })
-            } else {
-                None
+                });
             }
+
+            events
         }
         Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => {
             use rig::streaming::StreamedAssistantContent;
             match content {
                 StreamedAssistantContent::Text(text) if !text.text.is_empty() => {
-                    Some(AgentEvent::Thinking { text: text.text })
+                    vec![AgentEvent::Thinking { text: text.text }]
                 }
                 StreamedAssistantContent::ToolCall { tool_call, .. } => {
-                    Some(AgentEvent::ToolCall {
-                        tool: tool_call.function.name,
+                    vec![AgentEvent::ToolCall {
+                        tool: tool_call.function.name.clone(),
                         args: tool_call.function.arguments,
-                    })
+                        call_id: Some(tool_call.id.clone()),
+                    }]
                 }
-                _ => None,
+                _ => vec![],
             }
         }
         Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
@@ -224,16 +331,16 @@ fn map_stream_item(
             };
             // The tool name is not directly available in ToolResult; use the id as identifier.
             // The frontend correlates tool_call → tool_result by stream order.
-            Some(AgentEvent::ToolResult {
+            vec![AgentEvent::ToolResult {
                 tool: tool_result.id.clone(),
                 result: content_text,
                 call_id: tool_result.call_id,
-            })
+            }]
         }
-        Ok(_) => None,
-        Err(e) => Some(AgentEvent::Error {
+        Ok(_) => vec![],
+        Err(e) => vec![AgentEvent::Error {
             message: e.to_string(),
-        }),
+        }],
     }
 }
 
@@ -291,7 +398,9 @@ fn prepare_agent_context<'a>(
     rule_store: &'a RuleStore,
     knowledge_base: &'a KnowledgeBase,
     policy: &Policy,
+    schema_briefing: Option<&str>,
     extra_guidance: Option<&str>,
+    task_type: &TaskType,
 ) -> Result<(ResolvedAiProfile, String, Vec<Box<dyn ToolDyn>>, String, usize), AgentError> {
     let profile = config.resolve_ai_profile();
     let (model_id, _) = config.resolve_active_model();
@@ -304,8 +413,8 @@ fn prepare_agent_context<'a>(
         knowledge_base,
         config.active_db_id.as_deref(),
     );
-    let preamble = build_preamble(&dialect, extra_guidance);
-    let max_turns = policy.agent_max_turns as usize;
+    let preamble = build_preamble(&dialect, schema_briefing, extra_guidance, task_type);
+    let max_turns = resolve_max_turns(task_type, policy.agent_max_turns);
     Ok((profile, model_id, tools, preamble, max_turns))
 }
 
@@ -319,10 +428,12 @@ pub async fn run_agent(
     knowledge_base: &KnowledgeBase,
     policy: &Policy,
     chat_history: Option<&[serde_json::Value]>,
+    schema_briefing: Option<&str>,
     extra_guidance: Option<&str>,
+    task_type: &TaskType,
 ) -> Result<AgentResult, AgentError> {
     let (profile, model_id, tools, preamble, max_turns) = prepare_agent_context(
-        config, db_client, db_name, rule_store, knowledge_base, policy, extra_guidance,
+        config, db_client, db_name, rule_store, knowledge_base, policy, schema_briefing, extra_guidance, task_type,
     )?;
     let history = build_history(chat_history);
 
@@ -375,6 +486,11 @@ pub async fn run_agent(
         task_type: intent.task_type,
         sql_empty_reason: intent.sql_empty_reason,
         missing_information: intent.missing_information,
+        grounding_evidence: intent.grounding_evidence,
+        assumptions: intent.assumptions,
+        referenced_tables: intent.referenced_tables,
+        risk_level: intent.risk_level,
+        needs_confirmation: intent.needs_confirmation,
         events,
     })
 }
@@ -389,25 +505,112 @@ pub async fn run_agent_streaming(
     knowledge_base: &KnowledgeBase,
     policy: &Policy,
     chat_history: Option<&[serde_json::Value]>,
+    schema_briefing: Option<&str>,
     extra_guidance: Option<&str>,
+    cancel_token: CancellationToken,
+    task_type: &TaskType,
 ) -> Result<AgentStream, AgentError> {
     let (profile, model_id, tools, preamble, max_turns) = prepare_agent_context(
-        config, db_client, db_name, rule_store, knowledge_base, policy, extra_guidance,
+        config, db_client, db_name, rule_store, knowledge_base, policy, schema_briefing, extra_guidance, task_type,
     )?;
     let history = build_history(chat_history);
 
+    // Build call_id → tool_name mapping table for ToolResult event correlation
+    let tool_name_map: Arc<std::sync::Mutex<HashMap<String, String>>> = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let stream: AgentStream = match profile.provider {
         AiProvider::Anthropic => {
             let agent =
                 build_anthropic_agent(&profile, &model_id, &preamble, tools, max_turns)?;
             let s = agent.stream_chat(user_input, &history).await;
-            Box::pin(s.filter_map(|item| async { map_stream_item(item) }))
+            let ct = cancel_token.clone();
+            let map_arc = tool_name_map.clone();
+            Box::pin(s
+                .then(move |item| {
+                    let ct = ct.clone();
+                    let map_arc = map_arc.clone();
+                    async move {
+                        if ct.is_cancelled() {
+                            vec![AgentEvent::Error {
+                                message: "Agent execution cancelled by user".to_string(),
+                            }]
+                        } else {
+                            let events = map_stream_items(item);
+                            // Phase 1: Record ToolCall call_id → tool_name mappings
+                            for ev in events.iter() {
+                                if let AgentEvent::ToolCall { tool, call_id: Some(ref id), .. } = ev {
+                                    map_arc.lock().unwrap().insert(id.clone(), tool.clone());
+                                }
+                            }
+                            // Phase 2: Resolve ToolResult tool names from the mapping
+                            events.into_iter().map(|ev| {
+                                if let AgentEvent::ToolResult { ref tool, ref call_id, ref result } = ev {
+                                    let resolved = if let Some(ref id) = call_id {
+                                        map_arc.lock().unwrap()
+                                            .get(id).cloned().unwrap_or_else(|| tool.clone())
+                                    } else {
+                                        tool.clone()
+                                    };
+                                    AgentEvent::ToolResult {
+                                        tool: resolved,
+                                        result: result.clone(),
+                                        call_id: call_id.clone(),
+                                    }
+                                } else {
+                                    ev
+                                }
+                            }).collect::<Vec<_>>()
+                        }
+                    }
+                })
+                .flat_map(futures_util::stream::iter)
+            )
         }
         _ => {
             let agent =
                 build_openai_agent(&profile, &model_id, &preamble, tools, max_turns)?;
             let s = agent.stream_chat(user_input, &history).await;
-            Box::pin(s.filter_map(|item| async { map_stream_item(item) }))
+            let ct = cancel_token.clone();
+            let map_arc = tool_name_map.clone();
+            Box::pin(s
+                .then(move |item| {
+                    let ct = ct.clone();
+                    let map_arc = map_arc.clone();
+                    async move {
+                        if ct.is_cancelled() {
+                            vec![AgentEvent::Error {
+                                message: "Agent execution cancelled by user".to_string(),
+                            }]
+                        } else {
+                            let events = map_stream_items(item);
+                            // Phase 1: Record ToolCall call_id → tool_name mappings
+                            for ev in events.iter() {
+                                if let AgentEvent::ToolCall { tool, call_id: Some(ref id), .. } = ev {
+                                    map_arc.lock().unwrap().insert(id.clone(), tool.clone());
+                                }
+                            }
+                            // Phase 2: Resolve ToolResult tool names from the mapping
+                            events.into_iter().map(|ev| {
+                                if let AgentEvent::ToolResult { ref tool, ref call_id, ref result } = ev {
+                                    let resolved = if let Some(ref id) = call_id {
+                                        map_arc.lock().unwrap()
+                                            .get(id).cloned().unwrap_or_else(|| tool.clone())
+                                    } else {
+                                        tool.clone()
+                                    };
+                                    AgentEvent::ToolResult {
+                                        tool: resolved,
+                                        result: result.clone(),
+                                        call_id: call_id.clone(),
+                                    }
+                                } else {
+                                    ev
+                                }
+                            }).collect::<Vec<_>>()
+                        }
+                    }
+                })
+                .flat_map(futures_util::stream::iter)
+            )
         }
     };
 

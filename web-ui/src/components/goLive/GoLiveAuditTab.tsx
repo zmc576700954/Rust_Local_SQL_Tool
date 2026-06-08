@@ -34,7 +34,7 @@ export function GoLiveAuditTab({ isActive }: { isActive: boolean }) {
     try {
       const data = await api.goLiveAudit(200)
       setRows(Array.isArray(data) ? data : [])
-    } catch (e: any) {
+    } catch (e: unknown) {
       const err = parseError(e)
       toast(tr('加载门禁审计失败：', 'Failed to load audit: ') + (err.message || String(e)), 'error')
     } finally {

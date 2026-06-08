@@ -20,8 +20,8 @@ export function ExecutionPlan({ sql }: ExecutionPlanProps) {
       try {
         const res = await api.explainSql(sql);
         setPlanRows(res.rows || []);
-      } catch (err: any) {
-        setError(err?.response?.data?.message || err.message || 'Failed to explain SQL');
+      } catch (err: unknown) {
+        setError((err as any)?.response?.data?.message || (err instanceof Error ? err.message : String(err)) || 'Failed to explain SQL');
       } finally {
         setLoading(false);
       }

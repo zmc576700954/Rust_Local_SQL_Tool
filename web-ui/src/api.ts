@@ -2,6 +2,7 @@ import axios from 'axios'
 import { getErrorMessage } from './utils/ErrorDictionary'
 import { redactSensitiveText } from './utils'
 import { getLocale, tr } from './i18n'
+import type { RowData, TableWithDetails, KnowledgeItem, ConfigData } from './types'
 
 export const HTTP_TIMEOUT_MS = 120000
 export const JOB_POLL_REQUEST_TIMEOUT_MS = 10000
@@ -31,7 +32,8 @@ async function getTauriInvoke(): Promise<TauriInvoke | null> {
 function normalizeDesktopError(error: unknown): Error {
   if (error instanceof Error) return error
   if (typeof error === 'string') return new Error(error)
-  if (typeof (error as any)?.message === 'string') return new Error((error as any).message)
+  const errorObj = error as { message?: unknown }
+  if (typeof errorObj?.message === 'string') return new Error(errorObj.message)
   try {
     return new Error(JSON.stringify(error))
   } catch {
@@ -40,11 +42,12 @@ function normalizeDesktopError(error: unknown): Error {
 }
 
 function shouldFallbackToHttp(error: unknown): boolean {
+  const errorObj = error as { message?: unknown }
   const message =
     typeof error === 'string'
       ? error
-      : typeof (error as any)?.message === 'string'
-        ? (error as any).message
+      : typeof errorObj?.message === 'string'
+        ? errorObj.message
         : ''
   return message.startsWith(DESKTOP_HTTP_FALLBACK_PREFIX)
 }
@@ -119,18 +122,23 @@ const client = axios.create({
   timeout: HTTP_TIMEOUT_MS,
 })
 
+export interface ChatMessage {
+  role: string;
+  content: string;
+}
+
 type AiQueryPayload = {
   query: string
   mode?: 'generate' | 'optimize' | 'explain'
   current_sql?: string
-  chat_history?: any[]
+  chat_history?: ChatMessage[]
 }
 
 client.interceptors.request.use((config) => {
   const locale = getLocale()
   config.headers = config.headers || {}
-  ;(config.headers as any)['Accept-Language'] = locale
-  ;(config.headers as any)['x-locale'] = locale
+  ;(config.headers as Record<string, string>)['Accept-Language'] = locale
+  ;(config.headers as Record<string, string>)['x-locale'] = locale
   return config
 })
 
@@ -142,7 +150,7 @@ client.interceptors.response.use(
     const silent = error?.config?.headers?.['x-silent-error'] === '1';
     let message = tr('网络错误，请稍后重试。', 'Network error, please try again later.');
     const status = error?.response?.status as number | undefined;
-    const data = error?.response?.data as any | undefined;
+    const data = error?.response?.data as { code?: string; message?: string; details?: string } | undefined;
     const isCanceled = data?.code === 'ERR_CANCELED';
 
     if (data) {
@@ -170,9 +178,115 @@ client.interceptors.response.use(
   }
 )
 
+interface DataSyncComparePayload {
+  source_db_id: string;
+  target_db_id: string;
+  tables?: string[];
+  table_name?: string;
+  primary_key?: string;
+  mode?: string;
+  chunk_size?: number;
+  actions?: Record<string, string[]>;
+}
+
+interface DataSyncPreviewPayload {
+  source_db_id?: string;
+  target_db_id?: string;
+  table_name?: string;
+  primary_key?: string;
+  diffs?: RowData[];
+  job_id?: string;
+  compare_result?: unknown;
+  max_rows?: number;
+  actions?: string[];
+}
+
+interface DataSyncDeployPayload {
+  source_db_id?: string;
+  target_db_id?: string;
+  dml_statements?: string[];
+  job_id?: string;
+  preview_result?: unknown;
+  actions?: Record<string, string[]>;
+}
+
+interface ExportJobPayload {
+  table_name: string;
+  export_type: string;
+  db_id?: string;
+  where_clause?: string | null;
+  primary_key?: string | null;
+  pk_start?: string | null;
+  pk_end?: string | null;
+  window_limit?: number | null;
+  window_offset?: number | null;
+}
+
+interface GoLiveJobPayload {
+  dml: string;
+  db_id?: string;
+  compare_based?: boolean;
+}
+
+interface ImportJobPayload {
+  table_name: string;
+  data: RowData[];
+  mapping: Record<string, string>;
+  skip_errors: boolean;
+  db_id?: string;
+}
+
+interface ImportSqlJobPayload {
+  sql_content?: string;
+  sql?: string;
+  db_id?: string;
+  force?: boolean;
+}
+
+interface PerfSyncStartPayload {
+  source_db_id?: string;
+  target_db_id?: string;
+  tables?: string[];
+  primary_key?: string;
+  tier?: string;
+  chunk_size?: number;
+  max_rows?: number;
+  expected_rows?: Record<string, number>;
+  loadgen?: {
+    tier: string;
+    fill: boolean;
+    reset: boolean;
+    inject: boolean;
+    seed: number;
+    batch: number;
+  };
+}
+
+interface PerfSyncCheckPayload {
+  source_db_id?: string;
+  target_db_id?: string;
+  tables?: string[];
+  primary_key?: string;
+  tier?: string;
+}
+
+interface TransferConfigPayload {
+  source_type: string;
+  source_path?: string | null;
+  source_db_id?: string | null;
+  source_table?: string | null;
+  target_db_id?: string | null;
+  target_url?: string;
+  target_table?: string;
+  mode?: string;
+  mappings?: unknown[];
+  column_mapping?: Record<string, string>;
+  skip_errors?: boolean;
+}
+
 export const api = {
   getConfig: () => client.get('/config').then(res => res.data),
-  updateConfig: (config: any) => client.post('/config', config).then(res => res.data),
+  updateConfig: (config: ConfigData) => client.post('/config', config).then(res => res.data),
   dbTest: (payload: {
     host?: string
     port?: number
@@ -208,7 +322,7 @@ export const api = {
   },
   listPerfSuites: (limit?: number) =>
     client.get('/diagnostics/perf/suites', { params: { limit } }).then(res => res.data),
-  savePerfSuite: (suite: any) =>
+  savePerfSuite: (suite: Record<string, unknown>) =>
     client.post('/diagnostics/perf/suites', suite).then(res => res.data),
   getPerfSuite: (suiteId: string) =>
     client.get(`/diagnostics/perf/suites/${encodeURIComponent(suiteId)}`, {
@@ -223,13 +337,13 @@ export const api = {
       params: { limit, current_suite_id, baseline_suite_id },
       headers: { 'x-silent-error': '1' }
     }).then(res => res.data),
-  savePerfSuiteDiff: (report: any) =>
+  savePerfSuiteDiff: (report: Record<string, unknown>) =>
     client.post('/diagnostics/perf/suite-diffs', report).then(res => res.data),
   getSchema: (db_id?: string) => client.get('/schema', { params: { db_id } }).then(res => res.data),
   parseSchema: (sqlContent: string) => client.post('/schema/parse', { sql_content: sqlContent }).then(res => res.data),
-  chatToSql: (query: string, chatHistory?: any[], mode?: string, currentSql?: string) =>
+  chatToSql: (query: string, chatHistory?: ChatMessage[], mode?: string, currentSql?: string) =>
     client.post('/chat', { query, chat_history: chatHistory, mode, current_sql: currentSql }).then(res => res.data),
-  chatToSqlStream: async (query: string, chatHistory?: any[], mode?: string, currentSql?: string) => {
+  chatToSqlStream: async (query: string, chatHistory?: ChatMessage[], mode?: string, currentSql?: string, signal?: AbortSignal) => {
     const locale = getLocale()
     const response = await fetch('/backend/chat/stream', {
       method: 'POST',
@@ -239,6 +353,7 @@ export const api = {
         'x-locale': locale,
       },
       body: JSON.stringify({ query, chat_history: chatHistory, mode, current_sql: currentSql }),
+      signal,
     })
     if (!response.ok) {
       const text = await response.text().catch(() => '')
@@ -308,29 +423,29 @@ export const api = {
       httpRequest
     )
   },
-  previewDdl: (oldTable: any | null, newTable: any | null) =>
+  previewDdl: (oldTable: TableWithDetails | null, newTable: TableWithDetails | null) =>
     client.post('/table/ddl/preview', { old_table: oldTable, new_table: newTable }).then(res => res.data),
   executeDdl: (sql: string, db_id?: string) => 
     client.post('/table/ddl', { sql, db_id }).then(res => res.data),
-  crudInsert: (tableName: string, data: any, db_id?: string, transaction_id?: string) => 
+  crudInsert: (tableName: string, data: RowData, db_id?: string, transaction_id?: string) =>
     client.post('/crud/insert', { table_name: tableName, data, db_id, transaction_id }).then(res => res.data),
-  crudUpdate: (tableName: string, data: any, condition: Record<string, any>, db_id?: string, transaction_id?: string) => 
+  crudUpdate: (tableName: string, data: RowData, condition: RowData, db_id?: string, transaction_id?: string) =>
     client.post('/crud/update', { table_name: tableName, data, condition, db_id, transaction_id }).then(res => res.data),
-  crudDelete: (tableName: string, condition: Record<string, any>, db_id?: string, transaction_id?: string) => 
+  crudDelete: (tableName: string, condition: RowData, db_id?: string, transaction_id?: string) =>
     client.post('/crud/delete', { table_name: tableName, condition, db_id, transaction_id }).then(res => res.data),
   generateMockData: (tableName: string, rowCount: number, rules?: Record<string, string>) => 
     client.post('/tools/mock-data', { table_name: tableName, row_count: rowCount, rules }).then(res => res.data),
   exportData: (tableName: string, exportType: string) => 
     client.post('/tools/export', { table_name: tableName, export_type: exportType }, { responseType: 'text' }).then(res => res.data),
-  importData: (tableName: string, data: any[], mapping: Record<string, string>, skipErrors: boolean) => 
+  importData: (tableName: string, data: RowData[], mapping: Record<string, string>, skipErrors: boolean) =>
     client.post('/tools/import', { table_name: tableName, data, mapping, skip_errors: skipErrors }).then(res => res.data),
-  exportJobStart: (payload: any) =>
+  exportJobStart: (payload: ExportJobPayload) =>
     client.post('/tools/jobs/export/start', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
-  goLiveJobStart: (payload: any) =>
+  goLiveJobStart: (payload: GoLiveJobPayload) =>
     client.post('/tools/jobs/go-live/start', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
-  importJobStart: (payload: any) =>
+  importJobStart: (payload: ImportJobPayload) =>
     client.post('/tools/jobs/import/start', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
-  importSqlJobStart: (payload: any) =>
+  importSqlJobStart: (payload: ImportSqlJobPayload) =>
     client.post('/tools/jobs/import-sql/start', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
   toolJobStatus: (job_id: string) =>
     client.get(`/tools/jobs/${encodeURIComponent(job_id)}`, { headers: { 'x-silent-error': '1' }, timeout: JOB_POLL_REQUEST_TIMEOUT_MS }).then(res => res.data),
@@ -365,35 +480,36 @@ export const api = {
   // Data Sync API
   syncDataDiff: (table_name: string, source_db_id: string, target_db_id: string, primary_key: string) => 
     client.post('/tools/data-sync/diff', { table_name, source_db_id, target_db_id, primary_key }).then(res => res.data.diff),
-  syncDataDml: (diffs: any[], selections: Record<string, string[]>, primary_key: string) => 
+  syncDataDml: (diffs: RowData[], selections: Record<string, string[]>, primary_key: string) =>
     client.post('/tools/data-sync/dml', { diffs, selections, primary_key }).then(res => res.data.dml_statements),
-  dataSyncCompareStart: (payload: any) =>
+  dataSyncCompareStart: (payload: DataSyncComparePayload) =>
     client.post('/tools/data-sync/compare', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
-  dataSyncPreviewStart: (payload: any) =>
+  dataSyncPreviewStart: (payload: DataSyncPreviewPayload) =>
     client.post('/tools/data-sync/preview', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
-  dataSyncDeployStart: (payload: any) =>
+  dataSyncDeployStart: (payload: DataSyncDeployPayload) =>
     client.post('/tools/data-sync/deploy', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
   dataSyncJobStatus: async (job_id: string) => {
     try {
       return await client.get(`/tools/data-sync/jobs/${encodeURIComponent(job_id)}`, { headers: { 'x-silent-error': '1' }, timeout: JOB_POLL_REQUEST_TIMEOUT_MS }).then(res => res.data)
-    } catch (e: any) {
-      if (e?.response?.status === 404) {
+    } catch (e: unknown) {
+      const axiosError = e as { response?: { status?: number } }
+      if (axiosError?.response?.status === 404) {
         return await client.get(`/jobs/${encodeURIComponent(job_id)}`, { headers: { 'x-silent-error': '1' }, timeout: JOB_POLL_REQUEST_TIMEOUT_MS }).then(res => res.data)
       }
       throw e
     }
   },
   // Perf Sync API
-  perfSyncStart: (payload: any) =>
+  perfSyncStart: (payload: PerfSyncStartPayload) =>
     client.post('/tools/perf-sync/start', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
-  perfSyncCheck: (payload: any) =>
+  perfSyncCheck: (payload: PerfSyncCheckPayload) =>
     client.post('/tools/perf-sync/check', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
   perfSyncJobStatus: (job_id: string) =>
     client.get(`/tools/perf-sync/jobs/${encodeURIComponent(job_id)}`, { headers: { 'x-silent-error': '1' }, timeout: JOB_POLL_REQUEST_TIMEOUT_MS }).then(res => res.data),
   // Data Transfer API
   transferUpload: (formData: FormData) =>
     client.post('/tools/data-transfer/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } }).then(res => res.data),
-  transferExecute: (config: any) =>
+  transferExecute: (config: TransferConfigPayload) =>
     client.post('/tools/data-transfer/execute', config).then(res => res.data),
   // History
   getHistory: () => client.get('/sql/history').then(res => res.data),
@@ -418,7 +534,7 @@ export const api = {
   aiExplainError: (errorMsg: string, failedQuery: string) => client.post('/api/ai/explain_error', { error_msg: errorMsg, failed_query: failedQuery }).then(res => res.data),
   // AI Knowledge Base
   getKnowledge: (dbConnectionId?: string) => client.get('/api/ai/knowledge', { params: { db_connection_id: dbConnectionId } }).then(res => res.data),
-  addKnowledge: (knowledge: any) => client.post('/api/ai/knowledge', knowledge).then(res => res.data),
-  updateKnowledge: (knowledge: any) => client.put('/api/ai/knowledge', knowledge).then(res => res.data),
+  addKnowledge: (knowledge: Partial<KnowledgeItem>) => client.post('/api/ai/knowledge', knowledge).then(res => res.data),
+  updateKnowledge: (knowledge: Partial<KnowledgeItem>) => client.put('/api/ai/knowledge', knowledge).then(res => res.data),
   deleteKnowledge: (id: string | number) => client.post('/api/ai/knowledge/delete', { id }).then(res => res.data),
 }

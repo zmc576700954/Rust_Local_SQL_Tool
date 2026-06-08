@@ -16,11 +16,11 @@ const MAX_AMBIGUOUS_TABLES: usize = 3;
 const STRONG_TABLE_SIGNAL_SCORE: usize = 24;
 const AMBIGUITY_SCORE_GAP: usize = 8;
 
-struct TableSelection<'a> {
-    tables: Vec<&'a TableWithDetails>,
-    signal_strength: &'static str,
-    selection_warning: Option<String>,
-    ambiguous_candidates: Vec<String>,
+pub struct TableSelection<'a> {
+    pub tables: Vec<&'a TableWithDetails>,
+    pub signal_strength: &'static str,
+    pub selection_warning: Option<String>,
+    pub ambiguous_candidates: Vec<String>,
 }
 
 pub fn build_sql_generation_system_prompt(
@@ -210,7 +210,7 @@ fn summarize_table(table: &TableWithDetails) -> Value {
     })
 }
 
-fn select_relevant_table_selection<'a>(
+pub fn select_relevant_table_selection<'a>(
     schema: &'a SchemaResponse,
     user_request: &str,
     knowledge: &[Knowledge],
@@ -344,7 +344,7 @@ fn trim_text(input: &str, max_chars: usize) -> String {
     out
 }
 
-fn tokenize(input: &str) -> Vec<String> {
+pub fn tokenize(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let parts = input
         .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))

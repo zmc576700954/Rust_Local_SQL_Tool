@@ -99,7 +99,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
       }
       setDatabases(list)
       setSelectedDatabase(list.includes('mysql') ? 'mysql' : list[0])
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErrorObj(parseError(e))
     } finally {
       setIsLoading(false)
@@ -125,7 +125,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
           solution: '请确保您导出的 NCX 文件中包含至少一个有效的 MySQL 或 MariaDB 连接。'
         })
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErrorObj(parseError(e))
     } finally {
       setIsLoading(false)
@@ -157,7 +157,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
         : undefined
 
       const config = {
-        db_url: dbUrl,
+        db_url: dbUrl || '',
         ai_provider: aiProvider,
         ai_mode: aiMode,
         api_key: apiKey || undefined,
@@ -168,7 +168,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
       
       await api.updateConfig(config)
       onComplete()
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErrorObj(parseError(e))
     } finally {
       setIsLoading(false)

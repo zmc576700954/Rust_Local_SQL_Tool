@@ -65,10 +65,12 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
           setExportPollInterrupted(null);
           alive = false;
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (!alive) return;
-        setExportPollInterrupted({ job_id: exportJobId, message: e?.response?.data?.message || e?.message || String(e) });
-        toast('Failed to fetch job status: ' + (e?.message || ''), 'error');
+        const errResp = (e as { response?: { data?: { message?: string } } })?.response?.data;
+        const errMsg = e instanceof Error ? e.message : String(e);
+        setExportPollInterrupted({ job_id: exportJobId, message: errResp?.message || errMsg });
+        toast('Failed to fetch job status: ' + errMsg, 'error');
         setLoading(false);
         alive = false;
       }
@@ -129,8 +131,10 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
       } else {
         setResult('Coming soon: ' + type);
       }
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || e?.response?.data?.error || e?.message || String(e);
+    } catch (e: unknown) {
+      const errResp = (e as { response?: { data?: { message?: string; error?: string } } })?.response?.data;
+      const errMsg = e instanceof Error ? e.message : String(e);
+      const msg = errResp?.message || errResp?.error || errMsg;
       toast(`执行失败：${msg}`, 'error');
     } finally {
       if (!keepLoading) setLoading(false);
@@ -153,8 +157,8 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
     try {
       await api.toolJobCancel(exportJobId);
       toast('Job canceled', 'success');
-    } catch (e: any) {
-      toast('Failed to cancel job: ' + e.toString(), 'error');
+    } catch (e: unknown) {
+      toast('Failed to cancel job: ' + (e instanceof Error ? e.message : String(e)), 'error');
     } finally {
       setLoading(false);
     }

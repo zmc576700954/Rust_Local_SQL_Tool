@@ -60,8 +60,8 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
         const hasSaved = list.some((c: any) => String(c?.id || '') === savedConn);
         const defaultId = hasSaved ? savedConn : String(config?.active_db_id || list?.[0]?.id || '');
         setSelectedConnId(defaultId);
-      } catch (e: any) {
-        toast(tr('加载连接配置失败：', 'Failed to load config: ') + (e?.message || String(e)), 'error');
+      } catch (e: unknown) {
+        toast(tr('加载连接配置失败：', 'Failed to load config: ') + (e instanceof Error ? e.message : String(e)), 'error');
       } finally {
         setIsLoading(false);
       }
@@ -155,8 +155,8 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
       setConnections(Array.isArray(saved?.db_connections) ? saved.db_connections : []);
       toast(tr('权限与用户配置已保存。', 'Security profile saved.'), 'success');
       onCancel();
-    } catch (e: any) {
-      toast(tr('保存失败：', 'Failed to save: ') + (e?.message || String(e)), 'error');
+    } catch (e: unknown) {
+      toast(tr('保存失败：', 'Failed to save: ') + (e instanceof Error ? e.message : String(e)), 'error');
       throw e;
     } finally {
       setIsLoading(false);

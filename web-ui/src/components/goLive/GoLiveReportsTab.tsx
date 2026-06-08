@@ -82,7 +82,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
     try {
       const data = await api.goLiveReports(100)
       setRows(Array.isArray(data) ? data : [])
-    } catch (e: any) {
+    } catch (e: unknown) {
       const err = parseError(e)
       toast(tr('加载门禁报告失败：', 'Failed to load reports: ') + (err.message || String(e)), 'error')
     } finally {
@@ -102,7 +102,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
         setDetail(null)
         toast(tr('报告内容不是有效 JSON', 'Report is not valid JSON'), 'error')
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       const err = parseError(e)
       toast(tr('加载报告详情失败：', 'Failed to load report detail: ') + (err.message || String(e)), 'error')
       setDetail(null)
@@ -187,7 +187,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
         return
       }
       setCompareData({ a: a as any, b: b as any })
-    } catch (e: any) {
+    } catch (e: unknown) {
       const err = parseError(e)
       toast(tr('对比加载失败：', 'Comparison load failed: ') + (err.message || String(e)), 'error')
       setCompareData(null)

@@ -129,7 +129,7 @@ impl KnowledgeBase {
         }
     }
 
-    /// Retrieve knowledge relevant to the query
+    /// Retrieve knowledge relevant to the query (without scores)
     /// A simple keyword matching algorithm
     pub fn retrieve(
         &self,
@@ -137,11 +137,25 @@ impl KnowledgeBase {
         query: &str,
         limit: usize,
     ) -> Vec<Knowledge> {
+        self.retrieve_scored(db_connection_id, query, limit)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    /// Retrieve knowledge relevant to the query with relevance scores
+    /// Returns (Knowledge, score) pairs sorted by score descending
+    pub fn retrieve_scored(
+        &self,
+        db_connection_id: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> Vec<(Knowledge, f64)> {
         let query_lower = query.to_lowercase();
         // Extract words (simple splitting by whitespace)
         let keywords: Vec<&str> = query_lower.split_whitespace().collect();
 
-        let mut scored_items: Vec<(&Knowledge, usize)> = self
+        let mut scored_items: Vec<(Knowledge, f64)> = self
             .items
             .iter()
             .filter(|i| {
@@ -158,42 +172,38 @@ impl KnowledgeBase {
                 conn_match && is_valid_sql
             })
             .map(|item| {
-                let mut score = 0;
+                let mut score: f64 = 0.0;
                 let title_lower = item.title.to_lowercase();
                 let content_lower = item.content.to_lowercase();
                 let desc_lower = item.description.as_deref().unwrap_or("").to_lowercase();
 
                 for kw in &keywords {
                     if title_lower.contains(kw) {
-                        score += 3;
+                        score += 3.0;
                     }
                     if desc_lower.contains(kw) {
-                        score += 2;
+                        score += 2.0;
                     }
                     if content_lower.contains(kw) {
-                        score += 1;
+                        score += 1.0;
                     }
                 }
 
                 // If it's a DDL or Documentation, we might want to include it anyway if it's small,
                 // but let's stick to keyword scoring. We give a small base score to Documentation
                 // so it can be included if there's no better match.
-                if score == 0 && item.knowledge_type == KnowledgeType::Documentation {
-                    score = 1; // Base score to ensure some context if nothing matches
+                if score == 0.0 && item.knowledge_type == KnowledgeType::Documentation {
+                    score = 1.0; // Base score to ensure some context if nothing matches
                 }
 
-                (item, score)
+                (item.clone(), score)
             })
-            .filter(|(_, score)| *score > 0)
+            .filter(|(_, score)| *score > 0.0)
             .collect();
 
         // Sort by score descending
-        scored_items.sort_by(|a, b| b.1.cmp(&a.1));
+        scored_items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        scored_items
-            .into_iter()
-            .take(limit)
-            .map(|(i, _)| i.clone())
-            .collect()
+        scored_items.into_iter().take(limit).collect()
     }
 }

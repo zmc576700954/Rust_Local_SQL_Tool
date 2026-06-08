@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { tr } from '../i18n'
 
 export interface AgentStep {
-  type: 'thinking' | 'tool_call' | 'tool_result' | 'sql_draft' | 'final_sql' | 'explanation' | 'error'
+  type: 'thinking' | 'tool_call' | 'tool_result' | 'sql_draft' | 'final_sql' | 'explanation' | 'error' | 'token_usage'
   text?: string
   tool?: string
   args?: unknown
@@ -11,6 +11,9 @@ export interface AgentStep {
   sql?: string
   taskType?: string
   message?: string
+  promptTokens?: number
+  completionTokens?: number
+  totalTokens?: number
 }
 
 interface AgentProcessPanelProps {
@@ -132,6 +135,16 @@ function StepItem({ step }: { step: AgentStep }) {
           {step.text}
         </div>
       ) : null
+
+    case 'token_usage':
+      return (
+        <div className="flex items-center gap-2 text-xs text-neutral-400 dark:text-neutral-500">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-neutral-300 dark:bg-neutral-600" />
+          <span>
+            {tr('Token 消耗', 'Token usage')}: {step.promptTokens?.toLocaleString()} → {step.completionTokens?.toLocaleString()} = {step.totalTokens?.toLocaleString()}
+          </span>
+        </div>
+      )
 
     case 'error':
       return (

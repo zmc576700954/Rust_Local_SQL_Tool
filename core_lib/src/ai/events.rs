@@ -7,7 +7,12 @@ pub enum AgentEvent {
     #[serde(rename = "thinking")]
     Thinking { text: String },
     #[serde(rename = "tool_call")]
-    ToolCall { tool: String, args: serde_json::Value },
+    ToolCall {
+        tool: String,
+        args: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+    },
     #[serde(rename = "tool_result")]
     ToolResult {
         tool: String,
@@ -23,6 +28,12 @@ pub enum AgentEvent {
     Explanation { text: String },
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "token_usage")]
+    TokenUsage {
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        total_tokens: u64,
+    },
     #[serde(rename = "done")]
     Done,
 }
@@ -38,6 +49,7 @@ impl AgentEvent {
             Self::FinalSql { .. } => "final_sql",
             Self::Explanation { .. } => "explanation",
             Self::Error { .. } => "error",
+            Self::TokenUsage { .. } => "token_usage",
             Self::Done => "done",
         }
     }
@@ -46,12 +58,17 @@ impl AgentEvent {
     pub fn data_json(&self) -> serde_json::Value {
         match self {
             Self::Thinking { text } => json!({ "text": text }),
-            Self::ToolCall { tool, args } => json!({ "tool": tool, "args": args }),
+            Self::ToolCall { tool, args, call_id } => json!({ "tool": tool, "args": args, "call_id": call_id }),
             Self::ToolResult { tool, result, call_id } => json!({ "tool": tool, "result": result, "call_id": call_id }),
             Self::SqlDraft { sql } => json!({ "sql": sql }),
             Self::FinalSql { sql, task_type } => json!({ "sql": sql, "task_type": task_type }),
             Self::Explanation { text } => json!({ "text": text }),
             Self::Error { message } => json!({ "message": message }),
+            Self::TokenUsage { prompt_tokens, completion_tokens, total_tokens } => json!({
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            }),
             Self::Done => json!({}),
         }
     }
@@ -64,5 +81,16 @@ pub struct AgentResult {
     pub task_type: Option<String>,
     pub sql_empty_reason: Option<String>,
     pub missing_information: Vec<String>,
+    // Grounding metadata — mirrors StructuredSqlIntent
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grounding_evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_tables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_confirmation: Option<bool>,
     pub events: Vec<AgentEvent>,
 }

@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use core_lib::{
-    db::DbClient,
+    db::{capability::DbCapabilities, DbClient},
     error::AppError,
     mysql_sync::{CompareResult, MySqlDataSyncEngine, PreviewResult, SyncMode},
     timeout_policy::TimeoutPolicy,
@@ -80,6 +80,17 @@ pub async fn mysql_sync_compare(
                 "Database connection {} not found",
                 req.target_db_id
             )));
+        }
+        let source_conn = config
+            .db_connections
+            .iter()
+            .find(|c| c.id == req.source_db_id);
+        let db_type = source_conn
+            .and_then(|c| c.db_type.clone())
+            .unwrap_or(core_lib::config::DbType::MySQL);
+        let caps = DbCapabilities::runtime_capabilities(&db_type);
+        if let Err(e) = caps.check_capability("data_sync") {
+            return Err(AppError::BadRequest(e));
         }
     }
 
@@ -227,6 +238,21 @@ pub async fn mysql_sync_preview(
         .clone()
         .ok_or_else(|| AppError::BadRequest("compare not completed".to_string()))?;
 
+    {
+        let config = state.config.read().await;
+        let source_conn = config
+            .db_connections
+            .iter()
+            .find(|c| c.id == job.source_db_id);
+        let db_type = source_conn
+            .and_then(|c| c.db_type.clone())
+            .unwrap_or(core_lib::config::DbType::MySQL);
+        let caps = DbCapabilities::runtime_capabilities(&db_type);
+        if let Err(e) = caps.check_capability("data_sync") {
+            return Err(AppError::BadRequest(e));
+        }
+    }
+
     let state_clone = state.clone();
     let job_id_clone = req.job_id.clone();
     let max_rows = req.max_rows.unwrap_or(2000).max(1);
@@ -326,6 +352,21 @@ pub async fn mysql_sync_deploy(
         .preview
         .clone()
         .ok_or_else(|| AppError::BadRequest("preview not completed".to_string()))?;
+
+    {
+        let config = state.config.read().await;
+        let source_conn = config
+            .db_connections
+            .iter()
+            .find(|c| c.id == job.source_db_id);
+        let db_type = source_conn
+            .and_then(|c| c.db_type.clone())
+            .unwrap_or(core_lib::config::DbType::MySQL);
+        let caps = DbCapabilities::runtime_capabilities(&db_type);
+        if let Err(e) = caps.check_capability("data_sync") {
+            return Err(AppError::BadRequest(e));
+        }
+    }
 
     let is_read_only = {
         let config = state.config.read().await;

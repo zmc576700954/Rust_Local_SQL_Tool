@@ -51,6 +51,7 @@ export interface TableWithDetails {
 
 export interface ViewInfo {
   view_name: string;
+  table_name?: string;
 }
 
 export interface SchemaResponse {
@@ -59,9 +60,11 @@ export interface SchemaResponse {
   views: ViewInfo[];
 }
 
+export type RowData = Record<string, unknown>
+
 export interface QueryExecutionResult {
   columns?: string[];
-  rows: any[];
+  rows: RowData[];
   execution_time_ms?: number;
   row_count?: number;
   affected_rows?: number;
@@ -101,8 +104,8 @@ export interface QueryResultCompareReport {
   current_execution_time_ms?: number;
   compared_at: number;
   summary: QueryResultCompareSummary;
-  added_rows: any[];
-  removed_rows: any[];
+  added_rows: RowData[];
+  removed_rows: RowData[];
 }
 
 export interface QueryErrorInsight {
@@ -177,6 +180,33 @@ export interface ConfigData {
   db_url: string;
   active_db_id?: string;
   db_connections?: DbConnection[];
+  ai_provider?: string;
+  ai_mode?: string;
+  api_key_set?: boolean;
+  token_pool_set?: boolean;
+  model_name?: string;
+  ai_profiles?: Array<{
+    id: string;
+    name: string;
+    provider: string;
+    mode: string;
+    api_key?: string;
+    api_key_set?: boolean;
+    token_pool_set?: boolean;
+    relay_url?: string | null;
+    pool?: { tokens?: string[] };
+  }>;
+  active_ai_profile_id?: string;
+  ai_models?: Array<{
+    id: string;
+    provider: string;
+    display_name: string;
+    supports_tier: boolean;
+    max_context: number;
+    custom_tiers?: unknown[];
+  }>;
+  active_model_id?: string;
+  active_tier?: string;
   [key: string]: unknown;
 }
 
@@ -248,9 +278,9 @@ export interface DataDiff {
   insert_count: number
   update_count: number
   delete_count: number
-  inserts?: any[]
-  updates?: any[]
-  deletes?: any[]
+  inserts?: RowData[]
+  updates?: RowData[]
+  deletes?: RowData[]
 }
 
 export type JobStatus = 'idle' | 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
@@ -261,8 +291,8 @@ export interface DataSyncJobStatus {
   status: JobStatus
   progress?: number
   message?: string
-  result?: any
-  error?: any
+  result?: unknown
+  error?: unknown
 }
 
 export interface PerfSyncJobStatus {
@@ -270,8 +300,8 @@ export interface PerfSyncJobStatus {
   status: JobStatus
   progress?: number
   message?: string
-  result?: any
-  error?: any
+  result?: unknown
+  error?: unknown
 }
 
 export interface PerfSyncCheckResult {

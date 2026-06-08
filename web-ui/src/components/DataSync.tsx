@@ -47,8 +47,8 @@ export function DataSync({ onCancel }: DataSyncProps) {
         if (config.active_db_id) {
           setTargetDbId(config.active_db_id);
         }
-      } catch (e: any) {
-        toast(tr('加载数据库连接失败：', 'Failed to load db connections: ') + e.message, 'error');
+      } catch (e: unknown) {
+        toast(tr('加载数据库连接失败：', 'Failed to load db connections: ') + (e instanceof Error ? e.message : String(e)), 'error');
       }
     };
     fetchConfig();
@@ -220,7 +220,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
             {job.message && <div className="text-xs text-gray-400">{job.message}</div>}
           </div>
         )}
-        {job.status === 'failed' && job.error && (
+        {job.status === 'failed' && !!job.error && (
           <div className="mt-2 text-xs text-red-300 whitespace-pre-wrap">{String(job.error)}</div>
         )}
       </div>
@@ -266,7 +266,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
           toast('对比完成。', 'success');
         }
         return true;
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (isNotFound(e)) {
           const diffResult = await api.syncDataDiff(tableName, sourceDbId, targetDbId, primaryKey);
           applyDiffResult(diffResult);
@@ -276,8 +276,8 @@ export function DataSync({ onCancel }: DataSyncProps) {
         }
         throw e;
       }
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || e?.error?.message || e?.error_message || e?.message;
+    } catch (e: unknown) {
+      const msg = (e as any)?.response?.data?.message || (e as any)?.error?.message || (e as any)?.error_message || (e instanceof Error ? e.message : String(e));
       if (msg) {
         setErrorObj({ title: 'Compare 作业失败', message: String(msg) });
         toast('对比失败：' + String(msg), 'error');
@@ -342,7 +342,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
         setDml(String(sql));
         toast('预览生成完成。', 'success');
         return true;
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (isNotFound(e)) {
           const dmlResult = await api.syncDataDml(diffs as any[], safeSelections, primaryKey);
           setDml(dmlResult);
@@ -352,8 +352,8 @@ export function DataSync({ onCancel }: DataSyncProps) {
         }
         throw e;
       }
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || e?.error?.message || e?.error_message || e?.message;
+    } catch (e: unknown) {
+      const msg = (e as any)?.response?.data?.message || (e as any)?.error?.message || (e as any)?.error_message || (e instanceof Error ? e.message : String(e));
       if (msg) {
         setErrorObj({ title: 'Preview 作业失败', message: String(msg) });
         toast('预览生成失败：' + String(msg), 'error');
@@ -399,7 +399,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
         toast('部署完成，数据已同步。', 'success');
         onCancel();
         return;
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (isNotFound(e)) {
           await api.executeSql(dml, true, targetDbId);
           setDeployJob({ job_id: 'inline', phase: 'deploy', status: 'succeeded', progress: 100 });
@@ -409,8 +409,8 @@ export function DataSync({ onCancel }: DataSyncProps) {
         }
         throw e;
       }
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || e?.error?.message || e?.error_message || e?.message;
+    } catch (e: unknown) {
+      const msg = (e as any)?.response?.data?.message || (e as any)?.error?.message || (e as any)?.error_message || (e instanceof Error ? e.message : String(e));
       if (msg) {
         setErrorObj({ title: 'Deploy 作业失败', message: String(msg) });
         toast('部署失败：' + String(msg), 'error');

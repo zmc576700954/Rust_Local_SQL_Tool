@@ -36,8 +36,8 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
         if (config.active_db_id) {
           setTargetDbId(config.active_db_id);
         }
-      } catch (e: any) {
-        toast(tr('加载数据库连接失败：', 'Failed to load db connections: ') + e.message, 'error');
+      } catch (e: unknown) {
+        toast(tr('加载数据库连接失败：', 'Failed to load db connections: ') + (e instanceof Error ? e.message : String(e)), 'error');
       }
     };
     fetchConfig();
@@ -58,8 +58,8 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
         .map((t: any) => t.table_name);
       setSelectedTables(defaultSelected);
       return true;
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || e?.message || '';
+    } catch (e: unknown) {
+      const msg = (e as any)?.response?.data?.message || (e instanceof Error ? e.message : '') || '';
       toast(tr('对比失败：', 'Failed to compare: ') + msg, 'error');
       return false;
     } finally {
@@ -73,8 +73,8 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
       const ddlResult = await api.syncSchemaDdl(sourceDbId, targetDbId, selectedTables);
       setDdl(ddlResult);
       return true;
-    } catch (e: any) {
-      toast(tr('生成 DDL 失败：', 'Failed to generate DDL: ') + e.message, 'error');
+    } catch (e: unknown) {
+      toast(tr('生成 DDL 失败：', 'Failed to generate DDL: ') + (e instanceof Error ? e.message : String(e)), 'error');
       return false;
     } finally {
       setIsLoading(false);
@@ -90,8 +90,8 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
       await api.executeDdl(ddl, targetDbId);
       toast(tr('结构同步成功', 'Schema synced successfully'), 'success');
       onCancel();
-    } catch (e: any) {
-      toast(tr('执行 DDL 失败：', 'Failed to execute DDL: ') + e.message, 'error');
+    } catch (e: unknown) {
+      toast(tr('执行 DDL 失败：', 'Failed to execute DDL: ') + (e instanceof Error ? e.message : String(e)), 'error');
       throw e;
     }
   };

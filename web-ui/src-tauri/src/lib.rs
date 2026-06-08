@@ -336,7 +336,7 @@ fn is_desktop_direct_supported(conn: &DbConnection) -> bool {
     let db_type = conn
         .db_type
         .clone()
-        .unwrap_or_else(|| DbType::from_url(&conn.url));
+        .unwrap_or_else(|| DbType::from_url(&conn.url).unwrap_or(DbType::MySQL));
     matches!(db_type, DbType::MySQL | DbType::MariaDB) && conn.ssh.is_none() && conn.ssl.is_none()
 }
 
@@ -365,7 +365,7 @@ async fn resolve_connection(db_id: Option<&str>) -> Result<ResolvedConnection, S
         .get_active_db_url()
         .ok_or_else(|| "Database not connected".to_string())?;
 
-    if !matches!(DbType::from_url(&url), DbType::MySQL | DbType::MariaDB) {
+    if !matches!(DbType::from_url(&url), Some(DbType::MySQL | DbType::MariaDB)) {
         return Err(fallback_required("unsupported_connection"));
     }
 

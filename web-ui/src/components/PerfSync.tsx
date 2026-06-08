@@ -57,8 +57,8 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
         setTier('1m')
         const savedJobId = window.localStorage.getItem('perf-sync:lastJobId') || ''
         if (savedJobId) setResumeJobId(savedJobId)
-      } catch (e: any) {
-        toast('加载配置失败：' + (e?.message || String(e)), 'error')
+      } catch (e: unknown) {
+        toast('加载配置失败：' + (e instanceof Error ? e.message : String(e)), 'error')
       }
     }
     fetchConfig()
@@ -158,10 +158,10 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
           toast('同步压测失败：' + err, 'error')
           return
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         stopPolling()
         setIsLoading(false)
-        if (e?.response?.status === 404) {
+        if ((e as any)?.response?.status === 404) {
           setErrorObj({ title: 'Job 不存在', message: `job_id=${id}` })
           toast('Job 不存在：' + id, 'error')
           return
@@ -229,7 +229,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
       }
       setCheckResult(normalized)
       return normalized
-    } catch (e: any) {
+    } catch (e: unknown) {
       const err = parseError(e)
       setErrorObj({ title: err.title || '检测失败', message: err.message || String(e) })
       toast('检测失败：' + (err.message || String(e)), 'error')
@@ -280,7 +280,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
       if (!nextJobId) throw new Error('Missing job_id')
       setJob({ job_id: nextJobId, status: 'queued', progress: 0 })
       startPolling(nextJobId)
-    } catch (e: any) {
+    } catch (e: unknown) {
       const err = parseError(e)
       setErrorObj({ title: err.title || '同步压测失败', message: err.message || String(e) })
       toast('同步压测失败：' + (err.message || String(e)), 'error')
@@ -321,7 +321,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
       setJob({ job_id: nextJobId, status: 'queued', progress: 0 })
       setConfirmFill(null)
       startPolling(nextJobId)
-    } catch (e: any) {
+    } catch (e: unknown) {
       const err = parseError(e)
       setErrorObj({ title: err.title || '同步压测失败', message: err.message || String(e) })
       toast('同步压测失败：' + (err.message || String(e)), 'error')
@@ -360,7 +360,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
             {job.message && <div className="text-xs text-gray-400">{job.message}</div>}
           </div>
         )}
-        {job.status === 'failed' && job.error && (
+        {job.status === 'failed' && !!job.error && (
           <div className="mt-2 text-xs text-red-300 whitespace-pre-wrap">{String(job.error)}</div>
         )}
       </div>

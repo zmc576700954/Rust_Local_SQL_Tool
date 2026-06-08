@@ -27,4 +27,5 @@ pub use sql::offline_parser;
 pub use sql::template as template;
 pub use sql::util as sql_util;
 pub use sync::mysql_engine as mysql_sync;
+pub use sync::mysql_engine as data_sync;
 pub use sync::transfer;

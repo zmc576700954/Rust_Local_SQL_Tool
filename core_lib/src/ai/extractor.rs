@@ -12,6 +12,17 @@ pub struct StructuredSqlIntent {
     pub sql_empty_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_information: Vec<String>,
+    // Grounding metadata — aligns with prompt output_schema constraints
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grounding_evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_tables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_confirmation: Option<bool>,
 }
 
 /// Pipeline extractor for SQL intent.
@@ -32,6 +43,11 @@ pub fn extract_sql_intent(response_text: &str) -> StructuredSqlIntent {
             task_type: None,
             sql_empty_reason: None,
             missing_information: Vec::new(),
+            grounding_evidence: Vec::new(),
+            assumptions: Vec::new(),
+            referenced_tables: Vec::new(),
+            risk_level: None,
+            needs_confirmation: None,
         };
     }
 
@@ -60,6 +76,11 @@ pub fn extract_sql_intent(response_text: &str) -> StructuredSqlIntent {
         task_type: None,
         sql_empty_reason: None,
         missing_information: Vec::new(),
+        grounding_evidence: Vec::new(),
+        assumptions: Vec::new(),
+        referenced_tables: Vec::new(),
+        risk_level: None,
+        needs_confirmation: None,
     }
 }
 
@@ -94,6 +115,49 @@ fn parse_intent_json(text: &str) -> Option<StructuredSqlIntent> {
         })
         .unwrap_or_default();
 
+    let grounding_evidence = v
+        .get("grounding_evidence")
+        .and_then(|x| x.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let assumptions = v
+        .get("assumptions")
+        .and_then(|x| x.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let referenced_tables = v
+        .get("referenced_tables")
+        .and_then(|x| x.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let risk_level = v
+        .get("risk_level")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+
+    let needs_confirmation = v
+        .get("needs_confirmation")
+        .and_then(|x| x.as_bool());
+
     let mut sql_final = sql.to_string();
     if sql_final.trim().is_empty() {
         if let Some(cmd) = &command {
@@ -112,6 +176,11 @@ fn parse_intent_json(text: &str) -> Option<StructuredSqlIntent> {
         task_type,
         sql_empty_reason,
         missing_information,
+        grounding_evidence,
+        assumptions,
+        referenced_tables,
+        risk_level,
+        needs_confirmation,
     })
 }
 

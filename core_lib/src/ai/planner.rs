@@ -18,6 +18,31 @@ pub struct IntentResult {
     pub sql_empty_reason: Option<String>,
     pub missing_information: Vec<String>,
     pub matched_rule_id: Option<String>,
+    // Grounding metadata — mirrors StructuredSqlIntent
+    pub grounding_evidence: Vec<String>,
+    pub assumptions: Vec<String>,
+    pub referenced_tables: Vec<String>,
+    pub risk_level: Option<String>,
+    pub needs_confirmation: Option<bool>,
+}
+
+impl IntentResult {
+    /// Convert a StructuredSqlIntent (from extractor) into an IntentResult with no matched rule.
+    pub fn from_intent(intent: crate::ai::extractor::StructuredSqlIntent) -> Self {
+        Self {
+            sql: intent.sql,
+            explanation: intent.explanation,
+            task_type: intent.task_type,
+            sql_empty_reason: intent.sql_empty_reason,
+            missing_information: intent.missing_information,
+            matched_rule_id: None,
+            grounding_evidence: intent.grounding_evidence,
+            assumptions: intent.assumptions,
+            referenced_tables: intent.referenced_tables,
+            risk_level: intent.risk_level,
+            needs_confirmation: intent.needs_confirmation,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -148,6 +173,11 @@ Return JSON object only.",
                             sql_empty_reason: None,
                             missing_information: Vec::new(),
                             matched_rule_id: Some(rule.id.clone()),
+                            grounding_evidence: Vec::new(),
+                            assumptions: Vec::new(),
+                            referenced_tables: Vec::new(),
+                            risk_level: None,
+                            needs_confirmation: None,
                         });
                     }
 
@@ -173,6 +203,11 @@ Return JSON object only.",
                                 sql_empty_reason: None,
                                 missing_information: Vec::new(),
                                 matched_rule_id: Some(rule.id.clone()),
+                                grounding_evidence: Vec::new(),
+                                assumptions: Vec::new(),
+                                referenced_tables: Vec::new(),
+                                risk_level: None,
+                                needs_confirmation: None,
                             });
                         }
                         Err(e) => {
@@ -193,6 +228,11 @@ Return JSON object only.",
                         sql_empty_reason: None,
                         missing_information: Vec::new(),
                         matched_rule_id: Some(rule.id.clone()),
+                        grounding_evidence: Vec::new(),
+                        assumptions: Vec::new(),
+                        referenced_tables: Vec::new(),
+                        risk_level: None,
+                        needs_confirmation: None,
                     });
                 }
 
@@ -206,6 +246,11 @@ Return JSON object only.",
                     sql_empty_reason: None,
                     missing_information: Vec::new(),
                     matched_rule_id: Some(rule.id.clone()),
+                    grounding_evidence: Vec::new(),
+                    assumptions: Vec::new(),
+                    referenced_tables: Vec::new(),
+                    risk_level: None,
+                    needs_confirmation: None,
                 })
             }
             MatchResult::SuggestionMatch { .. } => None,
@@ -256,16 +301,11 @@ Return JSON object only.",
         };
         let intent = crate::ai::extractor::extract_sql_intent(&response_text);
 
-        Ok(IntentResult {
-            sql: intent.sql,
-            explanation: intent
-                .explanation
-                .or(Some("Generated using offline schema".to_string())),
-            task_type: intent.task_type,
-            sql_empty_reason: intent.sql_empty_reason,
-            missing_information: intent.missing_information,
-            matched_rule_id: None,
-        })
+        let mut result = IntentResult::from_intent(intent);
+        result.explanation = result
+            .explanation
+            .or(Some("Generated using offline schema".to_string()));
+        Ok(result)
     }
 
     pub async fn generate_sql_no_schema(
@@ -311,16 +351,11 @@ Return JSON object only.",
 
         let intent = crate::ai::extractor::extract_sql_intent(&response_text);
 
-        Ok(IntentResult {
-            sql: intent.sql,
-            explanation: intent
-                .explanation
-                .or(Some("Generated without schema context".to_string())),
-            task_type: intent.task_type,
-            sql_empty_reason: intent.sql_empty_reason,
-            missing_information: intent.missing_information,
-            matched_rule_id: None,
-        })
+        let mut result = IntentResult::from_intent(intent);
+        result.explanation = result
+            .explanation
+            .or(Some("Generated without schema context".to_string()));
+        Ok(result)
     }
 
     /// 1. Fetch schema context
@@ -396,14 +431,7 @@ Return JSON object only.",
         // Step 5: Extract SQL Intent using the multi-level fault-tolerant pipeline
         let intent = crate::ai::extractor::extract_sql_intent(&response_text);
 
-        Ok(IntentResult {
-            sql: intent.sql,
-            explanation: intent.explanation,
-            task_type: intent.task_type,
-            sql_empty_reason: intent.sql_empty_reason,
-            missing_information: intent.missing_information,
-            matched_rule_id: None,
-        })
+        Ok(IntentResult::from_intent(intent))
     }
 }
 

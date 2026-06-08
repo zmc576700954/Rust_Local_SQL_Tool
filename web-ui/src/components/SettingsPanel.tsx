@@ -944,8 +944,8 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
                           const existingIds = (config?.ai_models || []).map((m: any) => m.id)
                           setFetchedModels(models.map((id: string) => ({ id, added: existingIds.includes(id) })))
                           toast(`成功获取 ${models.length} 个模型`, 'success')
-                        } catch (e: any) {
-                          toast('获取模型失败：' + e.message, 'error')
+                        } catch (e: unknown) {
+                          toast('获取模型失败：' + (e instanceof Error ? e.message : String(e)), 'error')
                         } finally {
                           setIsFetchingModels(false)
                         }
@@ -969,8 +969,8 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
                               try {
                                 parsedTiers = JSON.parse(customTiersJson);
                                 if (!Array.isArray(parsedTiers)) throw new Error('必须是 JSON 数组');
-                              } catch (err: any) {
-                                toast('自定义 Tiers JSON 格式错误: ' + err.message, 'error');
+                              } catch (err: unknown) {
+                                toast('自定义 Tiers JSON 格式错误: ' + (err instanceof Error ? err.message : String(err)), 'error');
                                 return;
                               }
                             }
@@ -1000,8 +1000,8 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
                             try {
                               parsedTiers = JSON.parse(customTiersJson);
                               if (!Array.isArray(parsedTiers)) throw new Error('必须是 JSON 数组');
-                            } catch (err: any) {
-                              toast('自定义 Tiers JSON 格式错误: ' + err.message, 'error');
+                            } catch (err: unknown) {
+                              toast('自定义 Tiers JSON 格式错误: ' + (err instanceof Error ? err.message : String(err)), 'error');
                               return;
                             }
                           }

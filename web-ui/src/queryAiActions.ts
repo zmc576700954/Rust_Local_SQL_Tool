@@ -1,4 +1,5 @@
 import { api } from './api'
+import type { ChatMessage } from './api'
 import type { ToastType } from './components/Toast'
 import type { AgentStep } from './components/AgentProcessPanel'
 import type { QueryErrorInsight } from './types'
@@ -7,7 +8,7 @@ import type { AppError } from './utils'
 
 type ToastFn = (message: string, type?: ToastType) => void
 
-type QueryAiHistoryItem = Record<string, unknown>
+type QueryAiHistoryItem = ChatMessage
 
 type QueryAiTabState = {
   query: string
@@ -26,6 +27,7 @@ type QueryAiTabPatch = {
   query?: string
   chatHistory?: QueryAiHistoryItem[]
   agentSteps?: AgentStep[]
+  abortController?: AbortController | null
 }
 
 type UpdateQueryAiTabState = (patch: QueryAiTabPatch) => void
@@ -239,13 +241,22 @@ export async function runGenerateSqlStream(params: {
   const q = overrideQuery || activeTabState.query
   if (!q.trim()) return
 
+  // Create an AbortController for cancellation support
+  const abortController = new AbortController()
+
   const steps: AgentStep[] = []
-  updateActiveTabState({ isGenerating: true, errorObj: null, lastExplanation: null, agentSteps: [] })
+  updateActiveTabState({
+    isGenerating: true,
+    errorObj: null,
+    lastExplanation: null,
+    agentSteps: [],
+    abortController,
+  })
 
   try {
     const chatHistory = Array.isArray(activeTabState.chatHistory) ? activeTabState.chatHistory : []
     const historyToPass = chatHistory.slice(-5).filter(msg => msg && Object.keys(msg).length > 0)
-    const body = await api.chatToSqlStream(q, historyToPass)
+    const body = await api.chatToSqlStream(q, historyToPass, undefined, undefined, abortController.signal)
     if (!body) throw new Error('No response body')
 
     const reader = body.getReader()
@@ -293,7 +304,7 @@ export async function runGenerateSqlStream(params: {
               flushStep('thinking', { text: data.text })
               break
             case 'tool_call':
-              flushStep('tool_call', { tool: data.tool, args: data.args })
+              flushStep('tool_call', { tool: data.tool, args: data.args, callId: data.call_id })
               break
             case 'tool_result':
               flushStep('tool_result', { tool: data.tool, result: data.result, callId: data.call_id })
@@ -311,6 +322,9 @@ export async function runGenerateSqlStream(params: {
               break
             case 'error':
               flushStep('error', { message: data.message })
+              break
+            case 'token_usage':
+              flushStep('token_usage', { promptTokens: data.prompt_tokens, completionTokens: data.completion_tokens, totalTokens: data.total_tokens })
               break
             case 'done':
               // Stream complete
@@ -344,6 +358,13 @@ export async function runGenerateSqlStream(params: {
       setTimeout(() => setShowOnboarding(true), 1500)
     }
   } finally {
-    updateActiveTabState({ isGenerating: false })
+    updateActiveTabState({ isGenerating: false, abortController: null })
+  }
+}
+
+/** Cancel an in-progress Agent stream by aborting the fetch request */
+export function cancelAgentStream(abortController: AbortController | null) {
+  if (abortController && !abortController.signal.aborted) {
+    abortController.abort()
   }
 }

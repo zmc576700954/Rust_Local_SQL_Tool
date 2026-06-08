@@ -275,15 +275,15 @@ function App() {
   }, [getActiveAiProfile])
 
   const resolveActiveModelId = useMemo(() => {
-    return aiModelsData?.active_model_id || (configData as any)?.active_model_id || (configData as any)?.model_name || ''
+    return aiModelsData?.active_model_id || configData?.active_model_id || configData?.model_name || ''
   }, [aiModelsData, configData])
 
   const resolveActiveTier = useMemo(() => {
-    return aiModelsData?.active_tier || (configData as any)?.active_tier || 'balanced'
+    return aiModelsData?.active_tier || configData?.active_tier || 'balanced'
   }, [aiModelsData, configData])
 
   const resolveModelsList = useMemo(() => {
-    const list = aiModelsData?.models || (configData as any)?.ai_models
+    const list = aiModelsData?.models || configData?.ai_models
     return Array.isArray(list) ? list : []
   }, [aiModelsData, configData])
 
@@ -294,12 +294,12 @@ function App() {
   }, [resolveActiveModelId, resolveModelsList])
 
   const resolveProfilesList = useMemo(() => {
-    const list = (configData as any)?.ai_profiles
+    const list = configData?.ai_profiles
     return Array.isArray(list) ? list : []
   }, [configData])
 
   const resolveActiveProfileId = useMemo(() => {
-    return (configData as any)?.active_ai_profile_id || ''
+    return configData?.active_ai_profile_id || ''
   }, [configData])
 
   useEffect(() => {
@@ -480,7 +480,7 @@ function App() {
       const activeConn = config.active_db_id ? config.db_connections?.find((c: DbConnection) => c.id === config.active_db_id) : null
       const dbUrl = activeConn ? activeConn.url : config.db_url
       const urlToUse = dbUrl || ''
-      if ((activeConn as any)?.db_type) {
+      if (activeConn?.db_type) {
         setDbType(dbTypeDisplayName((activeConn as any).db_type))
       } else if (urlToUse.startsWith('postgres://') || urlToUse.startsWith('postgresql://')) {
         setDbType('PostgreSQL')
@@ -525,7 +525,7 @@ function App() {
       const activeConn = config.active_db_id ? config.db_connections?.find((c: DbConnection) => c.id === config.active_db_id) : null
       const dbUrl = activeConn ? activeConn.url : config.db_url
       const urlToUse = dbUrl || ''
-      if ((activeConn as any)?.db_type) {
+      if (activeConn?.db_type) {
         setDbType(dbTypeDisplayName((activeConn as any).db_type))
       } else if (urlToUse.startsWith('postgres://') || urlToUse.startsWith('postgresql://')) {
         setDbType('PostgreSQL')
@@ -548,7 +548,7 @@ function App() {
     if (!configData) return
     setIsAiSwitching(true)
     try {
-      await api.updateConfig({ ...(configData as any), ...patch })
+      await api.updateConfig({ ...configData, ...patch })
       await refreshConfigOnly()
       toast(successMsg, 'success')
     } catch (e: unknown) {
@@ -748,7 +748,7 @@ function App() {
     if (dbId === String(configData.active_db_id || '')) return
     try {
       await api.updateConfig({ ...configData, active_db_id: dbId })
-      const selectedDb = (configData as any)?.db_connections?.find((c: DbConnection) => c.id === dbId)
+      const selectedDb = configData?.db_connections?.find((c: DbConnection) => c.id === dbId)
       const dbName = selectedDb ? (selectedDb.name || selectedDb.id) : dbId
       await initData()
       toast(`已切换至 ${dbName} 库`, "success")
@@ -775,9 +775,9 @@ function App() {
         ssl: { enabled: false, mode: 'preferred' },
         is_read_only: false
       }
-      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const list = Array.isArray(configData!.db_connections) ? [...(configData!.db_connections as DbConnection[])] : []
       list.push(newConn)
-      await api.updateConfig({ ...(configData as any), db_connections: list, active_db_id: newConn.id })
+      await api.updateConfig({ ...configData, db_connections: list, active_db_id: newConn.id })
       await initData()
       toast('New connection added.', 'success')
     } catch (e: unknown) {
@@ -788,11 +788,11 @@ function App() {
   const updateConnectionFromSidebar = useCallback(async (connId: string, patch: Record<string, unknown>) => {
     if (!configData) return
     try {
-      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const list = Array.isArray(configData!.db_connections) ? [...(configData!.db_connections as DbConnection[])] : []
       const idx = list.findIndex((c: any) => c.id === connId)
       if (idx < 0) return
       list[idx] = { ...list[idx], ...patch }
-      await api.updateConfig({ ...(configData as any), db_connections: list })
+      await api.updateConfig({ ...configData, db_connections: list })
       await refreshConfigOnly()
       toast(tr('连接已更新', 'Connection updated.'), 'success')
     } catch (e: unknown) {
@@ -802,17 +802,17 @@ function App() {
 
   const deleteConnectionFromSidebar = useCallback(async (dbId: string) => {
     if (!configData) return
-    const currentList = Array.isArray((configData as any).db_connections) ? ((configData as any).db_connections as any[]) : []
+    const currentList = Array.isArray(configData!.db_connections) ? (configData!.db_connections as DbConnection[]) : []
     const target = currentList.find((c: any) => c.id === dbId)
     const label = target?.name || target?.id || dbId
     if (!window.confirm(`Are you sure you want to delete the database connection "${label}"?`)) return
     try {
       const list = currentList.filter((c: any) => c.id !== dbId)
-      let nextActiveId: any = (configData as any).active_db_id
+      let nextActiveId: string | null = configData!.active_db_id ?? null
       if (String(nextActiveId || '') === dbId) {
         nextActiveId = list.length > 0 ? list[0].id : null
       }
-      await api.updateConfig({ ...(configData as any), db_connections: list, active_db_id: nextActiveId })
+      await api.updateConfig({ ...configData, db_connections: list, active_db_id: nextActiveId ?? undefined })
       await initData()
       toast('Connection deleted.', 'success')
     } catch (e: unknown) {
@@ -823,7 +823,7 @@ function App() {
   const duplicateConnectionFromSidebar = useCallback(async (dbId: string) => {
     if (!configData) return
     try {
-      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const list = Array.isArray(configData!.db_connections) ? [...(configData!.db_connections as DbConnection[])] : []
       const target = list.find((c: any) => c.id === dbId)
       if (!target) return
       const copy = {
@@ -832,7 +832,7 @@ function App() {
         name: `${String(target.name || target.id)} Copy`,
       }
       list.push(copy)
-      await api.updateConfig({ ...(configData as any), db_connections: list })
+      await api.updateConfig({ ...configData, db_connections: list })
       await refreshConfigOnly()
       toast(tr('连接已复制', 'Connection duplicated.'), 'success')
     } catch (e: unknown) {
@@ -842,9 +842,9 @@ function App() {
 
   const disconnectConnectionFromSidebar = useCallback(async (dbId: string) => {
     if (!configData) return
-    if (String((configData as any).active_db_id || '') !== dbId) return
+    if (String(configData!.active_db_id || '') !== dbId) return
     try {
-      await api.updateConfig({ ...(configData as any), active_db_id: null })
+      await api.updateConfig({ ...configData, active_db_id: undefined })
       await initData()
       toast(tr('连接已断开', 'Connection disconnected.'), 'success')
     } catch (e: unknown) {
@@ -858,13 +858,13 @@ function App() {
     const trimmedNew = newGroup.trim()
     if (!trimmedOld || !trimmedNew) return
     try {
-      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const list = Array.isArray(configData!.db_connections) ? [...(configData!.db_connections as DbConnection[])] : []
       const mapped = list.map((c: any) => {
         const g = String(c.group_name || tr('未分组', 'Ungrouped'))
         if (g === trimmedOld) return { ...c, group_name: trimmedNew }
         return c
       })
-      await api.updateConfig({ ...(configData as any), db_connections: mapped })
+      await api.updateConfig({ ...configData, db_connections: mapped })
       await refreshConfigOnly()
       toast(tr('分组已重命名', 'Group renamed.'), 'success')
     } catch (e: unknown) {
@@ -877,13 +877,13 @@ function App() {
     const trimmed = groupName.trim()
     if (!trimmed || trimmed === tr('未分组', 'Ungrouped')) return
     try {
-      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const list = Array.isArray(configData!.db_connections) ? [...(configData!.db_connections as DbConnection[])] : []
       const mapped = list.map((c: any) => {
         const g = String(c.group_name || tr('未分组', 'Ungrouped'))
         if (g === trimmed) return { ...c, group_name: null }
         return c
       })
-      await api.updateConfig({ ...(configData as any), db_connections: mapped })
+      await api.updateConfig({ ...configData, db_connections: mapped })
       await refreshConfigOnly()
       toast(tr('分组已清空', 'Group cleared.'), 'success')
     } catch (e: unknown) {
@@ -895,13 +895,13 @@ function App() {
     if (!configData || connIds.length === 0) return
     try {
       const set = new Set(connIds)
-      const list = Array.isArray((configData as any).db_connections) ? [...((configData as any).db_connections as any[])] : []
+      const list = Array.isArray(configData!.db_connections) ? [...(configData!.db_connections as DbConnection[])] : []
       const mapped = list.map((c: any) => (
         set.has(String(c.id))
           ? { ...c, group_name: groupName && groupName.trim() ? groupName.trim() : null }
           : c
       ))
-      await api.updateConfig({ ...(configData as any), db_connections: mapped })
+      await api.updateConfig({ ...configData, db_connections: mapped })
       await refreshConfigOnly()
       toast(tr('批量移动完成', 'Batch move completed.'), 'success')
     } catch (e: unknown) {
@@ -1858,7 +1858,7 @@ function App() {
           </button>
         </div>
 
-        {sidebarTab === 'schema' ? (
+        {sidebarTab === 'schema' && configData ? (
           <DbExplorerSidebar
             configData={configData}
             schemaData={schemaData}
@@ -2138,7 +2138,7 @@ function App() {
                       onDownloadSql={downloadSql}
                       resolveActiveModelLabel={resolveActiveModelLabel}
                       resolveActiveTier={resolveActiveTier}
-                      aiMode={(configData as any)?.ai_mode}
+                      aiMode={configData?.ai_mode}
                       queryChunkSize={QUERY_CHUNK_SIZE}
                     />
                   </div>

@@ -1,6 +1,6 @@
 use crate::config::{AiConnectionMode, AiModel, AiProvider, AppConfig, ResolvedAiProfile};
 use crate::timeout_policy::TimeoutPolicy;
-use reqwest::{Client, Error as ReqwestError, StatusCode};
+use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,15 +11,78 @@ use tokio::time::{sleep, Instant};
 
 pub use crate::ai::types::{AiError, AiHealthReport, ChatMessage};
 
-type TierParams = (
-    Option<f32>,
-    u32,
-    Option<String>,
-    Option<String>,
-    Option<u32>,
-    Option<String>,
-    Duration,
-);
+#[derive(Debug, Clone)]
+struct TierParams {
+    temperature: Option<f32>,
+    max_tokens: u32,
+    reasoning_effort: Option<String>,
+    thinking_type: Option<String>,
+    thinking_budget_tokens: Option<u32>,
+    thinking_display: Option<String>,
+    request_timeout: Duration,
+}
+
+#[derive(Clone)]
+struct ChatCompletionRequest {
+    profile: ResolvedAiProfile,
+    model_id: String,
+    tier: String,
+    messages: Vec<ChatMessage>,
+    json_mode: bool,
+    max_tokens_override: Option<u32>,
+    strip_optional: bool,
+}
+
+/// Validate that an AI endpoint URL is safe to connect to.
+/// Blocks SSRF attacks by rejecting private/internal network addresses
+/// and non-HTTP schemes.
+fn validate_ai_url(url: &str) -> Result<(), AiError> {
+    let parsed = url::Url::parse(url).map_err(|e| {
+        AiError::ApiError(format!("Invalid URL: {}", e))
+    })?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(AiError::ApiError(format!(
+                "Unsupported URL scheme: {} (only http/https allowed)",
+                parsed.scheme()
+            )))
+        }
+    }
+
+    if let Some(host) = parsed.host_str() {
+        // Check for localhost hostname
+        if host == "localhost" {
+            return Err(AiError::ApiError(
+                "SSRF protection: requests to localhost are blocked".into(),
+            ));
+        }
+
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            match ip {
+                std::net::IpAddr::V4(v4) => {
+                    if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+                        return Err(AiError::ApiError(
+                            "SSRF protection: requests to private/internal network addresses are blocked"
+                                .into(),
+                        ));
+                    }
+                }
+                std::net::IpAddr::V6(v6) => {
+                    if v6.is_loopback() || v6.is_unicast_link_local() {
+                        return Err(AiError::ApiError(
+                            "SSRF protection: requests to private/internal IPv6 addresses are blocked"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 struct TokenState {
@@ -33,6 +96,7 @@ pub struct AiGateway {
     client: Client,
     current_token_idx: Arc<AtomicUsize>,
     token_state: Arc<RwLock<HashMap<String, TokenState>>>,
+    ssrf_check_enabled: bool,
 }
 
 impl AiGateway {
@@ -49,6 +113,7 @@ impl AiGateway {
             client,
             current_token_idx: Arc::new(AtomicUsize::new(0)),
             token_state: Arc::new(RwLock::new(HashMap::new())),
+            ssrf_check_enabled: !cfg!(test),
         }
     }
 
@@ -75,12 +140,20 @@ impl AiGateway {
         api_key: String,
         base_url: Option<String>,
     ) -> Result<Vec<String>, AiError> {
+        if api_key.trim().is_empty() {
+            return Err(AiError::Auth("API key is not configured".into()));
+        }
+
         let chat_url = base_url.unwrap_or_else(|| self.resolve_default_endpoint(&provider));
         let models_url = if provider == AiProvider::Anthropic {
             chat_url.replace("/messages", "/models")
         } else {
             chat_url.replace("/chat/completions", "/models")
         };
+
+        if self.ssrf_check_enabled {
+            validate_ai_url(&models_url)?;
+        }
 
         let request_builder = self
             .client
@@ -144,7 +217,7 @@ impl AiGateway {
             "balanced".to_string()
         };
 
-        let endpoint = self.resolve_endpoint(&profile);
+        let endpoint = self.resolve_endpoint(&profile)?;
 
         let messages = vec![
             ChatMessage {
@@ -189,14 +262,18 @@ impl AiGateway {
         .to_string()
     }
 
-    fn resolve_endpoint(&self, profile: &ResolvedAiProfile) -> String {
+    fn resolve_endpoint(&self, profile: &ResolvedAiProfile) -> Result<String, AiError> {
         let default_url = self.resolve_default_endpoint(&profile.provider);
-        match profile.mode {
+        let url = match profile.mode {
             AiConnectionMode::Direct => default_url,
             AiConnectionMode::Relay | AiConnectionMode::LocalRelay | AiConnectionMode::Pool => {
                 profile.relay_url.clone().unwrap_or(default_url)
             }
+        };
+        if self.ssrf_check_enabled {
+            validate_ai_url(&url)?;
         }
+        Ok(url)
     }
 
     fn tier_max_tokens(tier: &str) -> u32 {
@@ -291,17 +368,16 @@ impl AiGateway {
         let mut last_err: Option<AiError> = None;
 
         for attempt in 0..max_attempts {
-            let res = self
-                .chat_completion_attempt(
-                    &profile,
-                    &model_id,
-                    tier.clone(),
-                    messages.clone(),
-                    json_mode,
-                    max_tokens_override,
-                    false,
-                )
-                .await;
+            let req = ChatCompletionRequest {
+                profile: profile.clone(),
+                model_id: model_id.clone(),
+                tier: tier.clone(),
+                messages: messages.clone(),
+                json_mode,
+                max_tokens_override,
+                strip_optional: false,
+            };
+            let res = self.chat_completion_attempt(req).await;
 
             match res {
                 Ok(text) => return Ok(text),
@@ -335,15 +411,15 @@ impl AiGateway {
     ) -> Result<String, AiError> {
         let profile = self.config.resolve_ai_profile();
         let (model_id, _) = self.config.resolve_active_model();
-        self.chat_completion_attempt(
-            &profile,
-            &model_id,
+        self.chat_completion_attempt(ChatCompletionRequest {
+            profile,
+            model_id,
             tier,
             messages,
             json_mode,
             max_tokens_override,
-            false,
-        )
+            strip_optional: false,
+        })
         .await
     }
 
@@ -360,96 +436,78 @@ impl AiGateway {
             if let Some(custom_tiers) = &m.custom_tiers {
                 if let Some(t) = custom_tiers.iter().find(|t| t.id == tier_id) {
                     if strip_optional {
-                        return (
-                            t.temperature.or_else(|| {
+                        return TierParams {
+                            temperature: t.temperature.or_else(|| {
                                 if matches!(provider, AiProvider::Moonshot) {
                                     None
                                 } else {
                                     Some(Self::tier_temperature(tier_id))
                                 }
                             }),
-                            t.max_tokens
+                            max_tokens: t
+                                .max_tokens
                                 .unwrap_or_else(|| Self::tier_max_tokens(tier_id)),
-                            None,
-                            None,
-                            None,
-                            None,
-                            default_timeout,
-                        );
+                            reasoning_effort: None,
+                            thinking_type: None,
+                            thinking_budget_tokens: None,
+                            thinking_display: None,
+                            request_timeout: default_timeout,
+                        };
                     }
-                    return (
-                        t.temperature.or_else(|| {
+                    return TierParams {
+                        temperature: t.temperature.or_else(|| {
                             if matches!(provider, AiProvider::Moonshot) {
                                 None
                             } else {
                                 Some(Self::tier_temperature(tier_id))
                             }
                         }),
-                        t.max_tokens
+                        max_tokens: t
+                            .max_tokens
                             .unwrap_or_else(|| Self::tier_max_tokens(tier_id)),
-                        t.reasoning_effort.clone(),
-                        t.thinking_type.clone(),
-                        t.thinking_budget_tokens,
-                        t.thinking_display.clone(),
-                        default_timeout,
-                    );
+                        reasoning_effort: t.reasoning_effort.clone(),
+                        thinking_type: t.thinking_type.clone(),
+                        thinking_budget_tokens: t.thinking_budget_tokens,
+                        thinking_display: t.thinking_display.clone(),
+                        request_timeout: default_timeout,
+                    };
                 }
             }
         }
 
         // Fallback to defaults
-        (
-            if matches!(provider, AiProvider::Moonshot) {
+        TierParams {
+            temperature: if matches!(provider, AiProvider::Moonshot) {
                 None
             } else {
                 Some(Self::tier_temperature(tier_id))
             },
-            Self::tier_max_tokens(tier_id),
-            None,
-            None,
-            None,
-            None,
-            default_timeout,
-        )
+            max_tokens: Self::tier_max_tokens(tier_id),
+            reasoning_effort: None,
+            thinking_type: None,
+            thinking_budget_tokens: None,
+            thinking_display: None,
+            request_timeout: default_timeout,
+        }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn chat_completion_attempt(
         &self,
-        profile: &ResolvedAiProfile,
-        model_id: &str,
-        tier: String,
-        messages: Vec<ChatMessage>,
-        json_mode: bool,
-        max_tokens_override: Option<u32>,
-        strip_optional: bool,
+        req: ChatCompletionRequest,
     ) -> Result<String, AiError> {
-        if !strip_optional {
-            let model = self.config.ai_models.iter().find(|m| m.id == model_id);
-            let (
-                _,
-                _,
-                reasoning_effort,
-                thinking_type,
-                thinking_budget_tokens,
-                thinking_display,
-                _,
-            ) = self.resolve_tier_params(&profile.provider, model, &tier, false);
-            let has_optional = reasoning_effort.is_some()
-                || thinking_type.is_some()
-                || thinking_budget_tokens.is_some()
-                || thinking_display.is_some();
+        if !req.strip_optional {
+            let model = self.config.ai_models.iter().find(|m| m.id == req.model_id);
+            let tier_params = self.resolve_tier_params(&req.profile.provider, model, &req.tier, false);
+            let has_optional = tier_params.reasoning_effort.is_some()
+                || tier_params.thinking_type.is_some()
+                || tier_params.thinking_budget_tokens.is_some()
+                || tier_params.thinking_display.is_some();
 
             let first = self
-                .chat_completion_attempt_once(
-                    profile,
-                    model_id,
-                    tier.clone(),
-                    messages.clone(),
-                    json_mode,
-                    max_tokens_override,
-                    false,
-                )
+                .chat_completion_attempt_once(ChatCompletionRequest {
+                    strip_optional: false,
+                    ..req.clone()
+                })
                 .await;
 
             match first {
@@ -457,17 +515,13 @@ impl AiGateway {
                 Err(e) => {
                     let is_bad_request =
                         matches!(&e, AiError::ApiError(msg) if msg.contains("Status: 400"));
-                    if is_bad_request && (has_optional || json_mode) {
+                    if is_bad_request && (has_optional || req.json_mode) {
                         return self
-                            .chat_completion_attempt_once(
-                                profile,
-                                model_id,
-                                tier,
-                                messages,
-                                false,
-                                max_tokens_override,
-                                true,
-                            )
+                            .chat_completion_attempt_once(ChatCompletionRequest {
+                                json_mode: false,
+                                strip_optional: true,
+                                ..req
+                            })
                             .await;
                     }
                     return Err(e);
@@ -475,90 +529,76 @@ impl AiGateway {
             }
         }
 
-        self.chat_completion_attempt_once(
-            profile,
-            model_id,
-            tier,
-            messages,
-            json_mode,
-            max_tokens_override,
-            true,
-        )
+        self.chat_completion_attempt_once(ChatCompletionRequest {
+            strip_optional: true,
+            ..req
+        })
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn chat_completion_attempt_once(
         &self,
-        profile: &ResolvedAiProfile,
-        model_id: &str,
-        tier: String,
-        messages: Vec<ChatMessage>,
-        json_mode: bool,
-        max_tokens_override: Option<u32>,
-        strip_optional: bool,
+        req: ChatCompletionRequest,
     ) -> Result<String, AiError> {
-        let token = match profile.mode {
-            AiConnectionMode::Pool => self.choose_pool_token(profile).await?,
-            _ => profile.api_key.clone().unwrap_or_default(),
+        let token = match req.profile.mode {
+            AiConnectionMode::Pool => self.choose_pool_token(&req.profile).await?,
+            _ => {
+                let key = req.profile.api_key.clone().unwrap_or_default();
+                if key.is_empty() {
+                    return Err(AiError::Auth("API key is not configured".into()));
+                }
+                key
+            }
         };
 
-        let model = self.config.ai_models.iter().find(|m| m.id == model_id);
-        let (
-            temperature,
-            default_max_tokens,
-            reasoning_effort,
-            thinking_type,
-            thinking_budget_tokens,
-            thinking_display,
-            request_timeout,
-        ) = self.resolve_tier_params(&profile.provider, model, &tier, strip_optional);
-        let max_tokens = max_tokens_override.unwrap_or(default_max_tokens);
+        let model = self.config.ai_models.iter().find(|m| m.id == req.model_id);
+        let tier_params = self.resolve_tier_params(&req.profile.provider, model, &req.tier, req.strip_optional);
+        let max_tokens = req.max_tokens_override.unwrap_or(tier_params.max_tokens);
 
-        let url = self.resolve_endpoint(profile);
+        let url = self.resolve_endpoint(&req.profile)?;
 
-        let request_builder = self.client.post(&url).timeout(request_timeout);
+        let request_builder = self.client.post(&url).timeout(tier_params.request_timeout);
 
-        let resp = match profile.provider {
+        let resp = match req.profile.provider {
             AiProvider::Anthropic => {
-                let system_msg = messages
+                let system_msg = req.messages
                     .iter()
                     .find(|m| m.role == "system")
                     .map(|m| m.content.clone())
                     .unwrap_or_default();
-                let filtered_messages: Vec<ChatMessage> = messages
+                let filtered_messages: Vec<ChatMessage> = req.messages
                     .iter()
                     .filter(|m| m.role != "system")
                     .cloned()
                     .collect();
 
                 let mut payload = json!({
-                    "model": model_id,
+                    "model": req.model_id,
                     "messages": filtered_messages,
                     "system": system_msg,
                     "max_tokens": max_tokens
                 });
 
-                if let Some(temp) = temperature {
+                if let Some(temp) = tier_params.temperature {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("temperature".to_string(), json!(temp));
                     }
                 }
 
-                if let Some(tt) = thinking_type.clone() {
+                if let Some(tt) = tier_params.thinking_type.clone() {
                     let mut thinking_obj = serde_json::Map::new();
                     thinking_obj.insert("type".to_string(), json!(tt));
                     if tt == "enabled" {
-                        if let Some(budget) = thinking_budget_tokens {
+                        if let Some(budget) = tier_params.thinking_budget_tokens {
                             thinking_obj.insert("budget_tokens".to_string(), json!(budget));
                         }
                     }
                     if tt == "adaptive" {
-                        if let Some(effort) = reasoning_effort.clone() {
+                        if let Some(effort) = tier_params.reasoning_effort.clone() {
                             thinking_obj.insert("effort".to_string(), json!(effort));
                         }
                     }
-                    if let Some(display) = thinking_display.clone() {
+                    if let Some(display) = tier_params.thinking_display.clone() {
                         thinking_obj.insert("display".to_string(), json!(display));
                     }
                     if let Some(obj) = payload.as_object_mut() {
@@ -576,18 +616,18 @@ impl AiGateway {
             }
             AiProvider::Openai if url.contains("/responses") => {
                 let mut payload = json!({
-                    "model": model_id,
-                    "input": messages.clone(),
+                    "model": req.model_id,
+                    "input": req.messages.clone(),
                     "max_output_tokens": max_tokens
                 });
 
-                if let Some(temp) = temperature {
+                if let Some(temp) = tier_params.temperature {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("temperature".to_string(), json!(temp));
                     }
                 }
 
-                if let Some(effort) = reasoning_effort.clone() {
+                if let Some(effort) = tier_params.reasoning_effort.clone() {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("reasoning".to_string(), json!({ "effort": effort }));
                     }
@@ -601,17 +641,17 @@ impl AiGateway {
             }
             _ => {
                 let mut payload = json!({
-                    "model": model_id,
-                    "messages": messages.clone()
+                    "model": req.model_id,
+                    "messages": req.messages.clone()
                 });
 
-                if let Some(temp) = temperature {
+                if let Some(temp) = tier_params.temperature {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("temperature".to_string(), json!(temp));
                     }
                 }
 
-                if matches!(profile.provider, AiProvider::Moonshot) {
+                if matches!(req.profile.provider, AiProvider::Moonshot) {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("max_completion_tokens".to_string(), json!(max_tokens));
                     }
@@ -619,13 +659,13 @@ impl AiGateway {
                     obj.insert("max_tokens".to_string(), json!(max_tokens));
                 }
 
-                if let Some(tt) = thinking_type.clone() {
+                if let Some(tt) = tier_params.thinking_type.clone() {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("thinking".to_string(), json!({ "type": tt }));
                     }
                 }
 
-                if json_mode {
+                if req.json_mode {
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert(
                             "response_format".to_string(),
@@ -647,7 +687,7 @@ impl AiGateway {
                 let status = response.status();
                 if status.is_success() {
                     let body: Value = response.json().await?;
-                    let content = match profile.provider {
+                    let content = match req.profile.provider {
                         AiProvider::Anthropic => body
                             .get("content")
                             .and_then(|c| c.as_array())
@@ -687,14 +727,14 @@ impl AiGateway {
                         StatusCode::FORBIDDEN => Err(AiError::Forbidden(body_text)),
                         StatusCode::NOT_FOUND => Err(AiError::ModelNotFound(body_text)),
                         StatusCode::TOO_MANY_REQUESTS => {
-                            if matches!(profile.mode, AiConnectionMode::Pool) {
-                                self.mark_pool_failure(profile, &token).await;
+                            if matches!(req.profile.mode, AiConnectionMode::Pool) {
+                                self.mark_pool_failure(&req.profile, &token).await;
                             }
                             Err(AiError::RateLimited(body_text))
                         }
                         s if s.is_server_error() => {
-                            if matches!(profile.mode, AiConnectionMode::Pool) {
-                                self.mark_pool_failure(profile, &token).await;
+                            if matches!(req.profile.mode, AiConnectionMode::Pool) {
+                                self.mark_pool_failure(&req.profile, &token).await;
                             }
                             Err(AiError::ServerError(format!(
                                 "Status: {}, body: {}",
@@ -709,10 +749,10 @@ impl AiGateway {
                 }
             }
             Err(e) => {
-                if matches!(profile.mode, AiConnectionMode::Pool)
+                if matches!(req.profile.mode, AiConnectionMode::Pool)
                     && (e.is_timeout() || e.is_connect())
                 {
-                    self.mark_pool_failure(profile, &token).await;
+                    self.mark_pool_failure(&req.profile, &token).await;
                 }
                 Err(AiError::Network(e))
             }
@@ -726,6 +766,31 @@ mod tests {
     use axum::{extract::State, http::StatusCode as AxumStatusCode, routing::post, Json, Router};
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn validate_ai_url_rejects_localhost() {
+        assert!(validate_ai_url("http://127.0.0.1/v1/chat/completions").is_err());
+        assert!(validate_ai_url("http://localhost/v1/chat/completions").is_err());
+    }
+
+    #[test]
+    fn validate_ai_url_rejects_private_ip() {
+        assert!(validate_ai_url("http://10.0.0.1/v1/chat/completions").is_err());
+        assert!(validate_ai_url("http://192.168.1.1/v1/chat/completions").is_err());
+        assert!(validate_ai_url("http://172.16.0.1/v1/chat/completions").is_err());
+    }
+
+    #[test]
+    fn validate_ai_url_rejects_non_http_scheme() {
+        assert!(validate_ai_url("ftp://example.com/v1").is_err());
+        assert!(validate_ai_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_ai_url_allows_public_https() {
+        assert!(validate_ai_url("https://api.openai.com/v1/chat/completions").is_ok());
+        assert!(validate_ai_url("https://api.anthropic.com/v1/messages").is_ok());
+    }
 
     #[derive(Clone, Default)]
     struct CaptureState {

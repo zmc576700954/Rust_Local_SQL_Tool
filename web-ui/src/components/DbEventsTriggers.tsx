@@ -134,8 +134,8 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
       setSelectedConnId(nextId);
       if (savedTab === 'triggers' || savedTab === 'events') setActiveTab(savedTab as 'triggers' | 'events');
       if (savedSearch) setSearch(savedSearch);
-    } catch (e: any) {
-      const msg = e?.message || String(e);
+    } catch (e: unknown) {
+      const msg = (e instanceof Error ? e.message : String(e));
       setErrorText(msg);
       toast(tr('加载连接失败：', 'Failed to load connections: ') + msg, 'error');
     } finally {
@@ -178,8 +178,8 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
       setEvents(eventRows);
       setSelectedTriggerName(triggerRows[0]?.TRIGGER_NAME || '');
       setSelectedEventName(eventRows[0]?.EVENT_NAME || '');
-    } catch (e: any) {
-      const msg = e?.message || String(e);
+    } catch (e: unknown) {
+      const msg = (e instanceof Error ? e.message : String(e));
       setErrorText(msg);
       toast(tr('加载事件/触发器失败：', 'Failed to load events/triggers: ') + msg, 'error');
       setTriggers([]);
@@ -234,8 +234,8 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
       const saved = await api.updateConfig({ ...configData, db_connections: list });
       setConfigData(saved);
       toast(tr('草稿已保存到连接配置。', 'Draft saved to connection config.'), 'success');
-    } catch (e: any) {
-      toast(tr('保存草稿失败：', 'Failed to save draft: ') + (e?.message || String(e)), 'error');
+    } catch (e: unknown) {
+      toast(tr('保存草稿失败：', 'Failed to save draft: ') + (e instanceof Error ? e.message : String(e)), 'error');
     } finally {
       setIsLoading(false);
     }

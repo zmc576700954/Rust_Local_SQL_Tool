@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { AlignLeft, CheckSquare, ChevronDown, ChevronRight, Database, Eye, FileUp, FolderPlus, Plus, RefreshCw, Square, Star, Table, Trash2, X, Pencil, Copy, PlugZap, Unplug } from 'lucide-react'
-import type { DbConnection, SchemaResponse } from '../types'
+import type { ConfigData, DbConnection, SchemaResponse, ViewInfo } from '../types'
 import { tr } from '../i18n'
 import { api } from '../api'
 
@@ -188,7 +188,7 @@ export function DbExplorerSidebar({
   onInsertTableName,
   onTableContextMenu,
 }: {
-  configData: any
+  configData: ConfigData
   schemaData: SchemaResponse | null
   isRefreshingSchema: boolean
   onRefreshSchema: () => void
@@ -270,8 +270,8 @@ export function DbExplorerSidebar({
     try {
       const schema = await api.getSchema(dbId)
       setSchemaByDb((prev) => ({ ...prev, [dbId]: schema }))
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || e?.message || tr('加载结构失败', 'Failed to load schema')
+    } catch (e: unknown) {
+      const msg = (e as any)?.response?.data?.message || (e instanceof Error ? e.message : '') || tr('加载结构失败', 'Failed to load schema')
       window.dispatchEvent(new CustomEvent('global-toast', { detail: { message: msg, type: 'error' } }))
     } finally {
       setLoadingSchemaByDb((prev) => ({ ...prev, [dbId]: false }))
@@ -298,7 +298,7 @@ export function DbExplorerSidebar({
     const q = filter.trim().toLowerCase()
     if (!q) return connections
     return connections.filter((c) => {
-      const name = String((c as any).name || c.id || '').toLowerCase()
+      const name = String(c.name || c.id || '').toLowerCase()
       const url = String(c.url || '').toLowerCase()
       return name.includes(q) || url.includes(q)
     })
@@ -309,7 +309,7 @@ export function DbExplorerSidebar({
   const groupedConnections = useMemo(() => {
     const map: Record<string, DbConnection[]> = {}
     for (const c of filteredConnections) {
-      const group = String((c as any).group_name || ungroupedLabel)
+      const group = String(c.group_name || ungroupedLabel)
       if (!map[group]) map[group] = []
       map[group].push(c)
     }
@@ -320,10 +320,10 @@ export function DbExplorerSidebar({
     })
     for (const g of groups) {
       map[g].sort((a, b) => {
-        const af = !!(a as any).is_favorite
-        const bf = !!(b as any).is_favorite
+        const af = !!a.is_favorite
+        const bf = !!b.is_favorite
         if (af !== bf) return af ? -1 : 1
-        return String((a as any).name || a.id).localeCompare(String((b as any).name || b.id))
+        return String(a.name || a.id).localeCompare(String(b.name || b.id))
       })
     }
     return { groups, map }
@@ -343,12 +343,12 @@ export function DbExplorerSidebar({
   const openEditDialog = useCallback((conn: DbConnection) => {
     setEditingConnId(conn.id)
     setEditTab('general')
-    setEditName(String((conn as any).name || conn.id))
+    setEditName(String(conn.name || conn.id))
     setEditUrl(String(conn.url || ''))
-    setEditGroup(String((conn as any).group_name || ''))
-    setEditColor(String((conn as any).color || '#3b82f6'))
-    const ssh = ((conn as any).ssh || {}) as any
-    const ssl = ((conn as any).ssl || {}) as any
+    setEditGroup(String(conn.group_name || ''))
+    setEditColor(String(conn.color || '#3b82f6'))
+    const ssh = (conn.ssh || {}) as Record<string, unknown>
+    const ssl = (conn.ssl || {}) as Record<string, unknown>
     setEditSshEnabled(!!ssh.enabled)
     setEditSshHost(String(ssh.host || ''))
     setEditSshPort(String(ssh.port || 22))
@@ -411,13 +411,13 @@ export function DbExplorerSidebar({
         code: 'DB_TEST_OK',
         message: res.diagnostic?.message || 'Connection successful.',
       })
-    } catch (e: any) {
-      const data = e?.response?.data || {}
+    } catch (e: unknown) {
+      const data = (e as any)?.response?.data || {}
       setTestConnectionResult({
         status: 'error',
         category: String(data?.type || 'unknown'),
         code: String(data?.code || 'DB_TEST_REQUEST_FAILED'),
-        message: String(data?.message || data?.error || e?.message || 'Connection failed'),
+        message: String(data?.message || data?.error || (e instanceof Error ? e.message : '') || 'Connection failed'),
         detail: String(data?.details || ''),
       })
     } finally {
@@ -483,13 +483,13 @@ export function DbExplorerSidebar({
         code: 'DB_TEST_OK',
         message: res.diagnostic?.message || 'Connection successful.',
       })
-    } catch (e: any) {
-      const data = e?.response?.data || {}
+    } catch (e: unknown) {
+      const data = (e as any)?.response?.data || {}
       setTestConnectionResult({
         status: 'error',
         category: String(data?.type || 'unknown'),
         code: String(data?.code || 'DB_TEST_REQUEST_FAILED'),
-        message: String(data?.message || data?.error || e?.message || 'Connection failed'),
+        message: String(data?.message || data?.error || (e instanceof Error ? e.message : '') || 'Connection failed'),
         detail: String(data?.details || ''),
       })
     } finally {
@@ -739,7 +739,7 @@ export function DbExplorerSidebar({
             const visibleTables = (dbSchema?.tables || []).filter((t) =>
               !tableFilter || t.table_name.toLowerCase().includes(tableFilter)
             )
-            const visibleViews = (dbSchema?.views || []).filter((v: any) => {
+            const visibleViews = (dbSchema?.views || []).filter((v: ViewInfo) => {
               const viewName = String(v.table_name || v.view_name || '')
               return !tableFilter || viewName.toLowerCase().includes(tableFilter)
             })
@@ -789,15 +789,15 @@ export function DbExplorerSidebar({
                   </button>
                   <div
                     className="w-2.5 h-2.5 rounded-full border border-black/40"
-                    style={{ backgroundColor: String((c as any).color || '#3b82f6') }}
+                    style={{ backgroundColor: String(c.color || '#3b82f6') }}
                     title={tr('连接颜色', 'Connection color')}
                   />
                   <Database className={`w-4 h-4 ${isActive ? 'text-blue-400' : 'text-gray-400'}`} />
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm text-gray-200 font-medium truncate" title={String((c as any).name || c.id)}>
-                      {!!(c as any).is_favorite && <Star className="inline w-3 h-3 text-yellow-400 mr-1.5 -mt-0.5" />}
-                      {String((c as any).name || c.id)}
-                      {isActive && (c as any).is_read_only && (
+                    <div className="text-sm text-gray-200 font-medium truncate" title={String(c.name || c.id)}>
+                      {!!c.is_favorite && <Star className="inline w-3 h-3 text-yellow-400 mr-1.5 -mt-0.5" />}
+                      {String(c.name || c.id)}
+                      {isActive && c.is_read_only && (
                         <span className="ml-2 text-[10px] bg-red-500/20 text-red-500 border border-red-500/30 px-1.5 py-0.5 rounded uppercase tracking-wider font-bold shadow-sm">
                           [只读]
                         </span>
@@ -820,10 +820,10 @@ export function DbExplorerSidebar({
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      onUpdateConnection(c.id, { is_favorite: !(c as any).is_favorite })
+                      onUpdateConnection(c.id, { is_favorite: !c.is_favorite })
                     }}
                     className={`p-1.5 rounded border border-[#30363d] bg-[#0d1117] transition-colors ${
-                      (c as any).is_favorite ? 'text-yellow-400 hover:bg-yellow-500/10' : 'text-gray-500 hover:text-yellow-300 hover:bg-yellow-500/10'
+                      c.is_favorite ? 'text-yellow-400 hover:bg-yellow-500/10' : 'text-gray-500 hover:text-yellow-300 hover:bg-yellow-500/10'
                     }`}
                     title={tr('收藏', 'Favorite')}
                   >
@@ -880,7 +880,7 @@ export function DbExplorerSidebar({
                             >
                               <div
                                 className="flex items-center gap-2 flex-1 overflow-hidden"
-                                onDoubleClick={() => onOpenTable(c.id, String((c as any).name || c.id), t.table_name)}
+                                onDoubleClick={() => onOpenTable(c.id, String(c.name || c.id), t.table_name)}
                               >
                                 <Table className="w-4 h-4 flex-shrink-0" />
                                 <span className="text-sm truncate" title={t.table_name}>{t.table_name}</span>
@@ -888,7 +888,7 @@ export function DbExplorerSidebar({
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation()
-                                  onOpenTable(c.id, String((c as any).name || c.id), t.table_name)
+                                  onOpenTable(c.id, String(c.name || c.id), t.table_name)
                                 }}
                                 className="p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all"
                                 title={tr('打开表数据', 'Open table data')}
@@ -915,20 +915,20 @@ export function DbExplorerSidebar({
                           </div>
                           {visibleViews.length === 0 ? (
                             <div className="px-2 py-2 text-xs text-gray-600">{tr('无匹配视图', 'No matching views')}</div>
-                          ) : visibleViews.map((v: any) => {
+                          ) : visibleViews.map((v: ViewInfo) => {
                             const viewName = String(v.table_name || v.view_name)
                             return (
                               <div
                                 key={viewName}
                                 className="flex items-center gap-2 px-2 py-1.5 rounded text-gray-400 hover:bg-[#21262d] transition-colors cursor-pointer group"
-                                onDoubleClick={() => onOpenTable(c.id, String((c as any).name || c.id), viewName)}
+                                onDoubleClick={() => onOpenTable(c.id, String(c.name || c.id), viewName)}
                               >
                                 <Eye className="w-4 h-4" />
                                 <span className="text-sm truncate flex-1" title={viewName}>{viewName}</span>
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation()
-                                    onOpenTable(c.id, String((c as any).name || c.id), viewName)
+                                    onOpenTable(c.id, String(c.name || c.id), viewName)
                                   }}
                                   className="p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all"
                                   title={tr('打开视图数据', 'Open view data')}
@@ -1010,12 +1010,12 @@ export function DbExplorerSidebar({
           <button
             className="w-full text-left px-3 py-1.5 hover:bg-yellow-500/15 hover:text-yellow-300 transition-colors flex items-center gap-2"
             onClick={() => {
-              onUpdateConnection(connMenu.conn.id, { is_favorite: !(connMenu.conn as any).is_favorite })
+              onUpdateConnection(connMenu.conn.id, { is_favorite: !connMenu.conn.is_favorite })
               setConnMenu(null)
             }}
           >
             <Star className="w-3.5 h-3.5" />
-            {(connMenu.conn as any).is_favorite ? tr('取消收藏', 'Unfavorite') : tr('收藏', 'Favorite')}
+            {connMenu.conn.is_favorite ? tr('取消收藏', 'Unfavorite') : tr('收藏', 'Favorite')}
           </button>
           <button
             className="w-full text-left px-3 py-1.5 hover:bg-red-500/20 hover:text-red-300 transition-colors flex items-center gap-2"
@@ -1127,7 +1127,7 @@ export function DbExplorerSidebar({
                           setGroupCreate({ ...groupCreate, connIds: next })
                         }}
                       />
-                      <span className="truncate">{String((c as any).name || c.id)}</span>
+                      <span className="truncate">{String(c.name || c.id)}</span>
                     </label>
                   ))}
                 </div>

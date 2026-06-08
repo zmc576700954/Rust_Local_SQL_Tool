@@ -1,7 +1,21 @@
 use crate::config::{DbType, PoolConfig};
+use crate::sql_util;
 use crate::timeout_policy::TimeoutPolicy;
 use std::time::Duration;
 use thiserror::Error;
+
+/// Placeholder style used by different database engines for parameterized queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceholderStyle {
+    /// `?` placeholders — MySQL, SQLite
+    QuestionMark,
+    /// `$1, $2, ...` placeholders — PostgreSQL
+    DollarNumber,
+    /// `@p1, @p2, ...` placeholders — SQL Server (reserved for future use)
+    AtP,
+    /// `:1, :2, ...` placeholders — Oracle (reserved for future use)
+    ColonNumber,
+}
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -89,6 +103,22 @@ impl DbPool {
             DbPool::SQLite(_) => DbType::SQLite,
         }
     }
+
+    /// Returns the placeholder style for this pool's database engine.
+    pub fn placeholder_style(&self) -> PlaceholderStyle {
+        match self {
+            DbPool::MySQL(_) | DbPool::SQLite(_) => PlaceholderStyle::QuestionMark,
+            DbPool::Postgres(_) => PlaceholderStyle::DollarNumber,
+        }
+    }
+
+    /// Quotes an identifier using the appropriate quoting style for this pool's engine.
+    pub fn quote_ident(&self, s: &str) -> String {
+        match self {
+            DbPool::MySQL(_) => sql_util::quote_ident_mysql(s),
+            DbPool::Postgres(_) | DbPool::SQLite(_) => sql_util::quote_ident_pg(s),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -174,7 +204,7 @@ impl DbClient {
 
     /// Creates a new connection pool with default configuration, auto-detecting engine from URL.
     pub async fn new_default(url: &str) -> Result<Self, DbError> {
-        let db_type = DbType::from_url(url);
+        let db_type = DbType::from_url(url).unwrap_or(DbType::MySQL);
         Self::new(url, &PoolConfig::default(), &db_type).await
     }
 
@@ -245,13 +275,14 @@ mod tests {
 
     #[test]
     fn db_type_from_url() {
-        assert_eq!(DbType::from_url("mysql://localhost/db"), DbType::MySQL);
-        assert_eq!(DbType::from_url("postgres://localhost/db"), DbType::PostgreSQL);
-        assert_eq!(DbType::from_url("postgresql://localhost/db"), DbType::PostgreSQL);
-        assert_eq!(DbType::from_url("sqlite:///tmp/test.db"), DbType::SQLite);
-        assert_eq!(DbType::from_url("mariadb://localhost/db"), DbType::MariaDB);
-        assert_eq!(DbType::from_url("redis://localhost"), DbType::Redis);
-        assert_eq!(DbType::from_url("mongodb://localhost"), DbType::MongoDB);
+        assert_eq!(DbType::from_url("mysql://localhost/db"), Some(DbType::MySQL));
+        assert_eq!(DbType::from_url("postgres://localhost/db"), Some(DbType::PostgreSQL));
+        assert_eq!(DbType::from_url("postgresql://localhost/db"), Some(DbType::PostgreSQL));
+        assert_eq!(DbType::from_url("sqlite:///tmp/test.db"), Some(DbType::SQLite));
+        assert_eq!(DbType::from_url("mariadb://localhost/db"), Some(DbType::MariaDB));
+        assert_eq!(DbType::from_url("redis://localhost"), Some(DbType::Redis));
+        assert_eq!(DbType::from_url("mongodb://localhost"), Some(DbType::MongoDB));
+        assert_eq!(DbType::from_url("unknown://localhost/db"), None);
     }
 
     #[test]

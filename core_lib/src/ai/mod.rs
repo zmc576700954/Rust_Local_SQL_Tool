@@ -5,5 +5,6 @@ pub mod gateway;
 pub mod planner;
 pub mod policy_store;
 pub mod prompting;
+pub mod schema_briefing;
 pub mod tools;
 pub mod types;

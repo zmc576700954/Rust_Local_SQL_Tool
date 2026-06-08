@@ -152,24 +152,26 @@ pub enum DbType {
 }
 
 impl DbType {
-    pub fn from_url(url: &str) -> Self {
+    pub fn from_url(url: &str) -> Option<Self> {
         let u = url.to_lowercase();
         if u.starts_with("mariadb://") {
-            Self::MariaDB
+            Some(Self::MariaDB)
         } else if u.starts_with("postgres://") || u.starts_with("postgresql://") {
-            Self::PostgreSQL
+            Some(Self::PostgreSQL)
         } else if u.starts_with("sqlite://") {
-            Self::SQLite
+            Some(Self::SQLite)
         } else if u.starts_with("sqlserver://") || u.starts_with("mssql://") {
-            Self::SQLServer
+            Some(Self::SQLServer)
         } else if u.starts_with("mongodb://") || u.starts_with("mongodb+srv://") {
-            Self::MongoDB
+            Some(Self::MongoDB)
         } else if u.starts_with("redis://") || u.starts_with("rediss://") {
-            Self::Redis
+            Some(Self::Redis)
         } else if u.starts_with("oracle://") {
-            Self::Oracle
+            Some(Self::Oracle)
+        } else if u.starts_with("mysql://") {
+            Some(Self::MySQL)
         } else {
-            Self::MySQL
+            None
         }
     }
 
@@ -495,11 +497,11 @@ impl AppConfig {
                 if let Some(t) = &conn.db_type {
                     return t.clone();
                 }
-                return DbType::from_url(&conn.url);
+                return DbType::from_url(&conn.url).unwrap_or(DbType::MySQL);
             }
         }
         let url = self.get_active_db_url().unwrap_or_default();
-        DbType::from_url(&url)
+        DbType::from_url(&url).unwrap_or(DbType::MySQL)
     }
 
     pub fn resolve_ai_profile(&self) -> ResolvedAiProfile {
@@ -605,7 +607,7 @@ impl AppConfig {
             let t = c
                 .db_type
                 .clone()
-                .unwrap_or_else(|| DbType::from_url(&c.url));
+                .unwrap_or_else(|| DbType::from_url(&c.url).unwrap_or(DbType::MySQL));
             c.db_type = Some(t.clone());
             if c.capability_level.is_none() {
                 c.capability_level = Some(crate::db_capability::capability_level(&t));

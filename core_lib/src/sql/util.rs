@@ -145,6 +145,145 @@ pub fn mysql_cell_to_string(row: &sqlx::mysql::MySqlRow, ordinal: usize) -> Opti
     None
 }
 
+/// 从 PgRow 提取整行为 serde_json::Value（逐类型 try-get）
+pub fn pg_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
+    use sqlx::Row;
+    let mut map = serde_json::Map::new();
+    for col in row.columns() {
+        let col_name = col.name().to_string();
+        let val = pg_cell_to_value(row, col.ordinal());
+        map.insert(col_name, val);
+    }
+    Value::Object(map)
+}
+
+/// 从 PgRow 的指定列提取为 serde_json::Value
+pub fn pg_cell_to_value(row: &sqlx::postgres::PgRow, idx: usize) -> Value {
+    use sqlx::Row;
+    if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<i16>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<i32>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<f32>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<f64>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<chrono::NaiveDateTime>, _>(idx) {
+        return serde_json::json!(v.map(|dt| dt.to_string()));
+    }
+    if let Ok(v) = row.try_get::<Option<chrono::NaiveDate>, _>(idx) {
+        return serde_json::json!(v.map(|d| d.to_string()));
+    }
+    if let Ok(v) = row.try_get::<Option<chrono::NaiveTime>, _>(idx) {
+        return serde_json::json!(v.map(|t| t.to_string()));
+    }
+    if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
+        if let Some(bytes) = v {
+            return serde_json::json!(String::from_utf8_lossy(&bytes).to_string());
+        }
+    }
+    Value::Null
+}
+
+/// 从 PgRow 提取单列为 Option<String>（逐类型 try-get）
+pub fn pg_cell_to_string(row: &sqlx::postgres::PgRow, ordinal: usize) -> Option<String> {
+    use sqlx::Row;
+    if let Ok(v) = row.try_get::<Option<String>, _>(ordinal) {
+        return v;
+    }
+    if let Ok(v) = row.try_get::<Option<i16>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<i32>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<f32>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<f64>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<bool>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(ordinal) {
+        return v.map(|x| String::from_utf8_lossy(&x).into_owned());
+    }
+    None
+}
+
+/// 从 SqliteRow 提取整行为 serde_json::Value（逐类型 try-get）
+pub fn sqlite_row_to_json(row: &sqlx::sqlite::SqliteRow) -> Value {
+    use sqlx::Row;
+    let mut map = serde_json::Map::new();
+    for col in row.columns() {
+        let col_name = col.name().to_string();
+        let val = sqlite_cell_to_value(row, col.ordinal());
+        map.insert(col_name, val);
+    }
+    Value::Object(map)
+}
+
+/// 从 SqliteRow 的指定列提取为 serde_json::Value
+pub fn sqlite_cell_to_value(row: &sqlx::sqlite::SqliteRow, idx: usize) -> Value {
+    use sqlx::Row;
+    if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<f64>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
+        if let Some(bytes) = v {
+            return serde_json::json!(String::from_utf8_lossy(&bytes).to_string());
+        }
+    }
+    Value::Null
+}
+
+/// 从 SqliteRow 提取单列为 Option<String>（逐类型 try-get）
+pub fn sqlite_cell_to_string(row: &sqlx::sqlite::SqliteRow, ordinal: usize) -> Option<String> {
+    use sqlx::Row;
+    if let Ok(v) = row.try_get::<Option<String>, _>(ordinal) {
+        return v;
+    }
+    if let Ok(v) = row.try_get::<Option<i64>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<f64>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<bool>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(ordinal) {
+        return v.map(|x| String::from_utf8_lossy(&x).into_owned());
+    }
+    None
+}
+
 /// Check if a SQL statement is a mutation (INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE/CREATE/REPLACE).
 /// Used for read-only mode enforcement.
 pub fn is_mutation_sql(sql: &str) -> bool {

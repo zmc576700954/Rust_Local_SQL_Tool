@@ -153,8 +153,8 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
           }
         }))
       }
-    } catch (e: any) {
-      setError(e.response?.data?.message || e.message)
+    } catch (e: unknown) {
+      setError((e as any)?.response?.data?.message || (e instanceof Error ? e.message : String(e)))
     } finally {
       setPageNavigation('steady')
       setDataLoading(false)
@@ -167,8 +167,8 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
     try {
       const schemaRes = await api.getTableSchema(tableName, dbId)
       setSchema(schemaRes)
-    } catch (e: any) {
-      setError(e.response?.data?.message || e.message)
+    } catch (e: unknown) {
+      setError((e as any)?.response?.data?.message || (e instanceof Error ? e.message : String(e)))
     } finally {
       setSchemaLoading(false)
     }

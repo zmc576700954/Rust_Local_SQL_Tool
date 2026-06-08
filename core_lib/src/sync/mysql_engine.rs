@@ -1,3 +1,5 @@
+use crate::config::DbType;
+use crate::db::DbPool;
 use crate::db::DbClient;
 use crate::error::AppError;
 use crate::sql_util;
@@ -62,9 +64,13 @@ pub struct PreviewResult {
     pub truncated: bool,
 }
 
-pub struct MySqlDataSyncEngine;
+/// Backward-compatible type alias.
+pub type MySqlDataSyncEngine = RowDataSyncEngine;
 
-impl MySqlDataSyncEngine {
+/// Row-level data sync engine supporting MySQL, PostgreSQL, and SQLite.
+pub struct RowDataSyncEngine;
+
+impl RowDataSyncEngine {
     pub async fn compare(
         source: &DbClient,
         target: &DbClient,
@@ -294,7 +300,7 @@ impl MySqlDataSyncEngine {
             deletes,
         };
 
-        let statements = generate_statements(&diff);
+        let statements = generate_statements(&diff, &target.db_type);
         let sql = if statements.is_empty() {
             "-- No changes detected".to_string()
         } else {
@@ -315,32 +321,86 @@ impl MySqlDataSyncEngine {
         progress: impl Fn(usize, usize) + Send + Sync,
     ) -> Result<u64, AppError> {
         let policy = TimeoutPolicy::default();
-        let mut tx = tokio::time::timeout(policy.db_query, target.mysql_pool()?.begin())
-            .await
-            .map_err(|_| AppError::Timeout("开启事务超时".to_string()))?
-            .map_err(|e| AppError::InternalError(e.to_string()))?;
-
         let total = statements.len();
         let mut affected = 0u64;
 
-        for (idx, stmt) in statements.iter().enumerate() {
-            let stmt = stmt.trim();
-            if stmt.is_empty() || stmt.starts_with("--") {
-                progress(idx + 1, total);
-                continue;
-            }
-            let res = tokio::time::timeout(policy.db_query, sqlx::query(stmt).execute(&mut *tx))
-                .await
-                .map_err(|_| AppError::Timeout(format!("执行SQL超时: {}", stmt)))?
-                .map_err(|e| AppError::InternalError(e.to_string()))?;
-            affected += res.rows_affected();
-            progress(idx + 1, total);
-        }
+        match &target.pool {
+            DbPool::MySQL(p) => {
+                let mut tx = tokio::time::timeout(policy.db_query, p.begin())
+                    .await
+                    .map_err(|_| AppError::Timeout("开启事务超时".to_string()))?
+                    .map_err(|e| AppError::InternalError(e.to_string()))?;
 
-        tokio::time::timeout(policy.db_query, tx.commit())
-            .await
-            .map_err(|_| AppError::Timeout("提交事务超时".to_string()))?
-            .map_err(|e| AppError::InternalError(e.to_string()))?;
+                for (idx, stmt) in statements.iter().enumerate() {
+                    let stmt = stmt.trim();
+                    if stmt.is_empty() || stmt.starts_with("--") {
+                        progress(idx + 1, total);
+                        continue;
+                    }
+                    let res = tokio::time::timeout(policy.db_query, sqlx::query(stmt).execute(&mut *tx))
+                        .await
+                        .map_err(|_| AppError::Timeout(format!("执行SQL超时: {}", stmt)))?
+                        .map_err(|e| AppError::InternalError(e.to_string()))?;
+                    affected += res.rows_affected();
+                    progress(idx + 1, total);
+                }
+
+                tokio::time::timeout(policy.db_query, tx.commit())
+                    .await
+                    .map_err(|_| AppError::Timeout("提交事务超时".to_string()))?
+                    .map_err(|e| AppError::InternalError(e.to_string()))?;
+            }
+            DbPool::Postgres(p) => {
+                let mut tx = tokio::time::timeout(policy.db_query, p.begin())
+                    .await
+                    .map_err(|_| AppError::Timeout("开启事务超时".to_string()))?
+                    .map_err(|e| AppError::InternalError(e.to_string()))?;
+
+                for (idx, stmt) in statements.iter().enumerate() {
+                    let stmt = stmt.trim();
+                    if stmt.is_empty() || stmt.starts_with("--") {
+                        progress(idx + 1, total);
+                        continue;
+                    }
+                    let res = tokio::time::timeout(policy.db_query, sqlx::query(stmt).execute(&mut *tx))
+                        .await
+                        .map_err(|_| AppError::Timeout(format!("执行SQL超时: {}", stmt)))?
+                        .map_err(|e| AppError::InternalError(e.to_string()))?;
+                    affected += res.rows_affected();
+                    progress(idx + 1, total);
+                }
+
+                tokio::time::timeout(policy.db_query, tx.commit())
+                    .await
+                    .map_err(|_| AppError::Timeout("提交事务超时".to_string()))?
+                    .map_err(|e| AppError::InternalError(e.to_string()))?;
+            }
+            DbPool::SQLite(p) => {
+                let mut tx = tokio::time::timeout(policy.db_query, p.begin())
+                    .await
+                    .map_err(|_| AppError::Timeout("开启事务超时".to_string()))?
+                    .map_err(|e| AppError::InternalError(e.to_string()))?;
+
+                for (idx, stmt) in statements.iter().enumerate() {
+                    let stmt = stmt.trim();
+                    if stmt.is_empty() || stmt.starts_with("--") {
+                        progress(idx + 1, total);
+                        continue;
+                    }
+                    let res = tokio::time::timeout(policy.db_query, sqlx::query(stmt).execute(&mut *tx))
+                        .await
+                        .map_err(|_| AppError::Timeout(format!("执行SQL超时: {}", stmt)))?
+                        .map_err(|e| AppError::InternalError(e.to_string()))?;
+                    affected += res.rows_affected();
+                    progress(idx + 1, total);
+                }
+
+                tokio::time::timeout(policy.db_query, tx.commit())
+                    .await
+                    .map_err(|_| AppError::Timeout("提交事务超时".to_string()))?
+                    .map_err(|e| AppError::InternalError(e.to_string()))?;
+            }
+        }
 
         Ok(affected)
     }
@@ -359,27 +419,122 @@ fn compare_pk_str(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
+/// Build a parameterized SQL condition fragment for PK range filtering.
+/// Returns (sql_fragment, bind_values) where bind_values are the values to bind in order.
+fn build_pk_range_conditions(
+    primary_key: &str,
+    db_type: &DbType,
+    range: &PkRange,
+) -> (String, Vec<String>) {
+    let pk_ident = sql_util::quote_ident(primary_key, db_type.clone());
+    let mut sql = String::new();
+    let mut bind_values: Vec<String> = Vec::new();
+    let mut param_idx = 1usize; // for PostgreSQL $N placeholders
+
+    if let Some(_start) = &range.start {
+        let placeholder = match db_type {
+            DbType::PostgreSQL => {
+                let p = format!("${}", param_idx);
+                param_idx += 1;
+                p
+            }
+            _ => "?".to_string(),
+        };
+        sql.push_str(&format!(
+            " WHERE {pk} {op} {ph}",
+            pk = pk_ident,
+            op = if range.start_inclusive { ">=" } else { ">" },
+            ph = placeholder
+        ));
+        if let Some(_end) = &range.end {
+            let placeholder = match db_type {
+                DbType::PostgreSQL => {
+                    let p = format!("${}", param_idx);
+                    param_idx += 1;
+                    p
+                }
+                _ => "?".to_string(),
+            };
+            sql.push_str(&format!(
+                " AND {pk} {op} {ph}",
+                pk = pk_ident,
+                op = if range.end_inclusive { "<=" } else { "<" },
+                ph = placeholder
+            ));
+        }
+    } else if let Some(_end) = &range.end {
+        let placeholder = match db_type {
+            DbType::PostgreSQL => {
+                let p = format!("${}", param_idx);
+                param_idx += 1;
+                p
+            }
+            _ => "?".to_string(),
+        };
+        sql.push_str(&format!(
+            " WHERE {pk} {op} {ph}",
+            pk = pk_ident,
+            op = if range.end_inclusive { "<=" } else { "<" },
+            ph = placeholder
+        ));
+    }
+
+    // Collect bind values in the same order as placeholders appear
+    if let Some(start) = &range.start {
+        bind_values.push(start.clone());
+        if let Some(end) = &range.end {
+            bind_values.push(end.clone());
+        }
+    } else if let Some(end) = &range.end {
+        bind_values.push(end.clone());
+    }
+
+    (sql, bind_values)
+}
+
 async fn fetch_min_max_pk(
     db: &DbClient,
     table_name: &str,
     primary_key: &str,
 ) -> Result<(Option<String>, Option<String>), AppError> {
     let policy = TimeoutPolicy::default();
-    let pk_ident = sql_util::quote_ident_mysql(primary_key);
-    let tbl_ident = sql_util::quote_ident_mysql(table_name);
+    let pk_ident = sql_util::quote_ident(primary_key, db.db_type.clone());
+    let tbl_ident = sql_util::quote_ident(table_name, db.db_type.clone());
     let sql = format!(
         "SELECT MIN({pk}) AS min_pk, MAX({pk}) AS max_pk FROM {table}",
         pk = pk_ident,
         table = tbl_ident
     );
-    let row = tokio::time::timeout(policy.db_query, sqlx::query(&sql).fetch_one(db.mysql_pool()?))
-        .await
-        .map_err(|_| AppError::Timeout("获取PK范围超时".to_string()))?
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
 
-    let min_pk = sql_util::mysql_cell_to_string(&row, 0);
-    let max_pk = sql_util::mysql_cell_to_string(&row, 1);
-    Ok((min_pk, max_pk))
+    match &db.pool {
+        DbPool::MySQL(p) => {
+            let row = tokio::time::timeout(policy.db_query, sqlx::query(&sql).fetch_one(p))
+                .await
+                .map_err(|_| AppError::Timeout("获取PK范围超时".to_string()))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let min_pk = sql_util::mysql_cell_to_string(&row, 0);
+            let max_pk = sql_util::mysql_cell_to_string(&row, 1);
+            Ok((min_pk, max_pk))
+        }
+        DbPool::Postgres(p) => {
+            let row = tokio::time::timeout(policy.db_query, sqlx::query(&sql).fetch_one(p))
+                .await
+                .map_err(|_| AppError::Timeout("获取PK范围超时".to_string()))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let min_pk = sql_util::pg_cell_to_string(&row, 0);
+            let max_pk = sql_util::pg_cell_to_string(&row, 1);
+            Ok((min_pk, max_pk))
+        }
+        DbPool::SQLite(p) => {
+            let row = tokio::time::timeout(policy.db_query, sqlx::query(&sql).fetch_one(p))
+                .await
+                .map_err(|_| AppError::Timeout("获取PK范围超时".to_string()))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let min_pk = sql_util::sqlite_cell_to_string(&row, 0);
+            let max_pk = sql_util::sqlite_cell_to_string(&row, 1);
+            Ok((min_pk, max_pk))
+        }
+    }
 }
 
 async fn fetch_pk_list_after(
@@ -390,31 +545,77 @@ async fn fetch_pk_list_after(
     limit: usize,
 ) -> Result<Vec<String>, AppError> {
     let policy = TimeoutPolicy::default();
-    let pk_ident = sql_util::quote_ident_mysql(primary_key);
-    let tbl_ident = sql_util::quote_ident_mysql(table_name);
+    let pk_ident = sql_util::quote_ident(primary_key, db.db_type.clone());
+    let tbl_ident = sql_util::quote_ident(table_name, db.db_type.clone());
+
     let mut sql = format!("SELECT {pk} FROM {table}", pk = pk_ident, table = tbl_ident);
+    let mut bind_values: Vec<String> = Vec::new();
+
     if last_pk.is_some() {
-        sql.push_str(&format!(" WHERE {pk} > ?", pk = pk_ident));
+        let placeholder = match db.db_type {
+            DbType::PostgreSQL => "$1".to_string(),
+            _ => "?".to_string(),
+        };
+        sql.push_str(&format!(" WHERE {pk} > {ph}", pk = pk_ident, ph = placeholder));
+        if let Some(ref v) = last_pk {
+            bind_values.push(v.clone());
+        }
     }
     sql.push_str(&format!(" ORDER BY {pk} LIMIT {limit}", pk = pk_ident, limit = limit));
 
-    let mut q = sqlx::query(&sql);
-    if let Some(v) = last_pk {
-        q = q.bind(v);
-    }
-
-    let rows = tokio::time::timeout(policy.db_query, q.fetch_all(db.mysql_pool()?))
-        .await
-        .map_err(|_| AppError::Timeout("拉取PK分块超时".to_string()))?
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        if let Some(v) = sql_util::mysql_cell_to_string(&row, 0) {
-            out.push(v);
+    match &db.pool {
+        DbPool::MySQL(p) => {
+            let mut q = sqlx::query(&sql);
+            for v in &bind_values {
+                q = q.bind(v.clone());
+            }
+            let rows = tokio::time::timeout(policy.db_query, q.fetch_all(p))
+                .await
+                .map_err(|_| AppError::Timeout("拉取PK分块超时".to_string()))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                if let Some(v) = sql_util::mysql_cell_to_string(&row, 0) {
+                    out.push(v);
+                }
+            }
+            Ok(out)
+        }
+        DbPool::Postgres(p) => {
+            let mut q = sqlx::query(&sql);
+            for v in &bind_values {
+                q = q.bind(v.clone());
+            }
+            let rows = tokio::time::timeout(policy.db_query, q.fetch_all(p))
+                .await
+                .map_err(|_| AppError::Timeout("拉取PK分块超时".to_string()))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                if let Some(v) = sql_util::pg_cell_to_string(&row, 0) {
+                    out.push(v);
+                }
+            }
+            Ok(out)
+        }
+        DbPool::SQLite(p) => {
+            let mut q = sqlx::query(&sql);
+            for v in &bind_values {
+                q = q.bind(v.clone());
+            }
+            let rows = tokio::time::timeout(policy.db_query, q.fetch_all(p))
+                .await
+                .map_err(|_| AppError::Timeout("拉取PK分块超时".to_string()))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                if let Some(v) = sql_util::sqlite_cell_to_string(&row, 0) {
+                    out.push(v);
+                }
+            }
+            Ok(out)
         }
     }
-    Ok(out)
 }
 
 async fn fetch_rows_in_range(
@@ -424,68 +625,65 @@ async fn fetch_rows_in_range(
     range: &PkRange,
 ) -> Result<Vec<Value>, AppError> {
     let policy = TimeoutPolicy::default();
-    let pk_ident = sql_util::quote_ident_mysql(primary_key);
-    let tbl_ident = sql_util::quote_ident_mysql(table_name);
+    let pk_ident = sql_util::quote_ident(primary_key, db.db_type.clone());
+    let tbl_ident = sql_util::quote_ident(table_name, db.db_type.clone());
     let mut sql = format!("SELECT * FROM {table}", table = tbl_ident);
-    let mut has_where = false;
 
-    if let Some(_start) = &range.start {
-        sql.push_str(&format!(
-            " WHERE {pk} {op} ?",
-            pk = pk_ident,
-            op = if range.start_inclusive { ">=" } else { ">" }
-        ));
-        has_where = true;
-        if let Some(_end) = &range.end {
-            sql.push_str(&format!(
-                " AND {pk} {op} ?",
-                pk = pk_ident,
-                op = if range.end_inclusive { "<=" } else { "<" }
-            ));
-        }
-    } else if let Some(_end) = &range.end {
-        sql.push_str(&format!(
-            " WHERE {pk} {op} ?",
-            pk = pk_ident,
-            op = if range.end_inclusive { "<=" } else { "<" }
-        ));
-        has_where = true;
-    }
-
-    if !has_where && range.end.is_some() {
-        sql.push_str(&format!(
-            " WHERE {pk} {op} ?",
-            pk = pk_ident,
-            op = if range.end_inclusive { "<=" } else { "<" }
-        ));
-    }
-
+    let (conditions, bind_values) = build_pk_range_conditions(primary_key, &db.db_type, range);
+    sql.push_str(&conditions);
     sql.push_str(&format!(" ORDER BY {pk}", pk = pk_ident));
 
     // Safety: enforce max rows per chunk to prevent OOM on large tables
     let max_rows = max_rows_per_chunk();
     sql.push_str(&format!(" LIMIT {}", max_rows));
 
-    let mut q = sqlx::query(&sql);
-    if let Some(start) = &range.start {
-        q = q.bind(start.clone());
-        if let Some(end) = &range.end {
-            q = q.bind(end.clone());
+    match &db.pool {
+        DbPool::MySQL(p) => {
+            let mut q = sqlx::query(&sql);
+            for v in &bind_values {
+                q = q.bind(v.clone());
+            }
+            let rows = tokio::time::timeout(policy.db_query_long, q.fetch_all(p))
+                .await
+                .map_err(|_| AppError::Timeout("拉取数据分块超时".to_string()))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(sql_util::mysql_row_to_json(&row));
+            }
+            Ok(out)
         }
-    } else if let Some(end) = &range.end {
-        q = q.bind(end.clone());
+        DbPool::Postgres(p) => {
+            let mut q = sqlx::query(&sql);
+            for v in &bind_values {
+                q = q.bind(v.clone());
+            }
+            let rows = tokio::time::timeout(policy.db_query_long, q.fetch_all(p))
+                .await
+                .map_err(|_| AppError::Timeout("拉取数据分块超时".to_string()))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(sql_util::pg_row_to_json(&row));
+            }
+            Ok(out)
+        }
+        DbPool::SQLite(p) => {
+            let mut q = sqlx::query(&sql);
+            for v in &bind_values {
+                q = q.bind(v.clone());
+            }
+            let rows = tokio::time::timeout(policy.db_query_long, q.fetch_all(p))
+                .await
+                .map_err(|_| AppError::Timeout("拉取数据分块超时".to_string()))?
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(sql_util::sqlite_row_to_json(&row));
+            }
+            Ok(out)
+        }
     }
-
-    let rows = tokio::time::timeout(policy.db_query_long, q.fetch_all(db.mysql_pool()?))
-        .await
-        .map_err(|_| AppError::Timeout("拉取数据分块超时".to_string()))?
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(sql_util::mysql_row_to_json(&row));
-    }
-    Ok(out)
 }
 
 fn extract_pk_to_string(row: &Value, primary_key: &str) -> Option<String> {
@@ -515,7 +713,8 @@ fn checksum_rows(primary_key: &str, rows: &[Value]) -> u32 {
     hasher.finalize()
 }
 
-fn generate_statements(diff: &RowDiff) -> Vec<String> {
+fn generate_statements(diff: &RowDiff, db_type: &DbType) -> Vec<String> {
+    let qi = |s: &str| sql_util::quote_ident(s, db_type.clone());
     let mut stmts = Vec::new();
 
     if diff.mode == SyncMode::Mirror && !diff.deletes.is_empty() {
@@ -524,8 +723,8 @@ fn generate_statements(diff: &RowDiff) -> Vec<String> {
                 let pk = sql_util::format_sql_value(pk_val);
                 stmts.push(format!(
                     "DELETE FROM {} WHERE {} = {};",
-                    sql_util::quote_ident_mysql(&diff.table_name),
-                    sql_util::quote_ident_mysql(&diff.primary_key),
+                    qi(&diff.table_name),
+                    qi(&diff.primary_key),
                     pk
                 ));
             }
@@ -540,33 +739,70 @@ fn generate_statements(diff: &RowDiff) -> Vec<String> {
         if let Some(obj) = row.as_object() {
             let mut cols = Vec::new();
             let mut vals = Vec::new();
-            let mut updates = Vec::new();
+            let mut non_pk_updates = Vec::new();
             for (k, v) in obj {
-                cols.push(sql_util::quote_ident_mysql(k));
+                cols.push(qi(k));
                 vals.push(sql_util::format_sql_value(v));
                 if k != &diff.primary_key {
-                    updates.push(format!(
-                        "{} = new.{}",
-                        sql_util::quote_ident_mysql(k),
-                        sql_util::quote_ident_mysql(k)
-                    ));
+                    non_pk_updates.push(k.clone());
                 }
             }
-            if updates.is_empty() {
-                stmts.push(format!(
-                    "INSERT IGNORE INTO {} ({}) VALUES ({});",
-                    sql_util::quote_ident_mysql(&diff.table_name),
-                    cols.join(", "),
-                    vals.join(", ")
-                ));
-            } else {
-                stmts.push(format!(
-                    "INSERT INTO {} ({}) VALUES ({}) AS new ON DUPLICATE KEY UPDATE {};",
-                    sql_util::quote_ident_mysql(&diff.table_name),
-                    cols.join(", "),
-                    vals.join(", "),
-                    updates.join(", ")
-                ));
+
+            match db_type {
+                DbType::MySQL | DbType::MariaDB => {
+                    if non_pk_updates.is_empty() {
+                        stmts.push(format!(
+                            "INSERT IGNORE INTO {} ({}) VALUES ({});",
+                            qi(&diff.table_name),
+                            cols.join(", "),
+                            vals.join(", ")
+                        ));
+                    } else {
+                        let updates: Vec<String> = non_pk_updates
+                            .iter()
+                            .map(|c| format!("{} = new.{}", qi(c), qi(c)))
+                            .collect();
+                        stmts.push(format!(
+                            "INSERT INTO {} ({}) VALUES ({}) AS new ON DUPLICATE KEY UPDATE {};",
+                            qi(&diff.table_name),
+                            cols.join(", "),
+                            vals.join(", "),
+                            updates.join(", ")
+                        ));
+                    }
+                }
+                DbType::PostgreSQL => {
+                    if non_pk_updates.is_empty() {
+                        stmts.push(format!(
+                            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING;",
+                            qi(&diff.table_name),
+                            cols.join(", "),
+                            vals.join(", ")
+                        ));
+                    } else {
+                        let updates: Vec<String> = non_pk_updates
+                            .iter()
+                            .map(|c| format!("{} = EXCLUDED.{}", qi(c), qi(c)))
+                            .collect();
+                        stmts.push(format!(
+                            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {};",
+                            qi(&diff.table_name),
+                            cols.join(", "),
+                            vals.join(", "),
+                            qi(&diff.primary_key),
+                            updates.join(", ")
+                        ));
+                    }
+                }
+                _ => {
+                    // SQLite and others: INSERT OR REPLACE
+                    stmts.push(format!(
+                        "INSERT OR REPLACE INTO {} ({}) VALUES ({});",
+                        qi(&diff.table_name),
+                        cols.join(", "),
+                        vals.join(", ")
+                    ));
+                }
             }
         }
     }
@@ -584,7 +820,7 @@ fn max_rows_per_chunk() -> usize {
         .max(1)
 }
 
-/// Stream rows in a PK range one at a time — O(1) memory for large exports.
+/// Stream rows in a PK range one at a time -- O(1) memory for large exports.
 /// Calls `on_row` for each row; returns total count processed.
 pub async fn fetch_rows_in_range_stream<F>(
     db: &DbClient,
@@ -599,70 +835,71 @@ where
     use futures_util::TryStreamExt;
 
     let _policy = TimeoutPolicy::default();
-    let pk_ident = sql_util::quote_ident_mysql(primary_key);
-    let tbl_ident = sql_util::quote_ident_mysql(table_name);
+    let pk_ident = sql_util::quote_ident(primary_key, db.db_type.clone());
+    let tbl_ident = sql_util::quote_ident(table_name, db.db_type.clone());
     let mut sql = format!("SELECT * FROM {table}", table = tbl_ident);
-    let mut has_where = false;
 
-    if range.start.is_some() {
-        sql.push_str(&format!(
-            " WHERE {pk} {op} ?",
-            pk = pk_ident,
-            op = if range.start_inclusive { ">=" } else { ">" }
-        ));
-        has_where = true;
-        if range.end.is_some() {
-            sql.push_str(&format!(
-                " AND {pk} {op} ?",
-                pk = pk_ident,
-                op = if range.end_inclusive { "<=" } else { "<" }
-            ));
-        }
-    } else if range.end.is_some() {
-        sql.push_str(&format!(
-            " WHERE {pk} {op} ?",
-            pk = pk_ident,
-            op = if range.end_inclusive { "<=" } else { "<" }
-        ));
-        has_where = true;
-    }
-
-    if !has_where && range.end.is_some() {
-        sql.push_str(&format!(
-            " WHERE {pk} {op} ?",
-            pk = pk_ident,
-            op = if range.end_inclusive { "<=" } else { "<" }
-        ));
-    }
-
+    let (conditions, bind_values) = build_pk_range_conditions(primary_key, &db.db_type, range);
+    sql.push_str(&conditions);
     sql.push_str(&format!(" ORDER BY {pk}", pk = pk_ident));
     sql.push_str(&format!(" LIMIT {}", max_rows_per_chunk()));
 
-    let mut q = sqlx::query(&sql);
-    if let Some(start) = &range.start {
-        q = q.bind(start.clone());
-        if let Some(end) = &range.end {
-            q = q.bind(end.clone());
+    match &db.pool {
+        DbPool::MySQL(p) => {
+            let mut q = sqlx::query(&sql);
+            for v in &bind_values {
+                q = q.bind(v.clone());
+            }
+            let mut stream = q.fetch(p);
+            let mut count = 0usize;
+            let mut on_row = on_row;
+            while let Some(row) = stream
+                .try_next()
+                .await
+                .map_err(|e| AppError::InternalError(e.to_string()))?
+            {
+                on_row(sql_util::mysql_row_to_json(&row));
+                count += 1;
+            }
+            Ok(count)
         }
-    } else if let Some(end) = &range.end {
-        q = q.bind(end.clone());
+        DbPool::Postgres(p) => {
+            let mut q = sqlx::query(&sql);
+            for v in &bind_values {
+                q = q.bind(v.clone());
+            }
+            let mut stream = q.fetch(p);
+            let mut count = 0usize;
+            let mut on_row = on_row;
+            while let Some(row) = stream
+                .try_next()
+                .await
+                .map_err(|e| AppError::InternalError(e.to_string()))?
+            {
+                on_row(sql_util::pg_row_to_json(&row));
+                count += 1;
+            }
+            Ok(count)
+        }
+        DbPool::SQLite(p) => {
+            let mut q = sqlx::query(&sql);
+            for v in &bind_values {
+                q = q.bind(v.clone());
+            }
+            let mut stream = q.fetch(p);
+            let mut count = 0usize;
+            let mut on_row = on_row;
+            while let Some(row) = stream
+                .try_next()
+                .await
+                .map_err(|e| AppError::InternalError(e.to_string()))?
+            {
+                on_row(sql_util::sqlite_row_to_json(&row));
+                count += 1;
+            }
+            Ok(count)
+        }
     }
-
-    let pool = db.mysql_pool()?;
-    let mut stream = q.fetch(pool);
-    let mut count = 0usize;
-    let mut on_row = on_row;
-
-    while let Some(row) = stream
-        .try_next()
-        .await
-        .map_err(|e| AppError::InternalError(e.to_string()))?
-    {
-        on_row(sql_util::mysql_row_to_json(&row));
-        count += 1;
-    }
-
-    Ok(count)
 }
 
 /// Generate a NULL-safe row-level checksum expression for the given columns.
@@ -796,5 +1033,76 @@ mod tests {
     fn max_rows_per_chunk_default_is_100k() {
         // Without env var, default should be 100_000
         assert_eq!(max_rows_per_chunk(), 100_000);
+    }
+
+    #[test]
+    fn generate_statements_mysql_upsert() {
+        let diff = RowDiff {
+            table_name: "users".to_string(),
+            primary_key: "id".to_string(),
+            mode: SyncMode::UpsertOnly,
+            insert_count: 1,
+            update_count: 0,
+            delete_count: 0,
+            inserts: vec![serde_json::json!({"id": 1, "name": "alice"})],
+            updates: vec![],
+            deletes: vec![],
+        };
+        let stmts = generate_statements(&diff, &DbType::MySQL);
+        assert!(stmts[0].contains("ON DUPLICATE KEY UPDATE"));
+        assert!(stmts[0].contains("`name` = new.`name`"));
+    }
+
+    #[test]
+    fn generate_statements_pg_upsert() {
+        let diff = RowDiff {
+            table_name: "users".to_string(),
+            primary_key: "id".to_string(),
+            mode: SyncMode::UpsertOnly,
+            insert_count: 1,
+            update_count: 0,
+            delete_count: 0,
+            inserts: vec![serde_json::json!({"id": 1, "name": "alice"})],
+            updates: vec![],
+            deletes: vec![],
+        };
+        let stmts = generate_statements(&diff, &DbType::PostgreSQL);
+        assert!(stmts[0].contains("ON CONFLICT"));
+        assert!(stmts[0].contains("EXCLUDED"));
+    }
+
+    #[test]
+    fn generate_statements_sqlite_upsert() {
+        let diff = RowDiff {
+            table_name: "users".to_string(),
+            primary_key: "id".to_string(),
+            mode: SyncMode::UpsertOnly,
+            insert_count: 1,
+            update_count: 0,
+            delete_count: 0,
+            inserts: vec![serde_json::json!({"id": 1, "name": "alice"})],
+            updates: vec![],
+            deletes: vec![],
+        };
+        let stmts = generate_statements(&diff, &DbType::SQLite);
+        assert!(stmts[0].contains("INSERT OR REPLACE"));
+    }
+
+    #[test]
+    fn generate_statements_mirror_delete() {
+        let diff = RowDiff {
+            table_name: "users".to_string(),
+            primary_key: "id".to_string(),
+            mode: SyncMode::Mirror,
+            insert_count: 0,
+            update_count: 0,
+            delete_count: 1,
+            inserts: vec![],
+            updates: vec![],
+            deletes: vec![serde_json::json!({"id": 42})],
+        };
+        let stmts = generate_statements(&diff, &DbType::PostgreSQL);
+        assert!(stmts[0].contains("DELETE FROM"));
+        assert!(stmts[0].contains("\"id\" = 42"));
     }
 }

@@ -61,8 +61,8 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
         const fallbackSource = list.find((c: any) => String(c?.id || '') !== (nextTarget || activeId)) || list[0];
         const nextSource = hasSource ? savedSource : String(fallbackSource?.id || '');
         if (nextSource) setSourceDbId(nextSource);
-      } catch (e: any) {
-        toast(tr('加载连接失败：', 'Failed to load connections: ') + (e?.message || String(e)), 'error');
+      } catch (e: unknown) {
+        toast(tr('加载连接失败：', 'Failed to load connections: ') + (e instanceof Error ? e.message : String(e)), 'error');
       } finally {
         setIsLoading(false);
       }
@@ -140,8 +140,8 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
       }
       toast(tr('对比完成。', 'Comparison completed.'), 'success');
       return true;
-    } catch (e: any) {
-      const msg = e?.message || String(e);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
       setErrorText(msg);
       toast(tr('对比失败：', 'Comparison failed: ') + msg, 'error');
       return false;
@@ -164,8 +164,8 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
       }
       toast(tr('预览生成完成。', 'Preview generated.'), 'success');
       return true;
-    } catch (e: any) {
-      const msg = e?.message || String(e);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
       setErrorText(msg);
       toast(tr('预览生成失败：', 'Failed to generate preview: ') + msg, 'error');
       return false;
@@ -189,8 +189,8 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
       }
       toast(tr('同步执行成功。', 'Sync executed successfully.'), 'success');
       onCancel();
-    } catch (e: any) {
-      const msg = e?.message || String(e);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
       setErrorText(msg);
       toast(tr('执行失败：', 'Execution failed: ') + msg, 'error');
       throw e;

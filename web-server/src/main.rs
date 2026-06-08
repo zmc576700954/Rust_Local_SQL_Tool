@@ -984,10 +984,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/tools/data-sync/preview", post(mysql_sync_preview))
         .route("/tools/data-sync/deploy", post(mysql_sync_deploy))
         .route("/tools/data-sync/jobs/:job_id", get(mysql_sync_job_status))
-        .route("/tools/mysql-sync/compare", post(mysql_sync_compare))
-        .route("/tools/mysql-sync/preview", post(mysql_sync_preview))
-        .route("/tools/mysql-sync/deploy", post(mysql_sync_deploy))
-        .route("/tools/mysql-sync/jobs/:job_id", get(mysql_sync_job_status))
         .route("/tools/perf-sync/start", post(perf_sync_start))
         .route("/tools/perf-sync/check", post(perf_sync_check))
         .route("/tools/perf-sync/jobs/:job_id", get(perf_sync_job_status))
@@ -1183,12 +1179,12 @@ async fn crud_insert(
     let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
         let mut guard = session.lock().await;
         guard.last_accessed = std::time::Instant::now();
-        let affected = CrudManager::insert(&mut *guard.conn, &crud_req)
+        let affected = CrudManager::insert_mysql(&mut *guard.conn, &crud_req)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, Some("active".to_string()))
     } else {
-        let affected = CrudManager::insert(db_client.mysql_pool()?, &crud_req)
+        let affected = CrudManager::insert(&db_client.pool, &crud_req)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, None)
@@ -1244,12 +1240,12 @@ async fn crud_update(
     let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
         let mut guard = session.lock().await;
         guard.last_accessed = std::time::Instant::now();
-        let affected = CrudManager::update(&mut *guard.conn, &crud_req)
+        let affected = CrudManager::update_mysql(&mut *guard.conn, &crud_req)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, Some("active".to_string()))
     } else {
-        let affected = CrudManager::update(db_client.mysql_pool()?, &crud_req)
+        let affected = CrudManager::update(&db_client.pool, &crud_req)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, None)
@@ -1307,12 +1303,12 @@ async fn crud_delete(
     let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
         let mut guard = session.lock().await;
         guard.last_accessed = std::time::Instant::now();
-        let affected = CrudManager::delete(&mut *guard.conn, &req.table_name, &req.condition)
+        let affected = CrudManager::delete_mysql(&mut *guard.conn, &req.table_name, &req.condition)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, Some("active".to_string()))
     } else {
-        let affected = CrudManager::delete(db_client.mysql_pool()?, &req.table_name, &req.condition)
+        let affected = CrudManager::delete(&db_client.pool, &req.table_name, &req.condition)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, None)
@@ -3135,10 +3131,10 @@ mod tests {
             .route("/sql/session-info", get(session_info))
             .route("/tools/schema-sync/diff", post(sync_schema_diff))
             .route("/tools/data-transfer/execute", post(transfer_execute))
-            .route("/tools/mysql-sync/compare", post(mysql_sync_compare))
-            .route("/tools/mysql-sync/preview", post(mysql_sync_preview))
-            .route("/tools/mysql-sync/deploy", post(mysql_sync_deploy))
-            .route("/tools/mysql-sync/jobs/:job_id", get(mysql_sync_job_status))
+            .route("/tools/data-sync/compare", post(mysql_sync_compare))
+            .route("/tools/data-sync/preview", post(mysql_sync_preview))
+            .route("/tools/data-sync/deploy", post(mysql_sync_deploy))
+            .route("/tools/data-sync/jobs/:job_id", get(mysql_sync_job_status))
             .route("/tools/perf-sync/start", post(perf_sync_start))
             .route("/tools/perf-sync/check", post(perf_sync_check))
             .route("/tools/perf-sync/jobs/:job_id", get(perf_sync_job_status))
@@ -3979,7 +3975,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/backend/tools/mysql-sync/compare")
+                    .uri("/backend/tools/data-sync/compare")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"source_db_id":"a","target_db_id":"b","table_name":"t","primary_key":"id","mode":"mirror","chunk_size":1000}"#,
@@ -4003,7 +3999,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/backend/tools/mysql-sync/jobs/not-exist")
+                    .uri("/backend/tools/data-sync/jobs/not-exist")
                     .body(Body::empty())
                     .unwrap(),
             )

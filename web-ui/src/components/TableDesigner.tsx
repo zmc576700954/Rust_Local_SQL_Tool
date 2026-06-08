@@ -51,8 +51,8 @@ export function TableDesigner({ tableName, isActive, dbId }: { tableName: string
       }
       const res = await api.previewDdl(originalSchema, newSchema)
       setPreviewSql(res.sql)
-    } catch (e: any) {
-      toast(e.message || 'Failed to generate DDL', 'error')
+    } catch (e: unknown) {
+      toast((e instanceof Error ? e.message : String(e)) || 'Failed to generate DDL', 'error')
     }
   }, [originalSchema, columns, indexes, foreignKeys, toast])
 
@@ -64,8 +64,8 @@ export function TableDesigner({ tableName, isActive, dbId }: { tableName: string
       toast('Table updated successfully', 'success')
       setPreviewSql(null)
       loadSchema()
-    } catch (e: any) {
-      toast(e.message || 'Failed to execute DDL', 'error')
+    } catch (e: unknown) {
+      toast((e instanceof Error ? e.message : String(e)) || 'Failed to execute DDL', 'error')
     } finally {
       setExecuting(false)
     }
@@ -121,8 +121,8 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
       } else {
         toast("AI 认为当前索引已经足够，没有新建议", "info");
       }
-    } catch (e: any) {
-      toast("AI 建议索引失败: " + (e.message || "Failed to parse AI response"), "error");
+    } catch (e: unknown) {
+      toast("AI 建议索引失败: " + (e instanceof Error ? e.message : String(e)), "error");
     } finally {
       setIsSuggesting(false);
     }

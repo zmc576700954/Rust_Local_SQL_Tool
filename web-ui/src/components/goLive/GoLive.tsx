@@ -75,8 +75,8 @@ export function GoLive({ onCancel }: GoLiveProps) {
             ? [{ id: 'active', name: `Active (${activeId})` }, ...conns]
             : [{ id: 'active', name: 'Active' }, ...conns]
         setDbConnections(withActive)
-      } catch (e: any) {
-        toast(tr('加载配置失败：', 'Failed to load config: ') + (e?.message || String(e)), 'error')
+      } catch (e: unknown) {
+        toast(tr('加载配置失败：', 'Failed to load config: ') + (e instanceof Error ? e.message : String(e)), 'error')
       }
     }
     fetchConfig()
@@ -120,7 +120,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
         if (status === 'completed' || status === 'error' || status === 'canceled') {
           stopPolling()
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         stopPolling()
         const err = parseError(e)
         setPollInterrupted({ job_id: id, message: err.message || String(e) })
@@ -185,7 +185,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
       }
       toast(tr('上线门禁任务已启动', 'Go-live job started'), 'success')
       startPolling(id)
-    } catch (e: any) {
+    } catch (e: unknown) {
       const err = parseError(e)
       toast(tr('启动失败：', 'Start failed: ') + (err.message || String(e)), 'error')
     } finally {
@@ -200,7 +200,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
       await api.toolJobCancel(jobId)
       toast(tr('Job 已取消', 'Job canceled'), 'success')
       startPolling(jobId)
-    } catch (e: any) {
+    } catch (e: unknown) {
       const err = parseError(e)
       toast(tr('取消失败：', 'Cancel failed: ') + (err.message || String(e)), 'error')
     } finally {

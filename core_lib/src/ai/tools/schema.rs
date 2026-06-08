@@ -133,6 +133,52 @@ impl Tool for QuerySchemaTool {
                     .collect::<Vec<_>>());
             }
 
+            if args.include_indexes {
+                let indexes = SchemaExtractor::get_indexes(
+                    &self.db_client,
+                    &self.db_name,
+                    &info.table_name,
+                )
+                .await
+                .map_err(|e| SchemaToolError(e.to_string()))?;
+
+                result["indexes"] = json!(indexes
+                    .iter()
+                    .map(|idx| {
+                        json!({
+                            "name": idx.index_name,
+                            "column": idx.column_name,
+                            "non_unique": idx.non_unique,
+                            "type": idx.index_type,
+                        })
+                    })
+                    .collect::<Vec<_>>());
+            }
+
+            if args.include_foreign_keys {
+                let fks = SchemaExtractor::get_foreign_keys(
+                    &self.db_client,
+                    &self.db_name,
+                    &info.table_name,
+                )
+                .await
+                .map_err(|e| SchemaToolError(e.to_string()))?;
+
+                result["foreign_keys"] = json!(fks
+                    .iter()
+                    .map(|fk| {
+                        json!({
+                            "constraint": fk.constraint_name,
+                            "column": fk.column_name,
+                            "referenced_table": fk.referenced_table_name,
+                            "referenced_column": fk.referenced_column_name,
+                            "update_rule": fk.update_rule,
+                            "delete_rule": fk.delete_rule,
+                        })
+                    })
+                    .collect::<Vec<_>>());
+            }
+
             serde_json::to_string_pretty(&result)
                 .map_err(|e| SchemaToolError(e.to_string()))
         } else {

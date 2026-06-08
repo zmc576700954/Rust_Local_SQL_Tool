@@ -23,3 +23,5 @@ crc32fast = { workspace = true }
 futures-util = "0.3"
 rig-core = { version = "0.36", features = ["derive"] }
 tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+url = "2"

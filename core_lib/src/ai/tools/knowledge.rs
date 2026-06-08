@@ -67,24 +67,25 @@ impl Tool for QueryKnowledgeTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let items = self.knowledge_base.retrieve(
+        let scored_items = self.knowledge_base.retrieve_scored(
             self.db_connection_id.as_deref(),
             &args.query,
             args.limit,
         );
 
-        if items.is_empty() {
+        if scored_items.is_empty() {
             return Ok("No matching knowledge entries found.".to_string());
         }
 
-        let results: Vec<serde_json::Value> = items
+        let results: Vec<serde_json::Value> = scored_items
             .iter()
-            .map(|item| {
+            .map(|(item, score)| {
                 json!({
                     "type": format!("{:?}", item.knowledge_type),
                     "title": item.title,
                     "content": item.content,
                     "description": item.description,
+                    "relevance_score": score,
                 })
             })
             .collect();

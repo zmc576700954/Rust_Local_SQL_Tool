@@ -79,6 +79,17 @@ pub struct AiQueryResponse {
     pub sql_empty_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_information: Vec<String>,
+    // Grounding metadata
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grounding_evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_tables: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_confirmation: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -99,6 +110,17 @@ pub struct ChatResponse {
     pub sql_empty_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_information: Vec<String>,
+    // Grounding metadata
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grounding_evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_tables: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_confirmation: Option<bool>,
 }
 
 fn log_ai_intent_metadata(
@@ -129,6 +151,7 @@ fn normalize_ai_mode(mode: Option<&str>) -> Option<&str> {
         Some("generate") | Some("generate_sql") => Some("generate"),
         Some("optimize") | Some("optimize_sql") => Some("optimize"),
         Some("explain") | Some("explain_sql") => Some("explain"),
+        Some("fix") | Some("fix_sql") => Some("fix"),
         _ => None,
     }
 }
@@ -251,6 +274,11 @@ pub async fn ai_query(
                 task_type: intent.task_type,
                 sql_empty_reason: intent.sql_empty_reason,
                 missing_information: intent.missing_information,
+                grounding_evidence: intent.grounding_evidence,
+                assumptions: intent.assumptions,
+                referenced_tables: intent.referenced_tables,
+                risk_level: intent.risk_level,
+                needs_confirmation: intent.needs_confirmation,
             }))
         }
         Err(e) => Err(map_ai_error(e)),
@@ -501,6 +529,11 @@ pub async fn chat_to_sql(
         task_type: intent.task_type,
         sql_empty_reason: intent.sql_empty_reason,
         missing_information: intent.missing_information,
+        grounding_evidence: intent.grounding_evidence,
+        assumptions: intent.assumptions,
+        referenced_tables: intent.referenced_tables,
+        risk_level: intent.risk_level,
+        needs_confirmation: intent.needs_confirmation,
     }))
 }
 
@@ -566,6 +599,7 @@ pub async fn chat_to_sql_stream(
     let rule_store = state.rule_store.read().await.clone();
     let policy = state.policy.read().await.clone();
     let knowledge_base = state.knowledge_base.read().await.clone();
+    let cached_schema = get_schema_internal(&state).await;
 
     let url = config.get_active_db_url().unwrap_or_default();
     let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
@@ -594,6 +628,24 @@ pub async fn chat_to_sql_stream(
 
     let extra_guidance = "Prefer concise SQL. First resolve entities, filters, time range, grouping, ordering, and output columns from the user's request.";
 
+    // Create a cancellation token so the stream can be aborted when the client disconnects
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    // Build schema briefing for preamble injection — gives the agent
+    // a global view of the database before it starts calling tools
+    let schema_briefing_str = if let Some(schema) = cached_schema.as_ref() {
+        let briefing = core_lib::ai::schema_briefing::SchemaBriefing::build(
+            schema,
+            &scoped_query,
+            &knowledge_base.items,
+        );
+        Some(briefing.summary_text)
+    } else {
+        None
+    };
+
+    let task_type = core_lib::ai::agent::TaskType::from_mode(normalized_mode);
+
     let agent_stream = core_lib::ai::agent::run_agent_streaming(
         &config,
         db_client.as_ref(),
@@ -603,7 +655,10 @@ pub async fn chat_to_sql_stream(
         &knowledge_base,
         &policy,
         chat_history.as_deref(),
+        schema_briefing_str.as_deref(),
         Some(extra_guidance),
+        cancel_token,
+        &task_type,
     )
     .await
     .map_err(|e| match e {

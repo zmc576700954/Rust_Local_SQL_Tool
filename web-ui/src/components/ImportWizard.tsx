@@ -160,9 +160,9 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
       setMapping(initialMapping);
       setStep(2);
       setError('');
-    } catch (err: any) {
-      setError(err.message || 'Error parsing file');
-      toast(err.message || 'Error parsing file', 'error');
+    } catch (err: unknown) {
+      setError((err instanceof Error ? err.message : String(err)) || 'Error parsing file');
+      toast((err instanceof Error ? err.message : String(err)) || 'Error parsing file', 'error');
       setFile(null);
     }
   };
@@ -188,9 +188,9 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
           setPollInterrupted(null);
           alive = false;
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (!alive) return;
-        setPollInterrupted({ job_id: jobId, message: e?.response?.data?.message || e?.message || tr('获取任务状态失败', 'Failed to fetch job status') });
+        setPollInterrupted({ job_id: jobId, message: (e as any)?.response?.data?.message || (e instanceof Error ? e.message : '') || tr('获取任务状态失败', 'Failed to fetch job status') });
         setLoading(false);
         alive = false;
       }
@@ -213,8 +213,8 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
         : await api.importJobStart({ table_name: tableName, data: parsedData, mapping, skip_errors: skipErrors });
       setJobId(res.job_id);
       setResumeJobId(res.job_id);
-    } catch (err: any) {
-      const msg = err?.response?.data?.message || err?.response?.data?.error || err?.message || tr('导入失败', 'Import failed');
+    } catch (err: unknown) {
+      const msg = (err as any)?.response?.data?.message || (err as any)?.response?.data?.error || (err instanceof Error ? err.message : String(err)) || tr('导入失败', 'Import failed');
       setError(msg);
       toast(msg, 'error');
       setLoading(false);

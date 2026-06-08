@@ -1669,7 +1669,7 @@ export function DataTable({
           normalizedFailures.length === saveReviewCounts.total ? 'error' : 'success',
         );
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       setSaveAttemptReport(null);
       window.dispatchEvent(new CustomEvent('global-toast', { detail: { message: `Error saving changes: ${extractCrudErrorMessage(e)}`, type: 'error' } }));
     } finally {

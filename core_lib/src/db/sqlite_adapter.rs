@@ -1,7 +1,6 @@
 use crate::config::DbType;
 use crate::db_protocol::*;
 use crate::error::AppError;
-use serde_json::Value;
 use sqlx::{Column, Row};
 
 #[derive(Debug, Clone)]
@@ -51,7 +50,7 @@ impl UnifiedQueryEngine for SqliteAdapter {
             for row in &rows {
                 let mut vals = Vec::with_capacity(columns.len());
                 for i in 0..columns.len() {
-                    vals.push(sqlite_cell_to_value(row, i));
+                    vals.push(crate::sql_util::sqlite_cell_to_value(row, i));
                 }
                 result_rows.push(vals);
             }
@@ -132,25 +131,3 @@ impl UnifiedMetadataProvider for SqliteAdapter {
     }
 }
 
-/// Extract a cell from a SqliteRow as serde_json::Value
-fn sqlite_cell_to_value(row: &sqlx::sqlite::SqliteRow, idx: usize) -> Value {
-    // SQLite is dynamically typed; try types in order
-    if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<f64>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
-        if let Some(bytes) = v {
-            return serde_json::json!(String::from_utf8_lossy(&bytes).to_string());
-        }
-    }
-    Value::Null
-}

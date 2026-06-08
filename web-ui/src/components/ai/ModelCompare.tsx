@@ -42,8 +42,8 @@ export function ModelCompare({ onCancel }: ModelCompareProps) {
         const fallbackSource = list.find((c: any) => String(c?.id || '') !== (nextTarget || activeId)) || list[0];
         const nextSource = hasSource ? savedSource : String(fallbackSource?.id || '');
         if (nextSource) setSourceDbId(nextSource);
-      } catch (e: any) {
-        const msg = e?.message || String(e);
+      } catch (e: unknown) {
+        const msg = (e instanceof Error ? e.message : String(e));
         setErrorText(msg);
         toast(tr('加载连接失败：', 'Failed to load connections: ') + msg, 'error');
       } finally {
@@ -98,8 +98,8 @@ export function ModelCompare({ onCancel }: ModelCompareProps) {
       const result = await api.syncSchemaDiff(sourceDbId, targetDbId);
       setDiff(result as SchemaDiff);
       toast(tr('模型对比完成。', 'Model comparison completed.'), 'success');
-    } catch (e: any) {
-      const msg = e?.message || String(e);
+    } catch (e: unknown) {
+      const msg = (e instanceof Error ? e.message : String(e));
       setErrorText(msg);
       toast(tr('模型对比失败：', 'Model comparison failed: ') + msg, 'error');
       setDiff(null);

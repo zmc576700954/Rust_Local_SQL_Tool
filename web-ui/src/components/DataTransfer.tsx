@@ -77,9 +77,9 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
           setJobId(null);
           setIsLoading(false);
         }
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (!alive) return;
-        toast(tr('获取任务状态失败：', 'Failed to fetch job status: ') + (e?.message || ''), 'error');
+        toast(tr('获取任务状态失败：', 'Failed to fetch job status: ') + ((e instanceof Error ? e.message : '') || ''), 'error');
         setJobId(null);
         setIsLoading(false);
       }
@@ -139,8 +139,8 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
                 compare_based: !!dmlRes.compare_based,
               });
             }
-          } catch (e: any) {
-            const msg = e?.response?.data?.message || e.message;
+          } catch (e: unknown) {
+            const msg = (e as any)?.response?.data?.message || (e instanceof Error ? e.message : String(e));
             toast(tr('生成传输脚本失败：', 'Failed to generate transfer script: ') + msg, 'error');
             setIsLoading(false);
             return false;
@@ -157,8 +157,8 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
           setMappings(defaultMappings);
         }
         
-      } catch (e: any) {
-        toast(tr('上传文件失败：', 'Failed to upload file: ') + e.message, 'error');
+      } catch (e: unknown) {
+        toast(tr('上传文件失败：', 'Failed to upload file: ') + (e instanceof Error ? e.message : String(e)), 'error');
         setIsLoading(false);
         return false;
       }
@@ -228,8 +228,8 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
         });
       }
       return true;
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || e.message;
+    } catch (e: unknown) {
+      const msg = (e as any)?.response?.data?.message || (e instanceof Error ? e.message : String(e));
       toast(tr('生成传输脚本失败：', 'Failed to generate transfer script: ') + msg, 'error');
       return false;
     } finally {
@@ -247,8 +247,8 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
       const res = await api.importSqlJobStart({ sql: dml, force: true, db_id: targetDbId || undefined });
       setJobId(res.job_id);
       setIsLoading(false);
-    } catch (e: any) {
-      toast(tr('执行传输失败：', 'Failed to execute transfer: ') + e.message, 'error');
+    } catch (e: unknown) {
+      toast(tr('执行传输失败：', 'Failed to execute transfer: ') + (e instanceof Error ? e.message : String(e)), 'error');
       setIsLoading(false);
       throw e;
     }
@@ -258,7 +258,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
     if (jobId) {
       try {
         await api.toolJobCancel(jobId);
-      } catch (e: any) {
+      } catch (e: unknown) {
         void e;
       }
     }

@@ -948,7 +948,7 @@ pub fn resolve_go_live_connections(
             let db_type = conn
                 .db_type
                 .clone()
-                .unwrap_or_else(|| DbType::from_url(&url));
+                .unwrap_or_else(|| DbType::from_url(&url).unwrap_or(DbType::MySQL));
             if url.trim().is_empty() {
                 errors.push(format!("missing db url for connection_id={}", id));
             }

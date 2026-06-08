@@ -2,7 +2,6 @@ use crate::config::DbType;
 use crate::db_protocol::*;
 use crate::error::AppError;
 use crate::sql_util;
-use serde_json::Value;
 use sqlx::{Column, Row};
 
 #[derive(Debug, Clone)]
@@ -52,7 +51,7 @@ impl UnifiedQueryEngine for PgAdapter {
             for row in &rows {
                 let mut vals = Vec::with_capacity(columns.len());
                 for i in 0..columns.len() {
-                    vals.push(pg_cell_to_value(row, i));
+                    vals.push(sql_util::pg_cell_to_value(row, i));
                 }
                 result_rows.push(vals);
             }
@@ -151,44 +150,3 @@ impl UnifiedMetadataProvider for PgAdapter {
     }
 }
 
-/// Extract a cell from a PgRow as serde_json::Value
-fn pg_cell_to_value(row: &sqlx::postgres::PgRow, idx: usize) -> Value {
-    if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<i16>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<i32>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<i64>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<f32>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<f64>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<chrono::NaiveDateTime>, _>(idx) {
-        return serde_json::json!(v.map(|dt| dt.to_string()));
-    }
-    if let Ok(v) = row.try_get::<Option<chrono::NaiveDate>, _>(idx) {
-        return serde_json::json!(v.map(|d| d.to_string()));
-    }
-    if let Ok(v) = row.try_get::<Option<chrono::NaiveTime>, _>(idx) {
-        return serde_json::json!(v.map(|t| t.to_string()));
-    }
-    if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
-        return serde_json::json!(v);
-    }
-    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
-        if let Some(bytes) = v {
-            return serde_json::json!(sql_util::escape_sql_string(
-                &String::from_utf8_lossy(&bytes)
-            ));
-        }
-    }
-    Value::Null
-}
