@@ -4,7 +4,6 @@ use super::util::row_to_json;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
     response::Response,
     Json,
 };
@@ -24,13 +23,12 @@ use tokio::sync::RwLock;
 use crate::state::*;
 use crate::mysql_codec::*;
 use crate::{
-    resolve_db_client_for_request, is_read_only_connection,
     ExportJobStartRequest, ImportJobStartRequest, ImportSqlJobStartRequest,
     ToolJobStartResponse, DB_CLIENT_CACHE_TTL, CachedDbClient,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct GoLiveThresholds {
+pub(crate) struct GoLiveThresholds {
     #[serde(default)]
     max_total_ms: Option<u64>,
     #[serde(default)]
@@ -56,7 +54,7 @@ enum GoLiveStepStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct GoLiveStepReport {
+pub(crate) struct GoLiveStepReport {
     name: String,
     connection_id: Option<String>,
     status: GoLiveStepStatus,
@@ -67,7 +65,7 @@ struct GoLiveStepReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct GoLiveReport {
+pub(crate) struct GoLiveReport {
     job_id: String,
     operator: Option<String>,
     connection_ids: Vec<String>,
@@ -900,7 +898,7 @@ pub async fn go_live_job_start(
 }
 
 #[derive(Debug, Clone)]
-struct GoLiveConnSpec {
+pub(crate) struct GoLiveConnSpec {
     id: String,
     url: String,
     db_type: DbType,
@@ -1524,9 +1522,8 @@ pub async fn run_go_live_job(
             details = Some(serde_json::json!({ "reason": "missing_key" }));
             GoLiveStepStatus::Skip
         } else {
-            let planner = state.planner.read().await.clone();
-            match planner
-                .generate_rule_template("go-live smoke", "SELECT 1;")
+            let config = state.config.read().await.clone();
+            match core_lib::ai::agent::generate_rule_template(&config, "go-live smoke", "SELECT 1;")
                 .await
             {
                 Ok(sql) => {
@@ -1631,7 +1628,7 @@ pub async fn write_go_live_report(
     Ok(report_path)
 }
 
-struct ExportStats {
+pub(crate) struct ExportStats {
     sha256: String,
     line_count: u64,
     bytes: u64,

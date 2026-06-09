@@ -1,8 +1,11 @@
 #![recursion_limit = "256"]
 
 mod ai_handlers;
+mod bridge;
 mod handlers;
 mod mysql_codec;
+mod routes;
+mod service_handlers;
 mod ssh;
 mod state;
 
@@ -12,7 +15,7 @@ use mysql_codec::*;
 use handlers::*;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::{HeaderMap, Request, StatusCode},
     middleware::Next,
     response::Response,
@@ -387,8 +390,8 @@ async fn save_rule(
     Json(req): Json<SaveRuleRequest>,
 ) -> Result<Json<Rule>, AppError> {
     // Call AI to extract templates
-    let planner = state.planner.read().await.clone();
-    let sql_template = match planner.generate_rule_template(&req.prompt, &req.sql).await {
+    let config = state.config.read().await.clone();
+    let sql_template = match core_lib::ai::agent::generate_rule_template(&config, &req.prompt, &req.sql).await {
         Ok(res) => res,
         Err(e) => {
             tracing::warn!("AI template extraction failed, falling back to raw SQL: {:?}", e);
@@ -761,37 +764,28 @@ async fn db_test(Json(req): Json<DbTestRequest>) -> Result<Json<DbTestResponse>,
         server_version,
     )))
 }
-use core_lib::timeout_policy::TimeoutPolicy;
 use core_lib::{
     ai::{
-        gateway::{AiError, AiGateway},
-        planner::Planner,
+        agent::AgentError,
         policy_store::{Policy, PolicyStore},
     },
     config::{AppConfig, DbType},
     crud::{CrudManager, CrudRequest},
     db::DbClient,
     knowledge_base::KnowledgeBase,
-    mysql_sync::{CompareResult, MySqlDataSyncEngine, PreviewResult, SyncMode},
     navicat::{NavicatConnection, NavicatParser},
     offline_parser::OfflineParser,
-    perf_report::{summarize_perf_samples, PerfBudget, PerfProbeSummary, PerfSample},
     rule_engine::{Rule, RuleStore, RuleType},
     schema::{SchemaExtractor, SchemaResponse, TableWithDetails},
     sql_history::{SqlHistory, SqlHistoryStore},
     tools::{DataExporter, DdlEngine, MockDataGenerator, SyncEngine},
+    timeout_policy::TimeoutPolicy,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::{
-    io::AsyncWriteExt,
-    sync::{Mutex, RwLock, Semaphore},
-};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 use tower_http::{
     cors::CorsLayer,
     services::{ServeDir, ServeFile},
@@ -887,8 +881,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let gateway = AiGateway::new(config.clone());
-    let planner = Planner::new(gateway);
     let rule_store = RuleStore::load().await.unwrap_or_default();
     let policy = PolicyStore::load_effective()
         .await
@@ -900,7 +892,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: Arc::new(RwLock::new(config)),
         db_client: Arc::new(RwLock::new(db_client)),
         db_client_cache: Arc::new(RwLock::new(HashMap::new())),
-        planner: Arc::new(RwLock::new(planner)),
         virtual_schema: Arc::new(RwLock::new(None)),
         schema_cache: Arc::new(RwLock::new(HashMap::new())),
         table_schema_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -1109,35 +1100,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn map_ai_error(e: AiError) -> AppError {
+fn map_agent_error(e: AgentError) -> AppError {
     match e {
-        AiError::Auth(msg) => AppError::AiAuth(msg),
-        AiError::Forbidden(msg) => AppError::AiForbidden(msg),
-        AiError::ModelNotFound(msg) => AppError::AiModelNotFound(msg),
-        AiError::NoTokens => AppError::BadRequest("No tokens available in pool".to_string()),
-        AiError::RateLimited(msg) => AppError::AiRateLimited(msg),
-        AiError::ServerError(msg) => AppError::ExternalServiceUnavailable(msg),
-        AiError::Network(e) => {
-            if e.is_timeout() {
-                AppError::AiAgentTimeout(e.to_string())
-            } else if e.to_string().to_lowercase().contains("proxy")
-                || e.to_string().to_lowercase().contains("tunnel")
-            {
-                AppError::AiProxy(e.to_string())
-            } else if e.is_connect() {
-                AppError::ExternalServiceUnavailable(e.to_string())
+        AgentError::MissingApiKey => AppError::AiAuth("Missing API key. Please configure your AI token.".to_string()),
+        AgentError::NoTokens => AppError::BadRequest("No tokens available in pool".to_string()),
+        AgentError::Auth(msg) => {
+            let body = serde_json::json!({
+                "error": "ai_auth_failed",
+                "message": "AI 鉴权失败，请在引导页里更新 AI Token / Relay 配置后重试。",
+                "detail": msg,
+            }).to_string();
+            AppError::AiAuth(body)
+        }
+        AgentError::Forbidden(msg) => AppError::AiForbidden(msg),
+        AgentError::ModelNotFound(msg) => AppError::AiModelNotFound(msg),
+        AgentError::RateLimited(msg) => AppError::AiRateLimited(msg),
+        AgentError::ServerError(msg) => AppError::ExternalServiceUnavailable(msg),
+        AgentError::Network(msg) => {
+            let lower = msg.to_lowercase();
+            if lower.contains("timeout") {
+                AppError::AiAgentTimeout(msg)
+            } else if lower.contains("proxy") || lower.contains("tunnel") {
+                AppError::AiProxy(msg)
+            } else if lower.contains("connection") || lower.contains("connect") {
+                AppError::ExternalServiceUnavailable(msg)
             } else {
-                AppError::AiAgentTimeout(e.to_string())
+                AppError::AiAgentTimeout(msg)
             }
         }
-        AiError::ApiError(msg) => AppError::InternalError(msg),
+        AgentError::Agent(msg) => AppError::InternalError(msg),
     }
 }
 
 // ----------------- CRUD API Handlers -----------------
 
 #[derive(Deserialize)]
-struct CrudMutationRequest {
+pub(crate) struct CrudMutationRequest {
     table_name: String,
     data: serde_json::Value,
     condition: Option<serde_json::Map<String, serde_json::Value>>,
@@ -1268,7 +1266,7 @@ async fn crud_update(
 }
 
 #[derive(Deserialize)]
-struct DeleteRequest {
+pub(crate) struct DeleteRequest {
     table_name: String,
     condition: serde_json::Map<String, serde_json::Value>,
     db_id: Option<String>,
@@ -1410,12 +1408,7 @@ async fn update_config(
         }
     }
 
-    // Update Planner's gateway config
-    // Actually we need mutability on Planner.
-    // For now, recreate Planner and Gateway
-    let gateway = AiGateway::new(new_config.clone());
-    let mut planner_write = state.planner.write().await;
-    *planner_write = Planner::new(gateway);
+    // AI config is now read fresh from AppState.config on each request.
 
     Ok(Json(config_for_client(&new_config)))
 }
@@ -1841,7 +1834,7 @@ pub(crate) struct ExecuteResponse {
 }
 
 #[derive(Deserialize)]
-struct ExecuteCancelRequest {
+pub(crate) struct ExecuteCancelRequest {
     cancel_token: String,
 }
 
@@ -1851,7 +1844,7 @@ struct ExecuteCancelResponse {
 }
 
 #[derive(Deserialize)]
-struct ExecuteTransactionRequest {
+pub(crate) struct ExecuteTransactionRequest {
     action: String,
     transaction_id: String,
     db_id: Option<String>,
@@ -2334,10 +2327,9 @@ async fn generate_mock_data(
         foreign_keys,
     };
 
-    let planner = state.planner.read().await.clone();
-    let gateway = planner.gateway;
+    let config = state.config.read().await.clone();
 
-    let sql = MockDataGenerator::generate(&gateway, &db_client, &table, req.row_count, req.rules)
+    let sql = MockDataGenerator::generate(&config, &db_client, &table, req.row_count, req.rules)
         .await
         .map_err(AppError::InternalError)?;
 
@@ -3073,8 +3065,6 @@ mod tests {
 
     fn test_state() -> AppState {
         let config = AppConfig::default();
-        let gateway = AiGateway::new(config.clone());
-        let planner = Planner::new(gateway);
         let limits = RuntimeLimits {
             temp_dir: format!("/tmp/local-ai-sql-test-{}", uuid::Uuid::new_v4()),
             ..Default::default()
@@ -3084,7 +3074,6 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             db_client: Arc::new(RwLock::new(None)),
             db_client_cache: Arc::new(RwLock::new(HashMap::new())),
-            planner: Arc::new(RwLock::new(planner)),
             virtual_schema: Arc::new(RwLock::new(None)),
             schema_cache: Arc::new(RwLock::new(HashMap::new())),
             table_schema_cache: Arc::new(RwLock::new(HashMap::new())),

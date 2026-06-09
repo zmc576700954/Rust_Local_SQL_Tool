@@ -1,6 +1,6 @@
 pub mod ai;
-pub mod ai_agent;
 pub mod config;
+pub mod crypto;
 pub mod crud;
 pub mod db;
 pub mod error;
@@ -11,6 +11,7 @@ pub mod perf_report;
 pub mod rule_engine;
 pub mod rule_matcher;
 pub mod schema;
+pub mod service;
 pub mod sql;
 pub mod sync;
 pub mod timeout_policy;

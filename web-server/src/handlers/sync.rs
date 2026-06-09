@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use crate::quote_mysql_ident;
 
 use crate::state::*;
-use crate::{resolve_db_client_for_request, get_temp_db_client, GAP_TOO_LARGE_MSG};
+use crate::{get_temp_db_client, GAP_TOO_LARGE_MSG};
 
 #[derive(Deserialize)]
 pub(crate) struct MySqlSyncCompareRequest {

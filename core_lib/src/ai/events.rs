@@ -1,3 +1,4 @@
+use crate::config::{AiConnectionMode, AiProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -92,5 +93,21 @@ pub struct AgentResult {
     pub risk_level: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_confirmation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_rule_id: Option<String>,
     pub events: Vec<AgentEvent>,
+}
+
+/// AI provider health check report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiHealthReport {
+    pub ok: bool,
+    pub active_ai_profile_id: Option<String>,
+    pub provider: AiProvider,
+    pub mode: AiConnectionMode,
+    pub endpoint: String,
+    pub model_id: String,
+    pub tier: String,
+    pub latency_ms: Option<u128>,
+    pub result_preview: Option<String>,
 }

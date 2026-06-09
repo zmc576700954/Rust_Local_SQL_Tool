@@ -286,16 +286,86 @@ pub fn sqlite_cell_to_string(row: &sqlx::sqlite::SqliteRow, ordinal: usize) -> O
 
 /// Check if a SQL statement is a mutation (INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE/CREATE/REPLACE).
 /// Used for read-only mode enforcement.
+///
+/// Strips both single-line (`--`) and multi-line (`/* ... */)`) comments,
+/// as well as WITH...AS CTEs, before checking the first keyword.
+/// This prevents bypass via inline comments like `/**/INSERT` or `SELECT /*x*/INSERT`.
 pub fn is_mutation_sql(sql: &str) -> bool {
-    let trimmed = sql.trim().to_uppercase();
-    // Skip leading comments and WITH...AS CTEs
-    let stripped = trimmed
-        .lines()
-        .map(|l| l.trim_start())
-        .filter(|l| !l.starts_with("--") && !l.starts_with("/*"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let first_word = stripped.split_whitespace().next().unwrap_or("");
+    let upper = sql.trim().to_uppercase();
+
+    // Strip multi-line comments /* ... */ (may span multiple lines or be inline)
+    let mut stripped = String::with_capacity(upper.len());
+    let mut in_ml_comment = false;
+    let mut chars = upper.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_ml_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next(); // consume '/'
+                in_ml_comment = false;
+                // Replace comment with a space so keywords don't merge
+                stripped.push(' ');
+            }
+            // Skip everything inside comment
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next(); // consume '*'
+            in_ml_comment = true;
+            continue;
+        }
+        if ch == '-' && chars.peek() == Some(&'-') {
+            // Single-line comment: skip until end of line
+            chars.by_ref().take_while(|c| *c != '\n').for_each(drop);
+            stripped.push(' ');
+            continue;
+        }
+        stripped.push(ch);
+    }
+
+    // Now strip leading WITH ... AS CTEs
+    // Walk through words: if we see "WITH" followed by an identifier then "AS",
+    // skip the CTE preamble until we reach the actual statement keyword.
+    let words: Vec<&str> = stripped.split_whitespace().collect();
+    let mut idx = 0;
+
+    // Skip optional WITH ... AS (...),  ... AS (...) preamble
+    if !words.is_empty() && words[idx] == "WITH" {
+        idx += 1;
+        // CTEs repeat: name AS (subselect), name2 AS (subselect), ...
+        // We just advance past all CTE names until we find a non-CTE keyword.
+        // A CTE starts with an identifier followed by AS.
+        while idx < words.len() {
+            let w = words[idx];
+            // If this word is a real statement keyword, we've exited the CTE preamble
+            if matches!(
+                w,
+                "SELECT"
+                    | "INSERT"
+                    | "UPDATE"
+                    | "DELETE"
+                    | "DROP"
+                    | "ALTER"
+                    | "TRUNCATE"
+                    | "CREATE"
+                    | "REPLACE"
+                    | "GRANT"
+                    | "REVOKE"
+                    | "SHOW"
+                    | "DESCRIBE"
+                    | "DESC"
+                    | "EXPLAIN"
+                    | "SET"
+                    | "USE"
+                    | "CALL"
+            ) {
+                break;
+            }
+            // Otherwise this is part of the CTE name / AS keyword — skip it
+            idx += 1;
+        }
+    }
+
+    let first_word = words.get(idx).copied().unwrap_or("");
     matches!(
         first_word,
         "INSERT"
@@ -546,6 +616,9 @@ mod tests {
         assert!(is_mutation_sql("CREATE TABLE t (id INT)"));
         assert!(is_mutation_sql("REPLACE INTO t VALUES (1)"));
         assert!(is_mutation_sql("-- comment\nINSERT INTO t VALUES (1)"));
+        assert!(is_mutation_sql("/* block comment */\nINSERT INTO t VALUES (1)"));
+        assert!(is_mutation_sql("GRANT SELECT ON t TO user"));
+        assert!(is_mutation_sql("REVOKE SELECT ON t FROM user"));
     }
 
     #[test]
@@ -555,6 +628,23 @@ mod tests {
         assert!(!is_mutation_sql("DESCRIBE t"));
         assert!(!is_mutation_sql("EXPLAIN SELECT * FROM t"));
         assert!(!is_mutation_sql("-- read only\nSELECT 1"));
+        assert!(!is_mutation_sql("WITH cte AS (SELECT 1) SELECT * FROM cte"));
+    }
+
+    #[test]
+    fn is_mutation_sql_blocks_comment_bypass() {
+        // Inline comment bypass: /**/INSERT should be detected as INSERT
+        assert!(is_mutation_sql("/**/INSERT INTO t VALUES (1)"));
+        // Multi-line comment before mutation keyword
+        assert!(is_mutation_sql("/*\ncomment\n*/\nDROP TABLE t"));
+        // Tab between comment and keyword
+        assert!(is_mutation_sql("-- comment\t\nDELETE FROM t"));
+        // WITH CTE followed by mutation
+        assert!(is_mutation_sql("WITH cte AS (SELECT 1) INSERT INTO t SELECT * FROM cte"));
+        // Comment with embedded whitespace bypassing
+        assert!(is_mutation_sql("/*x*/DROP TABLE t"));
+        // Nested-looking inline comment
+        assert!(is_mutation_sql("/**/GRANT SELECT ON t TO user"));
     }
 
     #[test]

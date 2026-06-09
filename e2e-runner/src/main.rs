@@ -1,6 +1,6 @@
 use axum::{routing::post, Json, Router};
 use chrono::{DateTime, Utc};
-use core_lib::ai::gateway::AiGateway;
+use core_lib::ai::provider_utils;
 use core_lib::config::{AiConnectionMode, AiProvider, AppConfig};
 use core_lib::db::DbClient;
 use core_lib::mysql_sync::{MySqlDataSyncEngine, SyncMode};
@@ -271,14 +271,14 @@ async fn ai_proxy_failure_split_e2e() -> Result<(), String> {
 
     std::env::remove_var("HTTP_PROXY");
     std::env::remove_var("HTTPS_PROXY");
-    let ok = AiGateway::new(config.clone()).health_check().await;
+    let ok = provider_utils::health_check(&config.clone()).await;
     ensure(
         ok.is_ok(),
         format!("ai health should succeed: {:?}", ok.err()),
     )?;
 
     std::env::set_var("HTTP_PROXY", format!("http://{}", proxy_addr));
-    let fail = AiGateway::new(config).health_check().await;
+    let fail = provider_utils::health_check(&config).await;
     ensure(fail.is_err(), "ai health should fail when proxy enabled")?;
 
     if let Some(v) = prev_http_proxy {

@@ -2,17 +2,14 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
     Json,
 };
 use core_lib::{
     db::DbClient,
     error::AppError,
-    perf_report::{summarize_perf_samples, PerfBudget, PerfProbeSummary, PerfSample},
-    timeout_policy::TimeoutPolicy,
+    perf_report::{PerfProbeSummary, PerfBudget, PerfSample, summarize_perf_samples},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,

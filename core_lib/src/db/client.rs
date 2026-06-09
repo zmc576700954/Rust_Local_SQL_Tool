@@ -29,6 +29,94 @@ pub enum DbError {
     MissingData(String),
     #[error("Unsupported database type: {0}")]
     Unsupported(String),
+    #[error("Security: {0}")]
+    Security(String),
+}
+
+/// Validate that a database connection URL is safe to use.
+///
+/// For a local SQL tool, connections to localhost/private IPs are expected and allowed.
+/// This validator blocks:
+/// - Non-database URL schemes (file://, ftp://, gopher://, etc.)
+/// - SQLite paths that traverse outside safe directories (via ../)
+/// - SQLite paths pointing to sensitive system files (/etc/passwd, etc.)
+pub fn validate_db_url(url: &str, db_type: &DbType) -> Result<(), DbError> {
+    match db_type {
+        DbType::MySQL | DbType::MariaDB => {
+            if !url.starts_with("mysql://") && !url.starts_with("mariadb://") {
+                return Err(DbError::Security(format!(
+                    "MySQL/MariaDB connection must use mysql:// or mariadb:// scheme, got: {}",
+                    url.chars().take(20).collect::<String>()
+                )));
+            }
+        }
+        DbType::PostgreSQL => {
+            if !url.starts_with("postgres://") && !url.starts_with("postgresql://") {
+                return Err(DbError::Security(format!(
+                    "PostgreSQL connection must use postgres:// or postgresql:// scheme, got: {}",
+                    url.chars().take(20).collect::<String>()
+                )));
+            }
+        }
+        DbType::SQLite => {
+            // SQLite URLs: "sqlite://" or "sqlite:" followed by file path
+            // Block path traversal (../) that could escape intended directory
+            let path = if url.starts_with("sqlite://") {
+                &url[9..]
+            } else if url.starts_with("sqlite:") {
+                &url[7..]
+            } else {
+                return Err(DbError::Security(format!(
+                    "SQLite connection must use sqlite:// scheme, got: {}",
+                    url.chars().take(20).collect::<String>()
+                )));
+            };
+
+            // Block path traversal
+            if path.contains("..") {
+                return Err(DbError::Security(
+                    "SQLite path traversal detected: '..' is not allowed in database file paths"
+                        .into(),
+                ));
+            }
+
+            // Block sensitive system paths
+            let sensitive_prefixes = [
+                "/etc/",
+                "/proc/",
+                "/sys/",
+                "/dev/",
+                "/boot/",
+                "/root/",
+                "C:\\Windows\\",
+                "C:\\ProgramData\\",
+            ];
+            for prefix in &sensitive_prefixes {
+                if path.starts_with(prefix) {
+                    return Err(DbError::Security(format!(
+                        "SQLite path points to sensitive system directory: {}",
+                        prefix
+                    )));
+                }
+            }
+        }
+        other => {
+            // For Redis/MongoDB/Oracle: only block clearly dangerous schemes
+            let lower = url.to_lowercase();
+            if lower.starts_with("file://")
+                || lower.starts_with("ftp://")
+                || lower.starts_with("gopher://")
+                || lower.starts_with("dict://")
+                || lower.starts_with("ldap://")
+            {
+                return Err(DbError::Security(format!(
+                    "Dangerous URL scheme blocked for {} connection",
+                    other.display_name()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Multi-engine connection pool wrapping sqlx pool types.
@@ -129,11 +217,14 @@ pub struct DbClient {
 
 impl DbClient {
     /// Creates a new database connection pool for the given engine type.
+    /// Validates the URL for security before connecting.
     pub async fn new(
         url: &str,
         pool_config: &PoolConfig,
         db_type: &DbType,
     ) -> Result<Self, DbError> {
+        validate_db_url(url, db_type)?;
+
         let policy = TimeoutPolicy::default();
         let pool = match db_type {
             DbType::MySQL | DbType::MariaDB => {
@@ -290,5 +381,55 @@ mod tests {
         assert_eq!(DbType::MySQL.display_name(), "MySQL");
         assert_eq!(DbType::PostgreSQL.display_name(), "PostgreSQL");
         assert_eq!(DbType::SQLite.display_name(), "SQLite");
+    }
+
+    #[test]
+    fn validate_db_url_mysql_rejects_bad_scheme() {
+        assert!(validate_db_url("ftp://host/db", &DbType::MySQL).is_err());
+        assert!(validate_db_url("file:///etc/passwd", &DbType::MySQL).is_err());
+        assert!(validate_db_url("postgres://host/db", &DbType::MySQL).is_err());
+    }
+
+    #[test]
+    fn validate_db_url_mysql_accepts_valid() {
+        assert!(validate_db_url("mysql://user:pass@127.0.0.1:3306/db", &DbType::MySQL).is_ok());
+        assert!(validate_db_url("mariadb://user:pass@host/db", &DbType::MariaDB).is_ok());
+    }
+
+    #[test]
+    fn validate_db_url_pg_rejects_bad_scheme() {
+        assert!(validate_db_url("mysql://host/db", &DbType::PostgreSQL).is_err());
+        assert!(validate_db_url("ftp://host/db", &DbType::PostgreSQL).is_err());
+    }
+
+    #[test]
+    fn validate_db_url_pg_accepts_valid() {
+        assert!(validate_db_url("postgres://user:pass@localhost:5432/db", &DbType::PostgreSQL).is_ok());
+        assert!(validate_db_url("postgresql://user:pass@host/db", &DbType::PostgreSQL).is_ok());
+    }
+
+    #[test]
+    fn validate_db_url_sqlite_rejects_traversal() {
+        assert!(validate_db_url("sqlite:///tmp/../etc/passwd", &DbType::SQLite).is_err());
+        assert!(validate_db_url("sqlite:../secret.db", &DbType::SQLite).is_err());
+    }
+
+    #[test]
+    fn validate_db_url_sqlite_rejects_sensitive_paths() {
+        assert!(validate_db_url("sqlite:///etc/passwd", &DbType::SQLite).is_err());
+        assert!(validate_db_url("sqlite:///proc/self/environ", &DbType::SQLite).is_err());
+    }
+
+    #[test]
+    fn validate_db_url_sqlite_accepts_valid() {
+        assert!(validate_db_url("sqlite:///tmp/test.db", &DbType::SQLite).is_ok());
+        assert!(validate_db_url("sqlite:///home/user/data/my.db", &DbType::SQLite).is_ok());
+    }
+
+    #[test]
+    fn validate_db_url_other_rejects_dangerous_schemes() {
+        assert!(validate_db_url("file:///etc/passwd", &DbType::Redis).is_err());
+        assert!(validate_db_url("gopher://host", &DbType::MongoDB).is_err());
+        assert!(validate_db_url("dict://host", &DbType::Redis).is_err());
     }
 }

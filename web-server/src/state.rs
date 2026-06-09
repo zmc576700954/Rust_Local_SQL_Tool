@@ -1,6 +1,5 @@
 use core_lib::{
     ai::{
-        planner::Planner,
         policy_store::Policy,
     },
     config::AppConfig,
@@ -8,108 +7,29 @@ use core_lib::{
     knowledge_base::KnowledgeBase,
     mysql_sync::{CompareResult, PreviewResult, SyncMode},
     rule_engine::RuleStore,
-    schema::{SchemaResponse, TableWithDetails},
+    schema::SchemaResponse,
     sql_history::SqlHistoryStore,
     timeout_policy::TimeoutPolicy,
 };
-#[cfg(test)]
-use core_lib::ai::gateway::AiGateway;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::Ordering,
     Arc,
 };
-use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore};
 
 use crate::AppError;
 
-// ----------------- Cache Types -----------------
+// ── Cache / Active Query / Transaction / RuntimeLimits 类型 ──
+// 已迁移到 core_lib::service::context，此处通过 import 引用。
+// 以下 pub use 确保 web-server 内部代码无需修改引用路径。
 
-#[derive(Debug, Clone)]
-pub struct CachedDbClient {
-    pub client: DbClient,
-    pub db_name: String,
-    pub url: String,
-    pub expires_at: Instant,
-}
-
-#[derive(Debug, Clone)]
-pub struct CachedSchemaEntry {
-    pub schema: SchemaResponse,
-    pub expires_at: Instant,
-}
-
-#[derive(Debug, Clone)]
-pub struct CachedTableSchemaEntry {
-    pub table: TableWithDetails,
-    pub expires_at: Instant,
-}
-
-// ----------------- Active Query Types -----------------
-
-#[derive(Clone)]
-pub struct ActiveQueryHandle {
-    pub db_client: DbClient,
-    pub connection_id: u64,
-    pub canceled: Arc<AtomicBool>,
-}
-
-pub struct ActiveQuerySession {
-    pub token: String,
-    pub connection_id: u64,
-    pub canceled: Arc<AtomicBool>,
-    pub owned_conn: Option<sqlx::pool::PoolConnection<sqlx::MySql>>,
-    pub transaction_session: Option<SharedTransactionSession>,
-}
-
-// ----------------- Transaction Types -----------------
-
-pub struct TransactionSession {
-    pub connection_id: u64,
-    pub db_id: Option<String>,
-    pub conn: sqlx::pool::PoolConnection<sqlx::MySql>,
-    pub last_accessed: std::time::Instant,
-}
-
-pub type SharedTransactionSession = Arc<Mutex<TransactionSession>>;
-
-// ----------------- RuntimeLimits -----------------
-
-#[derive(Debug, Clone)]
-pub struct RuntimeLimits {
-    pub temp_dir: String,
-    pub temp_quota_bytes: u64,
-    pub max_file_bytes: u64,
-    pub max_job_concurrency: usize,
-}
-
-impl Default for RuntimeLimits {
-    fn default() -> Self {
-        let temp_dir = std::env::var("LOCAL_AI_SQL_TEMP_DIR")
-            .ok()
-            .unwrap_or_else(|| "/tmp/local-ai-sql".to_string());
-        let temp_quota_bytes = std::env::var("LOCAL_AI_SQL_TEMP_QUOTA_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(2 * 1024 * 1024 * 1024);
-        let max_file_bytes = std::env::var("LOCAL_AI_SQL_MAX_FILE_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(500 * 1024 * 1024);
-        let max_job_concurrency = std::env::var("LOCAL_AI_SQL_MAX_JOB_CONCURRENCY")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4);
-        Self {
-            temp_dir,
-            temp_quota_bytes,
-            max_file_bytes,
-            max_job_concurrency: max_job_concurrency.max(1),
-        }
-    }
-}
+pub use core_lib::service::context::{
+    CachedDbClient, CachedSchemaEntry, CachedTableSchemaEntry,
+    ActiveQueryHandle, ActiveQuerySession, TransactionSession, SharedTransactionSession,
+    RuntimeLimits,
+};
 
 // ----------------- Dir Size Helpers -----------------
 
@@ -388,7 +308,6 @@ pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub db_client: Arc<RwLock<Option<DbClient>>>,
     pub db_client_cache: Arc<RwLock<HashMap<String, CachedDbClient>>>,
-    pub planner: Arc<RwLock<Planner>>,
     pub virtual_schema: Arc<RwLock<Option<SchemaResponse>>>,
     pub schema_cache: Arc<RwLock<HashMap<String, CachedSchemaEntry>>>,
     pub table_schema_cache: Arc<RwLock<HashMap<String, CachedTableSchemaEntry>>>,
@@ -453,13 +372,10 @@ pub async fn resolve_transaction_db_id(
 
 #[cfg(test)]
 pub fn test_state_with_config(config: AppConfig) -> AppState {
-    let gateway = AiGateway::new(config.clone());
-    let planner = Planner::new(gateway);
     AppState {
         config: Arc::new(RwLock::new(config)),
         db_client: Arc::new(RwLock::new(None)),
         db_client_cache: Arc::new(RwLock::new(HashMap::new())),
-        planner: Arc::new(RwLock::new(planner)),
         virtual_schema: Arc::new(RwLock::new(None)),
         schema_cache: Arc::new(RwLock::new(HashMap::new())),
         table_schema_cache: Arc::new(RwLock::new(HashMap::new())),

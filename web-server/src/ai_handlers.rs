@@ -4,8 +4,9 @@ use axum::{
     Json,
 };
 use core_lib::{
-    ai::gateway::{AiError, AiHealthReport},
-    ai_agent::{AiRouter, DbDialect},
+    ai::agent::AgentError,
+    ai::events::AiHealthReport,
+    ai::provider_utils,
     config::{AiModel, AiProvider},
     db::DbClient,
     error::AppError,
@@ -13,7 +14,7 @@ use core_lib::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{get_schema_internal, map_ai_error, AppState};
+use crate::{get_schema_internal, map_agent_error, AppState};
 
 #[derive(Deserialize)]
 pub struct FetchModelsRequest {
@@ -31,9 +32,8 @@ pub async fn fetch_provider_models(
     State(state): State<AppState>,
     Json(req): Json<FetchModelsRequest>,
 ) -> Result<Json<FetchModelsResponse>, AppError> {
-    let gateway = state.planner.read().await.gateway.clone();
-    let models = gateway
-        .fetch_provider_models(req.provider, req.api_key, req.base_url)
+    let config = state.config.read().await.clone();
+    let models = provider_utils::fetch_provider_models(&config, req.provider, req.api_key, req.base_url)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
     Ok(Json(FetchModelsResponse { models }))
@@ -56,8 +56,8 @@ pub async fn ai_models(State(state): State<AppState>) -> Result<Json<AiModelsRes
 }
 
 pub async fn ai_health(State(state): State<AppState>) -> Result<Json<AiHealthReport>, AppError> {
-    let planner = state.planner.read().await;
-    let report = planner.gateway.health_check().await.map_err(map_ai_error)?;
+    let config = state.config.read().await.clone();
+    let report = provider_utils::health_check(&config).await.map_err(map_agent_error)?;
     Ok(Json(report))
 }
 
@@ -79,7 +79,6 @@ pub struct AiQueryResponse {
     pub sql_empty_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_information: Vec<String>,
-    // Grounding metadata
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grounding_evidence: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -110,7 +109,6 @@ pub struct ChatResponse {
     pub sql_empty_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_information: Vec<String>,
-    // Grounding metadata
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grounding_evidence: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -123,7 +121,7 @@ pub struct ChatResponse {
     pub needs_confirmation: Option<bool>,
 }
 
-fn log_ai_intent_metadata(
+pub(crate) fn log_ai_intent_metadata(
     route: &str,
     sql: &str,
     task_type: Option<&str>,
@@ -191,6 +189,7 @@ fn build_mode_scoped_query(query: &str, mode: Option<&str>, current_sql: Option<
     }
 }
 
+/// Non-streaming AI query endpoint — routes through the new Agent layer.
 pub async fn ai_query(
     State(state): State<AppState>,
     Json(req): Json<AiQueryRequest>,
@@ -202,87 +201,159 @@ pub async fn ai_query(
         chat_history,
     } = req;
     let config = state.config.read().await.clone();
+    let db_client = state.db_client.read().await.clone();
+    let rule_store = state.rule_store.read().await.clone();
+    let policy = state.policy.read().await.clone();
+    let knowledge_base = state.knowledge_base.read().await.clone();
+    let cached_schema = get_schema_internal(&state).await;
+
     let url = config.get_active_db_url().unwrap_or_default();
-    let dialect = DbDialect::from_url(&url);
-    let db_conn_id = config.active_db_id.clone();
+    let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
     let normalized_mode = normalize_ai_mode(mode.as_deref());
     let scoped_query = build_mode_scoped_query(&query, normalized_mode, current_sql.as_deref());
 
-    let schema = get_schema_internal(&state).await;
+    // Rule fast-path: skip agent if direct match
+    if let Some(result) = core_lib::ai::agent::try_rule_fast_path(&scoped_query, &rule_store, &policy) {
+        log_ai_intent_metadata(
+            "/api/ai/query",
+            &result.sql,
+            result.task_type.as_deref(),
+            result.sql_empty_reason.as_deref(),
+            &result.missing_information,
+        );
+        // Increment rule hit count
+        if let Some(rule_id) = result.matched_rule_id.clone() {
+            let store_clone = state.rule_store.clone();
+            tokio::spawn(async move {
+                let store_clone2 = {
+                    let mut store = store_clone.write().await;
+                    if store.increment_hit_count(&rule_id) {
+                        Some(store.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(store) = store_clone2 {
+                    if let Err(e) = store.save().await {
+                        tracing::error!("Failed to save rule hit count: {}", e);
+                    }
+                }
+            });
+        }
+        return Ok(Json(AiQueryResponse {
+            sql: result.sql,
+            explanation: result.explanation,
+            task_type: result.task_type,
+            sql_empty_reason: result.sql_empty_reason,
+            missing_information: result.missing_information,
+            grounding_evidence: result.grounding_evidence,
+            assumptions: result.assumptions,
+            referenced_tables: result.referenced_tables,
+            risk_level: result.risk_level,
+            needs_confirmation: result.needs_confirmation,
+        }));
+    }
 
-    let knowledge = {
-        let kb = state.knowledge_base.read().await;
-        kb.retrieve(db_conn_id.as_deref(), &query, 5)
+    // Pre-flight: validate API key
+    core_lib::ai::agent::validate_ai_profile(&config).map_err(|e| match e {
+        AgentError::MissingApiKey => {
+            AppError::AiAuth("Missing API key. Please configure your AI token.".to_string())
+        }
+        other => AppError::InternalError(other.to_string()),
+    })?;
+
+    let extra_guidance = "Prefer concise SQL. First resolve entities, filters, time range, grouping, ordering, and output columns from the user's request.";
+
+    // Build schema briefing for preamble injection
+    let schema_briefing_str = if let Some(schema) = cached_schema.as_ref() {
+        let briefing = core_lib::ai::schema_briefing::SchemaBriefing::build(
+            schema,
+            &scoped_query,
+            &knowledge_base.items,
+        );
+        Some(briefing.summary_text)
+    } else {
+        None
     };
 
-    let gateway = state.planner.read().await.gateway.clone();
-    let router = AiRouter::new(gateway);
+    let task_type = core_lib::ai::agent::TaskType::from_mode(normalized_mode);
 
-    match router
-        .dispatch_query(
-            dialect,
-            &scoped_query,
-            schema.as_ref(),
-            &knowledge,
-            chat_history,
-        )
-        .await
-    {
-        Ok(result_str) => {
-            if result_str.trim().is_empty() {
-                return Err(AppError::ParseError(
-                    "AI 返回为空，无法解析 SQL。建议：检查 API Key/代理/限流，或降低 tier/max_tokens 后重试。"
-                        .to_string(),
-                ));
-            }
-            let mut intent = core_lib::ai::extractor::extract_sql_intent(&result_str);
-            if intent.task_type.is_none() {
-                intent.task_type = normalized_mode.map(|value| match value {
-                    "optimize" => "optimize_sql".to_string(),
-                    "explain" => "explain_sql".to_string(),
-                    _ => "generate_sql".to_string(),
-                });
-            }
-            log_ai_intent_metadata(
-                "/api/ai/query",
-                &intent.sql,
-                intent.task_type.as_deref(),
-                intent.sql_empty_reason.as_deref(),
-                &intent.missing_information,
-            );
-            let explanation_only = normalized_mode == Some("explain")
-                && intent
-                    .explanation
-                    .as_deref()
-                    .map(|value| !value.trim().is_empty())
-                    .unwrap_or(false);
-            if intent.sql.trim().is_empty() && !explanation_only {
-                return Err(AppError::ParseError(
-                    intent
-                        .explanation
-                        .unwrap_or_else(|| "AI 返回无法解析为 SQL。".to_string()),
-                ));
-            }
-            let response_sql = if explanation_only && intent.sql.trim().is_empty() {
-                current_sql.unwrap_or_default()
-            } else {
-                intent.sql
+    let result = core_lib::ai::agent::run_agent(
+        &config,
+        db_client.as_ref(),
+        &db_name,
+        &scoped_query,
+        &rule_store,
+        &knowledge_base,
+        &policy,
+        chat_history.as_deref(),
+        schema_briefing_str.as_deref(),
+        Some(extra_guidance),
+        &task_type,
+    )
+    .await
+    .map_err(map_agent_error)?;
+
+    log_ai_intent_metadata(
+        "/api/ai/query",
+        &result.sql,
+        result.task_type.as_deref(),
+        result.sql_empty_reason.as_deref(),
+        &result.missing_information,
+    );
+
+    // Increment rule hit count if matched
+    if let Some(rule_id) = result.matched_rule_id.clone() {
+        let store_clone = state.rule_store.clone();
+        tokio::spawn(async move {
+            let store_clone2 = {
+                let mut store = store_clone.write().await;
+                if store.increment_hit_count(&rule_id) {
+                    Some(store.clone())
+                } else {
+                    None
+                }
             };
-            Ok(Json(AiQueryResponse {
-                sql: response_sql,
-                explanation: intent.explanation,
-                task_type: intent.task_type,
-                sql_empty_reason: intent.sql_empty_reason,
-                missing_information: intent.missing_information,
-                grounding_evidence: intent.grounding_evidence,
-                assumptions: intent.assumptions,
-                referenced_tables: intent.referenced_tables,
-                risk_level: intent.risk_level,
-                needs_confirmation: intent.needs_confirmation,
-            }))
-        }
-        Err(e) => Err(map_ai_error(e)),
+            if let Some(store) = store_clone2 {
+                if let Err(e) = store.save().await {
+                    tracing::error!("Failed to save rule hit count: {}", e);
+                }
+            }
+        });
     }
+
+    let explanation_only = normalized_mode == Some("explain")
+        && result
+            .explanation
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+    if result.sql.trim().is_empty() && !explanation_only {
+        return Err(AppError::ParseError(
+            result
+                .explanation
+                .unwrap_or_else(|| "AI 返回无法解析为 SQL。".to_string()),
+        ));
+    }
+
+    let response_sql = if explanation_only && result.sql.trim().is_empty() {
+        current_sql.unwrap_or_default()
+    } else {
+        result.sql
+    };
+
+    Ok(Json(AiQueryResponse {
+        sql: response_sql,
+        explanation: result.explanation,
+        task_type: result.task_type,
+        sql_empty_reason: result.sql_empty_reason,
+        missing_information: result.missing_information,
+        grounding_evidence: result.grounding_evidence,
+        assumptions: result.assumptions,
+        referenced_tables: result.referenced_tables,
+        risk_level: result.risk_level,
+        needs_confirmation: result.needs_confirmation,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -297,60 +368,80 @@ pub struct AiExplainErrorResponse {
     pub fixed_query: Option<String>,
 }
 
+/// Explain error endpoint — routes through the Agent layer with TaskType::Fix.
 pub async fn ai_explain_error(
     State(state): State<AppState>,
     Json(req): Json<AiExplainErrorRequest>,
 ) -> Result<Json<AiExplainErrorResponse>, AppError> {
     let config = state.config.read().await.clone();
+    let db_client = state.db_client.read().await.clone();
+    let rule_store = state.rule_store.read().await.clone();
+    let policy = state.policy.read().await.clone();
+    let knowledge_base = state.knowledge_base.read().await.clone();
+    let cached_schema = get_schema_internal(&state).await;
+
     let url = config.get_active_db_url().unwrap_or_default();
-    let dialect = DbDialect::from_url(&url);
+    let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
 
-    let schema = get_schema_internal(&state).await;
-
-    let gateway = state.planner.read().await.gateway.clone();
-    let router = AiRouter::new(gateway);
-
-    match router
-        .explain_error(dialect, &req.error_msg, &req.failed_query, schema.as_ref())
-        .await
-    {
-        Ok(result_str) => {
-            if result_str.trim().is_empty() {
-                return Ok(Json(AiExplainErrorResponse {
-                    explanation:
-                        "AI 返回为空，无法解析解释结果。建议：检查 API Key/代理/限流，或降低 tier/max_tokens 后重试。"
-                            .to_string(),
-                    fixed_query: None,
-                }));
-            }
-
-            let cleaned = core_lib::ai::extractor::extract_code_block(result_str.trim(), "json");
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(cleaned.trim()) {
-                let explanation = val["explanation"]
-                    .as_str()
-                    .unwrap_or(&result_str)
-                    .to_string();
-                let fixed_query = val["fixed_query"]
-                    .as_str()
-                    .or_else(|| val["sql"].as_str())
-                    .map(|s| s.to_string());
-                Ok(Json(AiExplainErrorResponse {
-                    explanation,
-                    fixed_query,
-                }))
-            } else {
-                let preview = result_str.trim().chars().take(200).collect::<String>();
-                Ok(Json(AiExplainErrorResponse {
-                    explanation: format!(
-                        "AI 返回非 JSON，无法解析解释结果。返回预览：{}。建议：切换 provider/model 或关闭 JSON 模式重试。",
-                        preview
-                    ),
-                    fixed_query: None,
-                }))
-            }
+    // Validate API key
+    core_lib::ai::agent::validate_ai_profile(&config).map_err(|e| match e {
+        AgentError::MissingApiKey => {
+            AppError::AiAuth("Missing API key. Please configure your AI token.".to_string())
         }
-        Err(e) => Err(map_ai_error(e)),
-    }
+        other => AppError::InternalError(other.to_string()),
+    })?;
+
+    let scoped_query = format!(
+        "The following query failed and needs a fix.\nSQL:\n{}\n\nDatabase error:\n{}\n\n\
+        Intent is fix_sql. Preserve the business intent of the failed query, \
+        change only the minimal syntax, alias, join, or schema references needed to fix it, \
+        explain the failure briefly, and return a corrected query when possible. \
+        If a safe correction is impossible, keep sql empty and explain why.",
+        req.failed_query, req.error_msg
+    );
+
+    let extra_guidance = "Focus on fixing the SQL error. Analyze the error message, \
+        identify the root cause, and provide a minimal correction. \
+        Always validate the fix with execute_sql.";
+
+    let schema_briefing_str = if let Some(schema) = cached_schema.as_ref() {
+        let briefing = core_lib::ai::schema_briefing::SchemaBriefing::build(
+            schema,
+            &scoped_query,
+            &knowledge_base.items,
+        );
+        Some(briefing.summary_text)
+    } else {
+        None
+    };
+
+    let result = core_lib::ai::agent::run_agent(
+        &config,
+        db_client.as_ref(),
+        &db_name,
+        &scoped_query,
+        &rule_store,
+        &knowledge_base,
+        &policy,
+        None,
+        schema_briefing_str.as_deref(),
+        Some(extra_guidance),
+        &core_lib::ai::agent::TaskType::Fix,
+    )
+    .await
+    .map_err(map_agent_error)?;
+
+    let explanation = result.explanation.unwrap_or_else(|| "AI returned no explanation.".to_string());
+    let fixed_query = if result.sql.trim().is_empty() {
+        None
+    } else {
+        Some(result.sql)
+    };
+
+    Ok(Json(AiExplainErrorResponse {
+        explanation,
+        fixed_query,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -402,6 +493,7 @@ pub async fn add_knowledge(
     Ok(Json(item))
 }
 
+/// Non-streaming chat-to-SQL endpoint — routes through the new Agent layer.
 pub async fn chat_to_sql(
     State(state): State<AppState>,
     Json(req): Json<ChatRequest>,
@@ -412,99 +504,108 @@ pub async fn chat_to_sql(
         current_sql,
         chat_history,
     } = req;
-    let planner = state.planner.read().await.clone();
+    let config = state.config.read().await.clone();
     let db_client = state.db_client.read().await.clone();
-    let cached_schema = get_schema_internal(&state).await;
-    let policy = state.policy.read().await.clone();
     let rule_store = state.rule_store.read().await.clone();
+    let policy = state.policy.read().await.clone();
+    let knowledge_base = state.knowledge_base.read().await.clone();
+    let cached_schema = get_schema_internal(&state).await;
 
-    let db_type = state.config.read().await.get_active_db_type();
+    let url = config.get_active_db_url().unwrap_or_default();
+    let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
     let normalized_mode = normalize_ai_mode(mode.as_deref());
     let scoped_query = build_mode_scoped_query(&query, normalized_mode, current_sql.as_deref());
 
-    let intent_res = if let Some(schema) = cached_schema.as_ref() {
-        planner
-            .generate_sql_with_virtual_schema(
-                &scoped_query,
-                schema,
-                &rule_store,
-                &policy,
-                &db_type,
-                chat_history.as_deref(),
-            )
-            .await
-    } else if let Some(db_client) = db_client {
-        let url = state
-            .config
-            .read()
-            .await
-            .get_active_db_url()
-            .unwrap_or_default();
-        let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
-        planner
-            .generate_sql(
-                &db_client,
-                &db_name,
-                &scoped_query,
-                &rule_store,
-                &policy,
-                &db_type,
-                chat_history.as_deref(),
-            )
-            .await
+    // Rule fast-path: skip agent if direct match
+    if let Some(result) = core_lib::ai::agent::try_rule_fast_path(&scoped_query, &rule_store, &policy) {
+        log_ai_intent_metadata(
+            "/chat",
+            &result.sql,
+            result.task_type.as_deref(),
+            result.sql_empty_reason.as_deref(),
+            &result.missing_information,
+        );
+        if let Some(rule_id) = result.matched_rule_id.clone() {
+            let store_clone = state.rule_store.clone();
+            tokio::spawn(async move {
+                let store_clone2 = {
+                    let mut store = store_clone.write().await;
+                    if store.increment_hit_count(&rule_id) {
+                        Some(store.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(store) = store_clone2 {
+                    if let Err(e) = store.save().await {
+                        tracing::error!("Failed to save rule hit count: {}", e);
+                    }
+                }
+            });
+        }
+        return Ok(Json(ChatResponse {
+            sql: result.sql,
+            explanation: result.explanation,
+            task_type: result.task_type,
+            sql_empty_reason: result.sql_empty_reason,
+            missing_information: result.missing_information,
+            grounding_evidence: result.grounding_evidence,
+            assumptions: result.assumptions,
+            referenced_tables: result.referenced_tables,
+            risk_level: result.risk_level,
+            needs_confirmation: result.needs_confirmation,
+        }));
+    }
+
+    // Pre-flight: validate API key
+    core_lib::ai::agent::validate_ai_profile(&config).map_err(|e| match e {
+        AgentError::MissingApiKey => {
+            AppError::AiAuth("Missing API key. Please configure your AI token.".to_string())
+        }
+        other => AppError::InternalError(other.to_string()),
+    })?;
+
+    let extra_guidance = "Prefer concise SQL. First resolve entities, filters, time range, grouping, ordering, and output columns from the user's request.";
+
+    let schema_briefing_str = if let Some(schema) = cached_schema.as_ref() {
+        let briefing = core_lib::ai::schema_briefing::SchemaBriefing::build(
+            schema,
+            &scoped_query,
+            &knowledge_base.items,
+        );
+        Some(briefing.summary_text)
     } else {
-        planner
-            .generate_sql_no_schema(
-                &scoped_query,
-                &rule_store,
-                &policy,
-                &db_type,
-                chat_history.as_deref(),
-            )
-            .await
+        None
     };
 
-    let intent = match intent_res {
-        Ok(res) => res,
-        Err(AiError::Auth(msg)) => {
-            let body = serde_json::json!({
-                "error": "ai_auth_failed",
-                "message": "AI 鉴权失败，请在引导页里更新 AI Token / Relay 配置后重试。",
-                "detail": msg,
-            })
-            .to_string();
-            return Err(AppError::AiAuth(body));
-        }
-        Err(AiError::Forbidden(msg)) => {
-            let body = serde_json::json!({
-                "error": "ai_forbidden",
-                "message": "AI 返回 403 Forbidden：当前 Key/账号无权限或被服务端拒绝。",
-                "detail": msg,
-            })
-            .to_string();
-            return Err(AppError::AiForbidden(body));
-        }
-        Err(AiError::ModelNotFound(msg)) => {
-            let body = serde_json::json!({
-                "error": "ai_model_not_found",
-                "message": "AI 返回 404 Not Found：模型不存在或当前中转/Provider 不支持该模型。",
-                "detail": msg,
-            })
-            .to_string();
-            return Err(AppError::AiModelNotFound(body));
-        }
-        Err(e) => return Err(map_ai_error(e)),
-    };
+    let task_type = core_lib::ai::agent::TaskType::from_mode(normalized_mode);
+
+    let result = core_lib::ai::agent::run_agent(
+        &config,
+        db_client.as_ref(),
+        &db_name,
+        &scoped_query,
+        &rule_store,
+        &knowledge_base,
+        &policy,
+        chat_history.as_deref(),
+        schema_briefing_str.as_deref(),
+        Some(extra_guidance),
+        &task_type,
+    )
+    .await
+    .map_err(map_agent_error)?;
 
     log_ai_intent_metadata(
         "/chat",
-        &intent.sql,
-        intent.task_type.as_deref(),
-        intent.sql_empty_reason.as_deref(),
-        &intent.missing_information,
+        &result.sql,
+        result.task_type.as_deref(),
+        result.sql_empty_reason.as_deref(),
+        &result.missing_information,
     );
 
-    if let Some(rule_id) = intent.matched_rule_id.clone() {
+    // Increment rule hit count if matched
+    if let Some(rule_id) = result.matched_rule_id.clone() {
         let store_clone = state.rule_store.clone();
         tokio::spawn(async move {
             let store_clone2 = {
@@ -524,16 +625,16 @@ pub async fn chat_to_sql(
     }
 
     Ok(Json(ChatResponse {
-        sql: intent.sql,
-        explanation: intent.explanation,
-        task_type: intent.task_type,
-        sql_empty_reason: intent.sql_empty_reason,
-        missing_information: intent.missing_information,
-        grounding_evidence: intent.grounding_evidence,
-        assumptions: intent.assumptions,
-        referenced_tables: intent.referenced_tables,
-        risk_level: intent.risk_level,
-        needs_confirmation: intent.needs_confirmation,
+        sql: result.sql,
+        explanation: result.explanation,
+        task_type: result.task_type,
+        sql_empty_reason: result.sql_empty_reason,
+        missing_information: result.missing_information,
+        grounding_evidence: result.grounding_evidence,
+        assumptions: result.assumptions,
+        referenced_tables: result.referenced_tables,
+        risk_level: result.risk_level,
+        needs_confirmation: result.needs_confirmation,
     }))
 }
 
@@ -608,6 +709,25 @@ pub async fn chat_to_sql_stream(
 
     // Rule fast-path: skip agent if direct match
     if let Some(result) = core_lib::ai::agent::try_rule_fast_path(&scoped_query, &rule_store, &policy) {
+        // Increment rule hit count
+        if let Some(rule_id) = result.matched_rule_id.clone() {
+            let store_clone = state.rule_store.clone();
+            tokio::spawn(async move {
+                let store_clone2 = {
+                    let mut store = store_clone.write().await;
+                    if store.increment_hit_count(&rule_id) {
+                        Some(store.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(store) = store_clone2 {
+                    if let Err(e) = store.save().await {
+                        tracing::error!("Failed to save rule hit count: {}", e);
+                    }
+                }
+            });
+        }
         let stream = futures::stream::once(async move {
             let data = serde_json::to_string(&serde_json::json!({
                 "type": "final_sql",
@@ -631,8 +751,7 @@ pub async fn chat_to_sql_stream(
     // Create a cancellation token so the stream can be aborted when the client disconnects
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
-    // Build schema briefing for preamble injection — gives the agent
-    // a global view of the database before it starts calling tools
+    // Build schema briefing for preamble injection
     let schema_briefing_str = if let Some(schema) = cached_schema.as_ref() {
         let briefing = core_lib::ai::schema_briefing::SchemaBriefing::build(
             schema,

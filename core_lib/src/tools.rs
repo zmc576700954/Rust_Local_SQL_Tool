@@ -1,4 +1,4 @@
-use crate::ai::gateway::{AiGateway, ChatMessage};
+use crate::config::AppConfig;
 use crate::db::DbClient;
 use crate::schema::{ColumnInfo, SchemaResponse, TableWithDetails};
 use crate::schema_ext::{ForeignKeyInfo, IndexInfo};
@@ -691,7 +691,7 @@ pub struct MockDataGenerator;
 
 impl MockDataGenerator {
     pub async fn generate(
-        gateway: &AiGateway,
+        config: &AppConfig,
         db_client: &DbClient,
         table: &TableWithDetails,
         row_count: u32,
@@ -776,20 +776,9 @@ impl MockDataGenerator {
                 }
             }
 
-            let messages = vec![
-                ChatMessage {
-                    role: "system".to_string(),
-                    content:
-                        "You are a database expert that generates realistic mock data SQL scripts."
-                            .to_string(),
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: prompt,
-                },
-            ];
+            let system_prompt = "You are a database expert that generates realistic mock data SQL scripts.";
 
-            match gateway.chat_completion(messages).await {
+            match crate::ai::agent::chat_completion_raw(config, system_prompt, &prompt).await {
                 Ok(sql) => {
                     let sql = sql
                         .trim()

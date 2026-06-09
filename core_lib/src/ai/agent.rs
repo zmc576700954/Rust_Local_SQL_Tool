@@ -1,5 +1,3 @@
-use crate::ai::events::{AgentEvent, AgentResult};
-use crate::ai::policy_store::Policy;
 use crate::ai::tools::executor::ExecuteSqlTool;
 use crate::ai::tools::knowledge::QueryKnowledgeTool;
 use crate::ai::tools::rules::QueryRulesTool;
@@ -12,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use futures_util::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
-use rig::completion::{Chat, Prompt};
+use rig::completion::Chat;
 use rig::streaming::{StreamedUserContent, StreamingChat};
 use rig::tool::ToolDyn;
 use std::pin::Pin;
@@ -22,31 +20,55 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::collections::HashMap;
 
+// Re-export types needed by callers outside core_lib
+pub use crate::ai::events::{AgentEvent, AgentResult, AiHealthReport};
+use crate::ai::policy_store::Policy;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("Missing API key")]
     MissingApiKey,
+    #[error("No tokens available in pool")]
+    NoTokens,
     #[error("AI auth failed: {0}")]
     Auth(String),
+    #[error("AI forbidden: {0}")]
+    Forbidden(String),
+    #[error("AI model not found: {0}")]
+    ModelNotFound(String),
+    #[error("AI rate limited: {0}")]
+    RateLimited(String),
+    #[error("AI server error: {0}")]
+    ServerError(String),
+    #[error("Network error: {0}")]
+    Network(String),
     #[error("Agent error: {0}")]
     Agent(String),
 }
 
 impl AgentError {
     /// Classify a raw rig-core error message into the appropriate variant.
-    fn from_rig_message(msg: String) -> Self {
+    pub fn from_rig_message(msg: String) -> Self {
         let lower = msg.to_lowercase();
         if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid api key") {
             AgentError::Auth(msg)
         } else if lower.contains("403") || lower.contains("forbidden") {
-            AgentError::Auth(msg)
+            AgentError::Forbidden(msg)
+        } else if lower.contains("404") || lower.contains("model not found") {
+            AgentError::ModelNotFound(msg)
+        } else if lower.contains("429") || lower.contains("rate limit") || lower.contains("rate limited") {
+            AgentError::RateLimited(msg)
+        } else if lower.contains("500") || lower.contains("502") || lower.contains("503") || lower.contains("server error") {
+            AgentError::ServerError(msg)
+        } else if lower.contains("timeout") || lower.contains("connection") || lower.contains("network") {
+            AgentError::Network(msg)
         } else {
             AgentError::Agent(msg)
         }
     }
 }
 
-type AgentStream = Pin<Box<dyn futures_util::Stream<Item = AgentEvent> + Send>>;
+pub type AgentStream = Pin<Box<dyn futures_util::Stream<Item = AgentEvent> + Send>>;
 
 /// Task type classification for differentiated preamble and max_turns
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -256,6 +278,7 @@ pub fn try_rule_fast_path(
             referenced_tables: Vec::new(),
             risk_level: None,
             needs_confirmation: None,
+            matched_rule_id: Some(rule.id.clone()),
             events: vec![AgentEvent::FinalSql {
                 sql: rule.sql_template,
                 task_type: Some("generate_sql".to_string()),
@@ -491,6 +514,7 @@ pub async fn run_agent(
         referenced_tables: intent.referenced_tables,
         risk_level: intent.risk_level,
         needs_confirmation: intent.needs_confirmation,
+        matched_rule_id: None,
         events,
     })
 }
@@ -615,4 +639,84 @@ pub async fn run_agent_streaming(
     };
 
     Ok(stream)
+}
+
+/// One-shot LLM call: generate a Handlebars-style rule template from prompt + SQL.
+/// Used by the "save rule" endpoint and the go-live smoke test.
+pub async fn generate_rule_template(
+    config: &AppConfig,
+    prompt: &str,
+    sql: &str,
+) -> Result<String, AgentError> {
+    let _profile = config.resolve_ai_profile();
+    let (_model_id, _) = config.resolve_active_model();
+
+    let system_prompt = "You are an expert SQL analyst. The user will provide a Natural Language prompt and its corresponding SQL statement. \
+    Your task is to identify dynamic parameters (like IDs, names, dates, amounts) in the SQL and replace them with Handlebars-style templates like {{id}}, {{status}}, etc. \
+    Output ONLY the templated SQL, nothing else. If there are no obvious parameters, just return the exact original SQL.";
+
+    let user_msg = format!("Prompt: {}\n\nSQL: {}", prompt, sql);
+
+    let response_text = chat_completion_raw(config, system_prompt, &user_msg).await?;
+    let cleaned = crate::ai::extractor::extract_code_block(&response_text, "sql");
+    Ok(cleaned)
+}
+
+/// One-shot LLM call without tools: send system + user messages and return raw text.
+/// Used for simple AI calls that don't need the agent loop (rule template, mock data, etc.)
+pub async fn chat_completion_raw(
+    config: &AppConfig,
+    system_prompt: &str,
+    user_message: &str,
+) -> Result<String, AgentError> {
+    let profile = config.resolve_ai_profile();
+    let (model_id, _) = config.resolve_active_model();
+    let api_key = profile.api_key.as_deref().ok_or(AgentError::MissingApiKey)?;
+
+    let timeout = crate::timeout_policy::TimeoutPolicy::default().ai_request_timeout_for_tier(&config.active_tier);
+    let timeout_secs = timeout.as_secs().max(30);
+    let history: Vec<rig::message::Message> = vec![];
+
+    match profile.provider {
+        AiProvider::Anthropic => {
+            let mut builder = rig::providers::anthropic::Client::builder().api_key(api_key);
+            if let Some(url) = resolve_base_url(&profile) {
+                builder = builder.base_url(&url);
+            }
+            let client = builder.build().map_err(|e| AgentError::from_rig_message(e.to_string()))?;
+            let agent = client
+                .agent(&model_id)
+                .preamble(system_prompt)
+                .max_tokens(4096)
+                .build();
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                agent.chat(user_message, history),
+            )
+            .await
+            .map_err(|_| AgentError::Agent("Request timed out".to_string()))?
+            .map_err(|e| AgentError::from_rig_message(e.to_string()))
+        }
+        _ => {
+            let mut builder = rig::providers::openai::Client::builder().api_key(api_key);
+            if let Some(url) = resolve_base_url(&profile) {
+                builder = builder.base_url(&url);
+            }
+            let client = builder.build().map_err(|e| AgentError::from_rig_message(e.to_string()))?;
+            let agent = client
+                .agent(&model_id)
+                .preamble(system_prompt)
+                .max_tokens(4096)
+                .build();
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                agent.chat(user_message, history),
+            )
+            .await
+            .map_err(|_| AgentError::Agent("Request timed out".to_string()))?
+            .map_err(|e| AgentError::from_rig_message(e.to_string()))
+        }
+    }
 }

@@ -421,6 +421,7 @@ fn compare_pk_str(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Build a parameterized SQL condition fragment for PK range filtering.
 /// Returns (sql_fragment, bind_values) where bind_values are the values to bind in order.
+#[allow(unused_assignments)]
 fn build_pk_range_conditions(
     primary_key: &str,
     db_type: &DbType,
