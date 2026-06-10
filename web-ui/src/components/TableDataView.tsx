@@ -4,6 +4,9 @@ import { DataTable } from './DataTable'
 import { Skeleton } from './Skeleton'
 import { DataCharts } from './DataCharts'
 import { tr } from '../i18n'
+import { SortPanel } from './SortPanel'
+import type { SortRule } from './SortPanel/types'
+import { createRule, toOrdersPayload, fromOrdersPayload } from './SortPanel/helpers'
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState<T>(value);
@@ -33,7 +36,26 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
   const [dataRevision, setDataRevision] = useState(0)
   
   // Sorting and Filtering
-  const [sorts, setSorts] = useState<{ column: string; desc: boolean }[]>([])
+  const sortStorageKey = useMemo(
+    () => `sort:${dbId ?? '_'}:${tableName}`,
+    [dbId, tableName]
+  )
+  const [sorts, _setSorts] = useState<SortRule[]>(() => {
+    if (typeof window === 'undefined') return []
+    try {
+      return fromOrdersPayload(window.sessionStorage.getItem(sortStorageKey) || undefined)
+    } catch { return [] }
+  })
+  const setSorts = useCallback((next: SortRule[]) => {
+    _setSorts(next)
+    if (typeof window === 'undefined') return
+    try {
+      if (next.length === 0) window.sessionStorage.removeItem(sortStorageKey)
+      else window.sessionStorage.setItem(sortStorageKey, toOrdersPayload(next))
+    } catch { /* sessionStorage full or denied — ignore */ }
+  }, [sortStorageKey])
+
+  const [sortPanelOpen, setSortPanelOpen] = useState(false)
   const [filters, setFilters] = useState<{ column: string; operator: string; value: string }[]>([])
   
   const [viewType, setViewType] = useState<'table' | 'chart'>('table')
@@ -84,13 +106,18 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
   const canUseKeyset = useMemo(() => {
     if (!keysetColumn) return false
     if (sorts.length === 0) return true
-    return sorts.length === 1 && sorts[0].column === keysetColumn
+    return (
+      sorts.length === 1
+      && sorts[0].kind === 'column'
+      && sorts[0].column === keysetColumn
+      && sorts[0].nulls === 'default'
+    )
   }, [keysetColumn, sorts])
 
-  const effectiveSorts = useMemo(() => {
+  const effectiveSorts = useMemo<SortRule[]>(() => {
     if (sorts.length > 0) return sorts
     if (!keysetColumn) return []
-    return [{ column: keysetColumn, desc: false }]
+    return [createRule({ column: keysetColumn })]
   }, [keysetColumn, sorts])
 
   const loadData = useCallback(async () => {
@@ -120,7 +147,7 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
           const followingPage = boundaries[page + 1]
           if (followingPage?.first !== undefined && followingPage?.first !== null) {
             requestPage = 1
-            requestSorts = [{ column: keysetColumn, desc: !keysetDesc }]
+            requestSorts = [createRule({ column: keysetColumn, desc: !keysetDesc })]
             requestFilters.push({
               column: keysetColumn,
               operator: keysetDesc ? 'greater_than' : 'less_than',
@@ -131,12 +158,13 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
         }
       }
 
+        const ordersJson = toOrdersPayload(requestSorts)
         const dataRes = await api.getTableData(
           tableName,
           requestPage,
           pageSize,
           requestFilters.length > 0 ? JSON.stringify(requestFilters) : undefined,
-          requestSorts.length > 0 ? JSON.stringify(requestSorts) : undefined,
+          ordersJson || undefined,
           dbId
       )
       const nextData = shouldReverseRows ? [...dataRes.data].reverse() : dataRes.data
@@ -260,9 +288,9 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
               </div>
             )}
             {viewType === 'table' ? (
-              <DataTable 
-                data={memoizedData} 
-                schema={memoizedSchema} 
+              <DataTable
+                data={memoizedData}
+                schema={memoizedSchema}
                 tableName={tableName}
                 dbId={dbId}
                 transactionId={transactionId}
@@ -276,6 +304,7 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
                 isRefreshing={loading}
                 refreshError={error}
                 dataRevision={dataRevision}
+                onOpenSortPanel={() => setSortPanelOpen(true)}
               />
             ) : (
               <DataCharts data={memoizedData} />
@@ -377,6 +406,14 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
           </select>
         </div>
       </div>
+      <SortPanel
+        open={sortPanelOpen}
+        initialRules={sorts}
+        availableColumns={(memoizedSchema?.columns || []).map((c: any) => c.column_name)}
+        title={tr('排序面板', 'Sort panel')}
+        onClose={() => setSortPanelOpen(false)}
+        onApply={(next) => { setSorts(next); setSortPanelOpen(false) }}
+      />
     </div>
   )
 }
