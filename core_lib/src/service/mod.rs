@@ -11,6 +11,7 @@ pub mod workbench;
 pub mod config;
 pub mod crud;
 pub mod ai;
+pub mod sort_expr;
 
 // 后续 Step 逐步添加的模块
 // pub mod db_cache;

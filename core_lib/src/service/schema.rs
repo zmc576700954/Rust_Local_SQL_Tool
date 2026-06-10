@@ -9,6 +9,7 @@ use crate::db::DbClient;
 use crate::schema::{SchemaExtractor, SchemaResponse, TableWithDetails};
 use crate::sql::offline_parser::OfflineParser;
 use crate::sql::util::quote_ident_mysql_checked;
+use crate::service::sort_expr::sanitize_sort_expression;
 use crate::service::context::{
     CachedDbClient, CachedSchemaEntry, CachedTableSchemaEntry, ServiceContext,
 };
@@ -48,10 +49,34 @@ pub struct FilterCondition {
     pub value: String,
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OrderKind {
+    #[default]
+    Column,
+    Expression,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OrderNulls {
+    #[default]
+    Default,
+    First,
+    Last,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct OrderCondition {
-    pub column: String,
+    #[serde(default)]
+    pub kind: OrderKind,
+    #[serde(default)]
+    pub column: Option<String>,
+    #[serde(default)]
+    pub expression: Option<String>,
     pub desc: bool,
+    #[serde(default)]
+    pub nulls: OrderNulls,
 }
 
 // ── SchemaService ───────────────────────────────────────
@@ -479,20 +504,38 @@ impl SchemaService {
         Ok((where_clause, bindings))
     }
 
-    fn build_order_clause(orders_str: &Option<String>) -> Result<String, ServiceError> {
+    pub(crate) fn build_order_clause(orders_str: &Option<String>) -> Result<String, ServiceError> {
         let mut order_clause = String::new();
         if let Some(orders_str) = orders_str {
             let orders: Vec<OrderCondition> =
                 serde_json::from_str(orders_str).map_err(ServiceError::from)?;
-            let mut o_clauses = Vec::new();
+            let mut clauses = Vec::new();
             for o in orders {
+                let target: String = match o.kind {
+                    OrderKind::Column => {
+                        let col = o.column.ok_or_else(|| {
+                            ServiceError::BadRequest("排序规则缺少 column 字段".into())
+                        })?;
+                        quote_ident_mysql_checked(&col).map_err(ServiceError::BadRequest)?
+                    }
+                    OrderKind::Expression => {
+                        let expr = o.expression.ok_or_else(|| {
+                            ServiceError::BadRequest("排序规则缺少 expression 字段".into())
+                        })?;
+                        sanitize_sort_expression(&expr)
+                            .map_err(|e| ServiceError::BadRequest(format!("非法排序表达式: {}", e)))?;
+                        expr
+                    }
+                };
                 let dir = if o.desc { "DESC" } else { "ASC" };
-                let col = quote_ident_mysql_checked(&o.column)
-                    .map_err(ServiceError::BadRequest)?;
-                o_clauses.push(format!("{} {}", col, dir));
+                match o.nulls {
+                    OrderNulls::Default => clauses.push(format!("{} {}", target, dir)),
+                    OrderNulls::First => clauses.push(format!("{0} IS NULL DESC, {0} {1}", target, dir)),
+                    OrderNulls::Last => clauses.push(format!("{0} IS NULL ASC, {0} {1}", target, dir)),
+                }
             }
-            if !o_clauses.is_empty() {
-                order_clause = format!("ORDER BY {}", o_clauses.join(", "));
+            if !clauses.is_empty() {
+                order_clause = format!("ORDER BY {}", clauses.join(", "));
             }
         }
         Ok(order_clause)
@@ -509,5 +552,85 @@ impl SchemaService {
 
     fn table_schema_cache_key(db_id: Option<&str>, db_name: &str, table_name: &str) -> String {
         format!("{}::{}", Self::schema_cache_key(db_id, db_name), table_name)
+    }
+}
+
+#[cfg(test)]
+mod build_order_clause_tests {
+    use super::SchemaService;
+
+    fn build(json: &str) -> String {
+        SchemaService::build_order_clause(&Some(json.to_string())).unwrap()
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert_eq!(SchemaService::build_order_clause(&None).unwrap(), "");
+        assert_eq!(build("[]"), "");
+    }
+
+    #[test]
+    fn backward_compatible_legacy_payload() {
+        // Old client: only column + desc, no kind/nulls.
+        assert_eq!(
+            build(r#"[{"column":"id","desc":false}]"#),
+            "ORDER BY `id` ASC"
+        );
+    }
+
+    #[test]
+    fn multiple_columns() {
+        assert_eq!(
+            build(r#"[{"column":"a","desc":false},{"column":"b","desc":true}]"#),
+            "ORDER BY `a` ASC, `b` DESC"
+        );
+    }
+
+    #[test]
+    fn nulls_first_asc() {
+        assert_eq!(
+            build(r#"[{"column":"c","desc":false,"nulls":"first"}]"#),
+            "ORDER BY `c` IS NULL DESC, `c` ASC"
+        );
+    }
+
+    #[test]
+    fn nulls_last_desc() {
+        assert_eq!(
+            build(r#"[{"column":"c","desc":true,"nulls":"last"}]"#),
+            "ORDER BY `c` IS NULL ASC, `c` DESC"
+        );
+    }
+
+    #[test]
+    fn expression_rule_accepts_safe_expression() {
+        assert_eq!(
+            build(r#"[{"kind":"expression","expression":"LENGTH(name)","desc":true}]"#),
+            "ORDER BY LENGTH(name) DESC"
+        );
+    }
+
+    #[test]
+    fn expression_rule_rejects_injection() {
+        let res = SchemaService::build_order_clause(&Some(
+            r#"[{"kind":"expression","expression":"name; DROP TABLE x","desc":false}]"#.to_string(),
+        ));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn column_rule_missing_column_errors() {
+        let res = SchemaService::build_order_clause(&Some(
+            r#"[{"kind":"column","desc":false}]"#.to_string(),
+        ));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn expression_rule_missing_expression_errors() {
+        let res = SchemaService::build_order_clause(&Some(
+            r#"[{"kind":"expression","desc":false}]"#.to_string(),
+        ));
+        assert!(res.is_err());
     }
 }
