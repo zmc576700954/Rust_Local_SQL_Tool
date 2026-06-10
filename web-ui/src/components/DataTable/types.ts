@@ -1,5 +1,7 @@
 /** Type definitions for the DataTable component. */
 
+import type { SortRule } from '../SortPanel/types'
+
 export interface DataTableProps {
   data: any[];
   schema: any;
@@ -7,8 +9,8 @@ export interface DataTableProps {
   dbId?: string;
   transactionId?: string | null;
   onTransactionStateChange?: (state: 'active' | 'idle') => void;
-  sorts: { column: string; desc: boolean }[];
-  setSorts: (sorts: { column: string; desc: boolean }[]) => void;
+  sorts: SortRule[];
+  setSorts: (sorts: SortRule[]) => void;
   filters: { column: string; operator: string; value: string }[];
   setFilters: (filters: { column: string; operator: string; value: string }[]) => void;
   onRefresh: () => void;
@@ -16,6 +18,7 @@ export interface DataTableProps {
   isRefreshing: boolean;
   refreshError?: string | null;
   dataRevision: number;
+  onOpenSortPanel?: () => void;
 }
 
 export type PreviewPayload = {

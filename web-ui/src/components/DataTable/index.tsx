@@ -4,6 +4,11 @@ import { api } from '../../api';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { redactSensitiveText } from '../../utils'
 import type { DataTableProps, PreviewPayload, SaveReviewUpdatePreview, SaveReviewDeletePreview, ValidationIssue, StaleRecoveryContext, StaleConflictDiffState, StaleConflictDiffItem, SaveFailureItem, SaveAttemptReport, PendingStaleRecoveryState, StaleConflictQueueFilter, StaleConflictQueueSort, StaleConflictOverviewGroupKey, StaleConflictOverviewGroupState, StaleConflictReviewScope, ColumnLayoutState } from './types';
+import type { SortRule } from '../SortPanel/types'
+import { createRule } from '../SortPanel/helpers'
+import { ColumnSortMenu } from './ColumnSortMenu'
+import { SortChipBar } from './SortChipBar'
+import { tr } from '../../i18n'
 import { DEFAULT_COLUMN_WIDTH, APPROX_ROW_HEIGHT, SAVE_REVIEW_PREVIEW_LIMIT, STALE_CONFLICT_OVERVIEW_GROUP_ORDER, STALE_CONFLICT_OVERVIEW_GROUP_LABELS, STALE_CONFLICT_OVERVIEW_GROUP_HINTS, STALE_CONFLICT_QUEUE_FILTER_LABELS, createStaleConflictOverviewCollapsedState, matchesStaleConflictQueueFilter, getStaleConflictOverviewGroup, getPreferredStaleConflictOverviewGroup, buildDefaultColumnLayout, normalizeColumnLayout } from './helpers';
 
 function useResetTableState(
@@ -80,6 +85,7 @@ export function DataTable({
   isRefreshing,
   refreshError,
   dataRevision,
+  onOpenSortPanel,
 }: DataTableProps) {
 
   const [editingCell, setEditingCell] = useState<{ rowIdx: number; col: string; isNew: boolean } | null>(null);
@@ -111,6 +117,7 @@ export function DataTable({
 
   // Filter Dropdown
   const [filterMenu, setFilterMenu] = useState<{ col: string } | null>(null);
+  const [sortMenu, setSortMenu] = useState<{ col: string; x: number; y: number } | null>(null);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
   const [resizingColumn, setResizingColumn] = useState<{ column: string; startX: number; startWidth: number } | null>(null);
 
@@ -758,28 +765,28 @@ export function DataTable({
 
   const handleSort = (col: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    let newSorts = [...sorts];
-    const existingIdx = newSorts.findIndex(s => s.column === col);
-    
+    let newSorts: SortRule[] = [...sorts];
+    const existingIdx = newSorts.findIndex(s => s.kind === 'column' && s.column === col);
+
     if (e.shiftKey) {
       if (existingIdx >= 0) {
         if (!newSorts[existingIdx].desc) {
-          newSorts[existingIdx].desc = true;
+          newSorts[existingIdx] = { ...newSorts[existingIdx], desc: true };
         } else {
           newSorts.splice(existingIdx, 1);
         }
       } else {
-        newSorts.push({ column: col, desc: false });
+        newSorts.push(createRule({ column: col }));
       }
     } else {
       if (existingIdx >= 0) {
         if (!newSorts[existingIdx].desc) {
-          newSorts = [{ column: col, desc: true }];
+          newSorts = [createRule({ column: col, desc: true })];
         } else {
           newSorts = [];
         }
       } else {
-        newSorts = [{ column: col, desc: false }];
+        newSorts = [createRule({ column: col })];
       }
     }
     setSorts(newSorts);
@@ -2855,12 +2862,14 @@ export function DataTable({
         </div>
       )}
 
+      <SortChipBar sorts={sorts} setSorts={setSorts} onOpenPanel={onOpenSortPanel} />
+
       <div ref={parentRef} className="flex-1 overflow-auto rounded border border-dark-border bg-[#0d1117]">
         <table className="w-full text-left text-sm whitespace-nowrap">
           <thead className="bg-[#161b22] sticky top-0 shadow-sm text-gray-400 text-xs tracking-wider z-20">
             <tr>
               {visibleColumns.map((k: string) => {
-                const sortItem = sorts.find(s => s.column === k);
+                const sortItem = sorts.find(s => s.kind === 'column' && s.column === k);
                 const hasFilter = filters.some(f => f.column === k);
                 
                 return (
@@ -2870,10 +2879,11 @@ export function DataTable({
                     style={{ width: `${getColumnWidth(k)}px`, minWidth: `${getColumnWidth(k)}px`, maxWidth: `${getColumnWidth(k)}px` }}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <div 
+                      <div
                         className="flex-1 cursor-pointer hover:text-white flex items-center gap-1"
                         onClick={(e) => handleSort(k, e)}
-                        title="Shift+Click for multi-column sort"
+                        onContextMenu={(e) => { e.preventDefault(); setSortMenu({ col: k, x: e.clientX, y: e.clientY }); }}
+                        title={tr('Shift 点击可多列排序', 'Shift+click for multi-column sort')}
                       >
                         <span>{k}</span>
                         <span className="flex-shrink-0 text-blue-400">
@@ -4310,6 +4320,17 @@ export function DataTable({
             </div>
           </div>
         </div>
+      )}
+      {sortMenu && (
+        <ColumnSortMenu
+          column={sortMenu.col}
+          x={sortMenu.x}
+          y={sortMenu.y}
+          sorts={sorts}
+          setSorts={setSorts}
+          onOpenPanel={onOpenSortPanel}
+          onClose={() => setSortMenu(null)}
+        />
       )}
     </div>
   );
