@@ -3,6 +3,7 @@ use core_lib::{
     db::DbClient,
     perf_report::{summarize_perf_samples, PerfBudget, PerfProbeSummary, PerfSample},
     schema::{SchemaExtractor, SchemaResponse, TableWithDetails},
+    service::sort_expr::sanitize_sort_expression,
     sql_history::{SqlHistory, SqlHistoryStore},
     timeout_policy::TimeoutPolicy,
 };
@@ -297,10 +298,34 @@ struct FilterCondition {
     value: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum OrderKind {
+    #[default]
+    Column,
+    Expression,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum OrderNulls {
+    #[default]
+    Default,
+    First,
+    Last,
+}
+
 #[derive(Debug, Deserialize)]
 struct OrderCondition {
-    column: String,
+    #[serde(default)]
+    kind: OrderKind,
+    #[serde(default)]
+    column: Option<String>,
+    #[serde(default)]
+    expression: Option<String>,
     desc: bool,
+    #[serde(default)]
+    nulls: OrderNulls,
 }
 
 fn fallback_required(reason: &str) -> String {
@@ -1419,18 +1444,38 @@ async fn table_page(
         }
     }
 
+    // KEEP IN SYNC with core_lib::service::schema::SchemaService::build_order_clause
     let mut order_clause = String::new();
     if let Some(orders_str) = &request.orders {
-        if let Ok(orders) = serde_json::from_str::<Vec<OrderCondition>>(orders_str) {
-            let mut clauses = Vec::new();
-            for order in orders {
-                let dir = if order.desc { "DESC" } else { "ASC" };
-                let col = quote_mysql_ident(&order.column)?;
-                clauses.push(format!("{col} {dir}"));
+        let orders: Vec<OrderCondition> = serde_json::from_str(orders_str)
+            .map_err(|e| format!("解析 orders 失败: {e}"))?;
+        let mut clauses = Vec::new();
+        for order in orders {
+            let target: String = match order.kind {
+                OrderKind::Column => {
+                    let col = order
+                        .column
+                        .ok_or_else(|| "排序规则缺少 column 字段".to_string())?;
+                    quote_mysql_ident(&col)?
+                }
+                OrderKind::Expression => {
+                    let expr = order
+                        .expression
+                        .ok_or_else(|| "排序规则缺少 expression 字段".to_string())?;
+                    sanitize_sort_expression(&expr)
+                        .map_err(|e| format!("非法排序表达式: {e}"))?;
+                    expr
+                }
+            };
+            let dir = if order.desc { "DESC" } else { "ASC" };
+            match order.nulls {
+                OrderNulls::Default => clauses.push(format!("{target} {dir}")),
+                OrderNulls::First => clauses.push(format!("{target} IS NULL DESC, {target} {dir}")),
+                OrderNulls::Last => clauses.push(format!("{target} IS NULL ASC, {target} {dir}")),
             }
-            if !clauses.is_empty() {
-                order_clause = format!("ORDER BY {}", clauses.join(", "));
-            }
+        }
+        if !clauses.is_empty() {
+            order_clause = format!("ORDER BY {}", clauses.join(", "));
         }
     }
 
