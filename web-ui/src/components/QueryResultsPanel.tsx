@@ -4,6 +4,7 @@ import { SimpleDataTable } from './SimpleDataTable'
 import { Skeleton } from './Skeleton'
 import type { QueryErrorInsight, QueryExecutionResult, QueryResultCompareReport } from '../types'
 import type { AppError } from '../utils'
+import { tr } from '../i18n'
 
 type QueryResultsPanelState = {
   sql: string
@@ -64,6 +65,7 @@ export function QueryResultsPanel({
   resolveActiveTier,
   aiMode,
   queryChunkSize,
+  onOpenSortPanel,
 }: {
   tabState: QueryResultsPanelState
   resultsPanelHeight: number
@@ -76,6 +78,7 @@ export function QueryResultsPanel({
   onExplainErrorWithAi: () => void
   onFixWithAi: () => void
   onApplySuggestedSql: () => void
+  onOpenSortPanel?: (sql: string) => void
   compareReport?: QueryResultCompareReport | null
   onSetCompareBaseline: () => void
   onClearCompareBaseline: () => void
@@ -247,6 +250,24 @@ export function QueryResultsPanel({
                     {tabState.isLoadingMoreResults ? 'Loading...' : `Load More (${activeResult.chunk_size || queryChunkSize})`}
                   </button>
                 )}
+                {activeResult?.status === 'success' && tabState.sql && onOpenSortPanel && (() => {
+                  const trimmed = tabState.sql.trim().replace(/;+$/, '')
+                  const first = trimmed.split(/\s+/)[0]?.toUpperCase() || ''
+                  const isSelect = first === 'SELECT' || first === 'WITH'
+                  return (
+                    <button
+                      type="button"
+                      disabled={!isSelect}
+                      onClick={() => onOpenSortPanel(trimmed)}
+                      title={isSelect
+                        ? tr('打开排序面板', 'Open sort panel')
+                        : tr('仅 SELECT 结果支持排序', 'Only SELECT results support sorting')}
+                      className="text-xs text-purple-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors disabled:opacity-40 disabled:hover:bg-[#21262d] disabled:cursor-not-allowed"
+                    >
+                      {tr('排序', 'Sort')}
+                    </button>
+                  )
+                })()}
                 <button
                   onClick={onClearResults}
                   className="text-xs text-red-400 hover:text-red-300 bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors flex items-center gap-1"

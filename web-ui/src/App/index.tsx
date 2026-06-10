@@ -11,6 +11,9 @@ import { QueryEditorActionPanel } from '../components/QueryEditorActionPanel'
 import AgentProcessPanel from '../components/AgentProcessPanel'
 import type { AgentStep } from '../components/AgentProcessPanel'
 import { QueryResultsPanel } from '../components/QueryResultsPanel'
+import { SortPanel } from '../components/SortPanel'
+import type { SortRule } from '../components/SortPanel/types'
+import { buildSqlOrderBy } from '../components/SortPanel/helpers'
 import { Tabs, type TabItem } from '../components/Tabs'
 import { TableContextMenu } from '../components/TableContextMenu'
 import { ToolsNav } from '../components/ToolsNav'
@@ -82,6 +85,7 @@ function App() {
 
   const [showCommandPalette, setShowCommandPalette] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [resultSortPanel, setResultSortPanel] = useState<null | { tabId: string; baseSql: string; rules: SortRule[] }>(null)
   const [tabs, setTabs] = useState<TabItem[]>([{ id: 'query-1', type: 'query', title: 'Query 1' }])
   const [activeTabId, setActiveTabId] = useState('query-1')
   const createDefaultQueryTabState = (sql: string = DEFAULT_QUERY_SQL) => ({
@@ -2129,6 +2133,11 @@ function App() {
                       onExplainErrorWithAi={handleExplainErrorWithAI}
                       onFixWithAi={handleFixWithAI}
                       onApplySuggestedSql={handleApplyErrorSuggestion}
+                      onOpenSortPanel={(sql) => setResultSortPanel({
+                        tabId: tab.id,
+                        baseSql: sql,
+                        rules: [],
+                      })}
                       compareReport={compareReport}
                       onSetCompareBaseline={handleSetCompareBaseline}
                       onClearCompareBaseline={handleClearCompareBaseline}
@@ -2597,13 +2606,51 @@ function App() {
           />
         )}
 
-        <WizardModal 
+        <WizardModal
           isOpen={wizardConfig.isOpen}
           title={wizardConfig.title}
           type={wizardConfig.type}
           payload={wizardConfig.payload}
           onClose={() => setWizardConfig({ ...wizardConfig, isOpen: false })}
         />
+
+        {resultSortPanel && (() => {
+          const tabState = tabStates[resultSortPanel.tabId]
+          const cols: string[] = (tabState?.executeResult?.columns as string[] | undefined) || []
+          return (
+            <SortPanel
+              open={true}
+              initialRules={resultSortPanel.rules}
+              availableColumns={cols}
+              title={tr('排序结果', 'Sort results')}
+              onClose={() => setResultSortPanel(null)}
+              onApply={async (rules: SortRule[]) => {
+                const orderBy = buildSqlOrderBy(rules)
+                const newSql = orderBy
+                  ? `SELECT * FROM (${resultSortPanel.baseSql}) AS __sorted__ ${orderBy}`
+                  : resultSortPanel.baseSql
+                const ctxTab = resultSortPanel.tabId
+                setResultSortPanel(null)
+                try {
+                  const executionDbId = tabState?.executionDbId || configData?.active_db_id || undefined
+                  const result = await api.executeSql(newSql, false, executionDbId || undefined, undefined, undefined)
+                  setTabStates(prev => ({
+                    ...prev,
+                    [ctxTab]: {
+                      ...(prev[ctxTab] || {}),
+                      executeResult: result,
+                      executeResults: [result],
+                      activeResultIndex: 0,
+                      errorObj: null,
+                    }
+                  }))
+                } catch (e) {
+                  console.error('apply sort failed', e)
+                }
+              }}
+            />
+          )
+        })()}
 
       </div>
     </div>
