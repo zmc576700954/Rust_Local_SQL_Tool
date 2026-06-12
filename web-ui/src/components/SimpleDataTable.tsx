@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Copy, Eye, X } from 'lucide-react';
 import { tr } from '../i18n';
-import { Button } from '../ui';
+import { Button } from './ui';
 
 interface SimpleDataTableProps {
   data: any[];

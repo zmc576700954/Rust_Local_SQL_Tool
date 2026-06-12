@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Suspense, useCallback, useMemo } from 'react'
-import { Database, Settings, BookMarked, Keyboard, X } from 'lucide-react'
+import { Database, Settings, BookMarked, Keyboard } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { format as formatSql } from 'sql-formatter'
 import { Onboarding } from '../components/Onboarding'
