@@ -180,7 +180,7 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
           <select
             value={selectedConnId}
             onChange={(e) => setSelectedConnId(e.target.value)}
-            className="bg-[#0d1117] border border-[#30363d] rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+            className="bg-dark-bg border border-dark-border rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
           >
             <option value="">{tr('-- 请选择连接 --', '-- Select connection --')}</option>
             {connections.map((conn) => (
@@ -190,7 +190,7 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
             ))}
           </select>
           {selectedConn && (
-            <div className="text-xs text-gray-500 border border-[#30363d] rounded p-3 bg-[#0d1117] break-all">
+            <div className="text-xs text-gray-500 border border-dark-border rounded p-3 bg-dark-bg break-all">
               {tr('连接地址：', 'Connection URL: ')}
               {String(selectedConn.url || '')}
             </div>
@@ -209,7 +209,7 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
             <button
               type="button"
               onClick={() => setProfile({ ...profile, users: [...profile.users, { username: '', host: '%', role: 'readonly', status: 'active' }] })}
-              className="px-3 py-1 rounded border border-[#30363d] text-xs text-gray-200 hover:bg-[#30363d]"
+              className="px-3 py-1 rounded border border-dark-border text-xs text-gray-200 hover:bg-dark-border"
             >
               {tr('新增用户', 'Add User')}
             </button>
@@ -217,24 +217,24 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
           <div className="flex flex-col gap-2 max-h-[340px] overflow-y-auto">
             {profile.users.length === 0 && <div className="text-xs text-gray-500">{tr('暂无用户，请先新增。', 'No users yet. Add one first.')}</div>}
             {profile.users.map((u, idx) => (
-              <div key={`${idx}-${u.username}`} className="border border-[#30363d] rounded p-3 bg-[#0d1117]">
+              <div key={`${idx}-${u.username}`} className="border border-dark-border rounded p-3 bg-dark-bg">
                 <div className="grid grid-cols-4 gap-2">
                   <input
                     value={u.username}
                     onChange={(e) => updateUser(idx, { username: e.target.value })}
                     placeholder={tr('用户名', 'Username')}
-                    className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
+                    className="bg-dark-panel border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
                   />
                   <input
                     value={u.host}
                     onChange={(e) => updateUser(idx, { host: e.target.value })}
                     placeholder={tr('主机(%)', 'Host(%)')}
-                    className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
+                    className="bg-dark-panel border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
                   />
                   <select
                     value={u.role}
                     onChange={(e) => updateUser(idx, { role: e.target.value })}
-                    className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
+                    className="bg-dark-panel border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
                   >
                     <option value="readonly">readonly</option>
                     <option value="readwrite">readwrite</option>
@@ -244,7 +244,7 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
                     <select
                       value={u.status}
                       onChange={(e) => updateUser(idx, { status: e.target.value as SecurityUser['status'] })}
-                      className="flex-1 bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
+                      className="flex-1 bg-dark-panel border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
                     >
                       <option value="active">{tr('启用', 'Active')}</option>
                       <option value="disabled">{tr('禁用', 'Disabled')}</option>
@@ -284,7 +284,7 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
                     ],
                   })
                 }
-                className="px-3 py-1 rounded border border-[#30363d] text-xs text-gray-200 hover:bg-[#30363d]"
+                className="px-3 py-1 rounded border border-dark-border text-xs text-gray-200 hover:bg-dark-border"
               >
                 {tr('新增权限', 'Add Grant')}
               </button>
@@ -302,12 +302,12 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
               <div className="text-xs text-gray-500">{tr('暂无权限项，点击“新增权限”。', 'No grants yet. Click Add Grant.')}</div>
             )}
             {profile.object_permissions.map((p, idx) => (
-              <div key={`${idx}-${p.object_name}`} className="border border-[#30363d] rounded p-3 bg-[#0d1117]">
+              <div key={`${idx}-${p.object_name}`} className="border border-dark-border rounded p-3 bg-dark-bg">
                 <div className="grid grid-cols-4 gap-2">
                   <select
                     value={p.object_type}
                     onChange={(e) => updatePermission(idx, { object_type: e.target.value as ObjectPermission['object_type'] })}
-                    className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
+                    className="bg-dark-panel border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
                   >
                     <option value="table">TABLE</option>
                     <option value="view">VIEW</option>
@@ -317,12 +317,12 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
                     value={p.object_name}
                     onChange={(e) => updatePermission(idx, { object_name: e.target.value })}
                     placeholder={tr('对象名', 'Object name')}
-                    className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
+                    className="bg-dark-panel border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
                   />
                   <select
                     value={p.username}
                     onChange={(e) => updatePermission(idx, { username: e.target.value })}
-                    className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
+                    className="bg-dark-panel border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
                   >
                     <option value="">{tr('-- 选择用户 --', '-- Select user --')}</option>
                     {profile.users.map((u, i) => (
@@ -350,7 +350,7 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
                         className={`px-2 py-1 rounded text-xs border transition-colors ${
                           active
                             ? 'border-blue-500/40 bg-blue-500/10 text-blue-300'
-                            : 'border-[#30363d] bg-[#161b22] text-gray-300 hover:bg-[#21262d]'
+                            : 'border-dark-border bg-dark-panel text-gray-300 hover:bg-dark-surface'
                         }`}
                       >
                         {priv}
@@ -365,7 +365,7 @@ export function DbSecurityManager({ onCancel }: DbSecurityManagerProps) {
             readOnly
             value={previewSql}
             placeholder={tr('点击“生成 SQL 预览”后显示权限脚本（仅预览，不会自动执行）。', 'Click Build SQL to preview grant statements (preview only).')}
-            className="min-h-[120px] bg-[#0d1117] border border-[#30363d] rounded p-3 font-mono text-xs text-gray-300 outline-none resize-none"
+            className="min-h-[120px] bg-dark-bg border border-dark-border rounded p-3 font-mono text-xs text-gray-300 outline-none resize-none"
           />
         </div>
       ),

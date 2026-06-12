@@ -25,13 +25,13 @@ export function ToolsNav({ onSelectTool }: ToolsNavProps) {
   ];
 
   return (
-    <div className="flex items-center h-12 px-4 border-b border-[#30363d] bg-[#0d1117] gap-2 shrink-0">
+    <div className="flex items-center h-12 px-4 border-b border-dark-border bg-dark-bg gap-2 shrink-0">
       <span className="text-xs font-bold tracking-wider text-gray-500 uppercase mr-4">{tr('工具', 'Tools')}</span>
       {tools.map(tool => (
         <button
           key={tool.id}
           onClick={() => onSelectTool(tool.id)}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm text-gray-300 hover:text-white hover:bg-[#21262d] transition-colors border border-transparent hover:border-[#30363d]"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm text-gray-300 hover:text-white hover:bg-dark-surface transition-colors border border-transparent hover:border-dark-border"
         >
           <tool.icon className="w-4 h-4 text-blue-400" />
           {tool.name}

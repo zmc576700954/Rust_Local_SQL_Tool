@@ -29,14 +29,14 @@ export function TableContextMenu({ x, y, table, onClose, onGenerateMockData, onE
   return (
     <div 
       ref={menuRef}
-      className="fixed z-50 bg-[#161b22] border border-[#30363d] rounded-md shadow-2xl py-1 min-w-[160px] text-sm text-gray-300"
+      className="fixed z-50 bg-dark-panel border border-dark-border rounded-md shadow-xl py-1 min-w-[160px] text-sm text-gray-300"
       style={{ top: y, left: x }}
     >
-      <div className="px-3 py-1.5 border-b border-[#30363d] text-xs font-semibold text-gray-500 mb-1">
+      <div className="px-3 py-1.5 border-b border-dark-border text-xs font-semibold text-gray-500 mb-1">
         {table.table_name}
       </div>
       <button 
-        className="w-full text-left px-3 py-1.5 hover:bg-blue-500/20 hover:text-blue-400 transition-colors flex items-center gap-2"
+        className="w-full text-left px-3 py-1.5 hover:bg-blue-500/20 hover:text-blue-400 transition-colors flex items-center gap-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset"
         onClick={() => {
           onGenerateMockData(table);
           onClose();
@@ -46,7 +46,7 @@ export function TableContextMenu({ x, y, table, onClose, onGenerateMockData, onE
         生成测试数据
       </button>
       <button 
-        className="w-full text-left px-3 py-1.5 hover:bg-blue-500/20 hover:text-blue-400 transition-colors flex items-center gap-2"
+        className="w-full text-left px-3 py-1.5 hover:bg-blue-500/20 hover:text-blue-400 transition-colors flex items-center gap-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset"
         onClick={() => {
           onImport(table);
           onClose();
@@ -56,7 +56,7 @@ export function TableContextMenu({ x, y, table, onClose, onGenerateMockData, onE
         导入向导
       </button>
       <button 
-        className="w-full text-left px-3 py-1.5 hover:bg-blue-500/20 hover:text-blue-400 transition-colors flex items-center gap-2"
+        className="w-full text-left px-3 py-1.5 hover:bg-blue-500/20 hover:text-blue-400 transition-colors flex items-center gap-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset"
         onClick={() => {
           onExport(table);
           onClose();

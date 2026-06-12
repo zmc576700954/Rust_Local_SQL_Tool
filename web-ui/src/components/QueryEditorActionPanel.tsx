@@ -111,7 +111,7 @@ export function QueryEditorActionPanel({
       )}
 
       {tabState.isGenerating && (
-        <div className="absolute inset-0 z-20 bg-[#0a0c10]/80 backdrop-blur-sm p-6 flex flex-col gap-4 pt-12 pointer-events-none">
+        <div className="absolute inset-0 z-20 bg-dark-canvas/80 backdrop-blur-sm p-6 flex flex-col gap-4 pt-12 pointer-events-none">
           <Skeleton className="h-6 w-3/4" />
           <Skeleton className="h-6 w-1/2" />
           <Skeleton className="h-6 w-2/3" />
@@ -148,18 +148,18 @@ export function QueryEditorActionPanel({
           {dbType} Agent
         </span>
 
-        <div className="flex items-center bg-[#21262d] rounded overflow-hidden border border-[#30363d]">
+        <div className="flex items-center bg-dark-surface rounded overflow-hidden border border-dark-border">
           <button
             onClick={() => onTransactionModeChange('auto')}
             disabled={tabState.isExecuting || transactionBusy}
-            className={`px-2 py-1 text-xs transition-colors disabled:opacity-60 ${transactionMode === 'auto' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-[#30363d]'}`}
+            className={`px-2 py-1 text-xs transition-colors disabled:opacity-60 ${transactionMode === 'auto' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-dark-border'}`}
           >
             Auto Commit
           </button>
           <button
             onClick={() => onTransactionModeChange('manual')}
             disabled={tabState.isExecuting || transactionBusy}
-            className={`px-2 py-1 text-xs transition-colors disabled:opacity-60 ${transactionMode === 'manual' ? 'bg-amber-500/20 text-amber-300' : 'text-gray-400 hover:bg-[#30363d]'}`}
+            className={`px-2 py-1 text-xs transition-colors disabled:opacity-60 ${transactionMode === 'manual' ? 'bg-amber-500/20 text-amber-300' : 'text-gray-400 hover:bg-dark-border'}`}
           >
             Manual Tx
           </button>
@@ -172,7 +172,7 @@ export function QueryEditorActionPanel({
                 ? 'text-amber-300 border-amber-500/30 bg-amber-500/10'
                 : transactionBusy
                   ? 'text-blue-300 border-blue-500/30 bg-blue-500/10'
-                  : 'text-gray-400 border-[#30363d] bg-[#161b22]'
+                  : 'text-gray-400 border-dark-border bg-dark-panel'
             }`}>
               {transactionState === 'active'
                 ? 'Txn Active'
@@ -310,7 +310,7 @@ export function QueryEditorActionPanel({
             <motion.button
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
-              className="flex items-center justify-center gap-2 px-3 py-2 bg-[#21262d] border border-dark-border hover:bg-[#30363d] hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm ripple whitespace-nowrap leading-none"
+              className="flex items-center justify-center gap-2 px-3 py-2 bg-dark-surface border border-dark-border hover:bg-dark-border hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm ripple whitespace-nowrap leading-none"
               onClick={onFormatSql}
               title="Format SQL (Shift+Alt+F)"
             >
@@ -328,16 +328,16 @@ export function QueryEditorActionPanel({
             }}
           >
             <button
-              className="flex items-center justify-center h-9 w-9 bg-[#21262d] border border-dark-border hover:bg-[#30363d] hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm"
+              className="flex items-center justify-center h-9 w-9 bg-dark-surface border border-dark-border hover:bg-dark-border hover:border-gray-500 hover:text-white rounded text-sm text-gray-300 transition-colors shadow-sm"
               onClick={onToggleMoreActions}
               title={tr('\u66f4\u591a\u64cd\u4f5c', 'More actions')}
             >
               <MoreHorizontal className="w-4 h-4" />
             </button>
             {showMoreActions && (
-              <div className="absolute bottom-11 right-0 w-56 bg-[#161b22] border border-[#30363d] rounded-lg shadow-2xl overflow-hidden z-30">
+              <div className="absolute bottom-11 right-0 w-56 bg-dark-panel border border-dark-border rounded-lg shadow-2xl overflow-hidden z-30">
                 {resolveModelsList.length > 0 && (
-                  <div className="px-3 py-2 border-b border-[#30363d] space-y-2">
+                  <div className="px-3 py-2 border-b border-dark-border space-y-2">
                     <select
                       value={resolveActiveModelId}
                       onChange={(e) => onModelChange(e.target.value)}
@@ -369,7 +369,7 @@ export function QueryEditorActionPanel({
                     onSaveBookmark()
                   }}
                   disabled={disableBookmarkAction}
-                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-dark-surface disabled:opacity-50"
                 >
                   {tr('保存书签', 'Save Bookmark')}
                 </button>
@@ -379,7 +379,7 @@ export function QueryEditorActionPanel({
                     onAiOptimize()
                   }}
                   disabled={disableAiSqlActions}
-                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-dark-surface disabled:opacity-50"
                 >
                   {'AI \u4f18\u5316 (Optimize)'}
                 </button>
@@ -389,7 +389,7 @@ export function QueryEditorActionPanel({
                     onAiExplain()
                   }}
                   disabled={disableAiSqlActions}
-                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-dark-surface disabled:opacity-50"
                 >
                   {'AI \u89e3\u91ca (Explain)'}
                 </button>
@@ -399,7 +399,7 @@ export function QueryEditorActionPanel({
                     onExplainPlan()
                   }}
                   disabled={!tabState.sql.trim() || !dbConnected}
-                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-dark-surface disabled:opacity-50"
                 >
                   {'Explain (\u6267\u884c\u8ba1\u5212)'}
                 </button>
@@ -409,7 +409,7 @@ export function QueryEditorActionPanel({
                     onOpenSessionInfo()
                   }}
                   disabled={!dbConnected}
-                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-dark-surface disabled:opacity-50"
                 >
                   Session Info
                 </button>
@@ -418,7 +418,7 @@ export function QueryEditorActionPanel({
                     onCloseMoreActions()
                     onFormatSql()
                   }}
-                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-[#21262d]"
+                  className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-dark-surface"
                 >
                   Format
                 </button>
@@ -433,8 +433,8 @@ export function QueryEditorActionPanel({
           onClick={onExecute}
           disabled={tabState.isExecuting || !tabState.sql.trim() || !dbConnected}
           title={!dbConnected ? 'Execute requires live database connection' : 'Execute SQL (Cmd+Enter)'}
-          className={`flex items-center justify-center gap-2 px-5 py-2 rounded text-sm font-medium text-white transition-all shadow-[0_0_15px_rgba(59,130,246,0.2)] ripple relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap leading-none ${
-            tabState.isExecuting ? 'bg-blue-700 cursor-wait' : 'bg-dark-accent hover:bg-blue-500 hover:shadow-[0_0_20px_rgba(59,130,246,0.4)]'
+          className={`flex items-center justify-center gap-2 px-5 py-2 rounded text-sm font-medium text-white transition-all shadow-glow-blue ripple relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap leading-none ${
+            tabState.isExecuting ? 'bg-blue-700 cursor-wait' : 'bg-dark-accent hover:bg-blue-500 hover:shadow-glow-blue-lg'
           }`}
         >
           {tabState.isExecuting && (

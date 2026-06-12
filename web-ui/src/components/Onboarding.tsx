@@ -176,11 +176,11 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-[#0a0c10] z-50 flex items-center justify-center p-6">
-      <div className="w-full max-w-3xl bg-[#161b22] border border-[#30363d] rounded-2xl shadow-2xl overflow-hidden flex flex-col min-h-[600px]">
+    <div className="fixed inset-0 bg-dark-canvas z-50 flex items-center justify-center p-6">
+      <div className="w-full max-w-3xl bg-dark-panel border border-dark-border rounded-2xl shadow-2xl overflow-hidden flex flex-col min-h-[600px]">
         
         {/* Header */}
-        <div className="px-8 py-6 border-b border-[#30363d] bg-gradient-to-r from-[#161b22] to-[#1e242d]">
+        <div className="px-8 py-6 border-b border-dark-border bg-gradient-to-r from-dark-panel to-[#1e242d]">
           <div className="flex items-center gap-3">
             <div className="p-2.5 bg-blue-500/10 rounded-xl border border-blue-500/20">
               <Database className="w-8 h-8 text-blue-400" />
@@ -212,14 +212,14 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
               </h2>
               
               <div className="grid grid-cols-2 gap-4 mb-8">
-                <div className="p-4 border border-[#30363d] bg-[#0d1117] rounded-xl hover:border-blue-500/50 cursor-pointer transition-colors relative overflow-hidden group">
+                <div className="p-4 border border-dark-border bg-dark-bg rounded-xl hover:border-blue-500/50 cursor-pointer transition-colors relative overflow-hidden group">
                   <div className="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>
                   <Server className="w-6 h-6 text-gray-400 group-hover:text-blue-400 transition-colors mb-3" />
                   <h3 className="text-white font-medium mb-1">Local MySQL / MariaDB</h3>
                   <p className="text-xs text-gray-500">Connect directly to your local database service.</p>
                 </div>
                 
-                <div className="relative p-4 border border-[#30363d] bg-[#0d1117] rounded-xl hover:border-blue-500/50 cursor-pointer transition-colors overflow-hidden group">
+                <div className="relative p-4 border border-dark-border bg-dark-bg rounded-xl hover:border-blue-500/50 cursor-pointer transition-colors overflow-hidden group">
                   <Database className="w-6 h-6 text-gray-500 group-hover:text-blue-400 mb-3 transition-colors" />
                   <h3 className="text-white font-medium mb-1">Import from Navicat (.ncx)</h3>
                   <p className="text-xs text-gray-500">{tr('上传导出的连接配置。', 'Upload exported connections.')}</p>
@@ -241,7 +241,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                       <div 
                         key={idx} 
                         onClick={() => applyNavicatConnection(conn)}
-                        className="flex items-center justify-between p-2.5 bg-[#0d1117] border border-[#30363d] rounded-lg hover:border-blue-500 cursor-pointer"
+                        className="flex items-center justify-between p-2.5 bg-dark-bg border border-dark-border rounded-lg hover:border-blue-500 cursor-pointer"
                       >
                         <div>
                           <div className="text-sm font-medium text-gray-200">{conn.name}</div>
@@ -273,7 +273,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                     type="text"
                     value={host}
                     onChange={e => setHost(e.target.value)}
-                    className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                    className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
                     placeholder="127.0.0.1"
                   />
                 </div>
@@ -284,7 +284,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                       type="text"
                       value={username}
                       onChange={e => setUsername(e.target.value)}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
                       placeholder="root"
                     />
                   </div>
@@ -294,7 +294,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                       type="password"
                       value={password}
                       onChange={e => setPassword(e.target.value)}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
                       placeholder="••••••••"
                     />
                   </div>
@@ -312,7 +312,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                     type="button"
                     onClick={handleDbTest}
                     disabled={isLoading || !host.trim() || !username.trim()}
-                    className="px-4 py-2 bg-dark-panel border border-dark-border hover:bg-[#21262d] rounded text-sm text-gray-200 disabled:opacity-50"
+                    className="px-4 py-2 bg-dark-panel border border-dark-border hover:bg-dark-surface rounded text-sm text-gray-200 disabled:opacity-50"
                   >
                     {isLoading ? 'Testing...' : 'Test Connection'}
                   </button>
@@ -326,7 +326,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                         type="number"
                         value={port}
                         onChange={e => setPort(Number(e.target.value || 3306))}
-                        className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                        className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
                         placeholder="3306"
                       />
                     </div>
@@ -340,7 +340,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                     <select
                       value={selectedDatabase}
                       onChange={e => setSelectedDatabase(e.target.value)}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
                     >
                       {databases.map(db => (
                         <option key={db} value={db}>{db}</option>
@@ -368,7 +368,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                   <select
                     value={aiProvider}
                     onChange={e => setAiProvider(e.target.value as any)}
-                    className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                    className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
                   >
                     <option value="openai">OpenAI (ChatGPT)</option>
                     <option value="deepseek">DeepSeek</option>
@@ -384,13 +384,13 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                       直连 / 单Key中转 / 多Key池化轮询
                     </span>
                   </label>
-                  <div className="flex bg-[#0d1117] p-1 rounded-lg border border-[#30363d]">
+                  <div className="flex bg-dark-bg p-1 rounded-lg border border-dark-border">
                     {(['direct', 'relay', 'pool'] as const).map(mode => (
                       <button
                         key={mode}
                         onClick={() => setAiMode(mode)}
                         className={`flex-1 py-2 text-sm font-medium rounded-md capitalize transition-colors ${
-                          aiMode === mode ? 'bg-[#21262d] text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'
+                          aiMode === mode ? 'bg-dark-surface text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'
                         }`}
                       >
                         {mode}
@@ -410,7 +410,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                         type="password" 
                         value={apiKey}
                         onChange={e => setApiKey(e.target.value)}
-                        className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg pl-10 pr-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
+                        className="w-full bg-dark-bg border border-dark-border rounded-lg pl-10 pr-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
                         placeholder="填入您的 API Key (如 sk-...)"
                       />
                     </div>
@@ -432,7 +432,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                       type="text" 
                       value={relayUrl}
                       onChange={e => setRelayUrl(e.target.value)}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
+                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
                       placeholder="留空则使用厂商默认 URL"
                     />
                   </div>
@@ -445,7 +445,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                       type="password" 
                       value={apiKey}
                       onChange={e => setApiKey(e.target.value)}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
+                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
                     />
                   </div>
                 )}
@@ -457,7 +457,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                       value={tokensText}
                       onChange={e => setTokensText(e.target.value)}
                       rows={4}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 font-mono resize-none"
+                      className="w-full bg-dark-bg border border-dark-border rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 font-mono resize-none"
                       placeholder="sk-token1...\nsk-token2...\n"
                     />
                     <p className="text-xs text-gray-500 mt-2">
@@ -471,7 +471,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
         </div>
 
         {/* Footer Actions */}
-        <div className="px-8 py-5 border-t border-[#30363d] bg-[#0d1117] flex items-center justify-between">
+        <div className="px-8 py-5 border-t border-dark-border bg-dark-bg flex items-center justify-between">
           {step === 2 ? (
             <button 
               onClick={() => setStep(1)}
@@ -489,7 +489,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
                   setSelectedDatabase('')
                   setStep(2)
                 }}
-                className="px-5 py-2.5 text-sm font-medium text-gray-300 bg-dark-panel border border-dark-border hover:bg-[#21262d] rounded-lg transition-colors"
+                className="px-5 py-2.5 text-sm font-medium text-gray-300 bg-dark-panel border border-dark-border hover:bg-dark-surface rounded-lg transition-colors"
               >
                 {tr('跳过数据库', 'Skip Database')}
               </button>

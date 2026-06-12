@@ -109,21 +109,21 @@ export function ModelCompare({ onCancel }: ModelCompareProps) {
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#161b22] text-gray-300 rounded-xl overflow-hidden shadow-2xl border border-[#30363d]">
-      <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117] shrink-0">
+    <div className="flex flex-col h-full bg-dark-panel text-gray-300 rounded-xl overflow-hidden shadow-2xl border border-dark-border">
+      <div className="px-6 py-4 border-b border-dark-border flex items-center justify-between bg-dark-bg shrink-0">
         <h3 className="text-gray-200 font-bold text-lg">{tr('模型对比', 'Model Compare')}</h3>
         <button onClick={onCancel} className="text-gray-500 hover:text-white transition-colors">
           {tr('关闭', 'Close')}
         </button>
       </div>
 
-      <div className="px-6 py-3 border-b border-[#30363d] bg-[#0d1117] grid grid-cols-[1fr_1fr_auto] gap-2 items-end shrink-0">
+      <div className="px-6 py-3 border-b border-dark-border bg-dark-bg grid grid-cols-[1fr_1fr_auto] gap-2 items-end shrink-0">
         <div>
           <div className="text-xs text-gray-500 mb-1">{tr('源库模型', 'Source Model')}</div>
           <select
             value={sourceDbId}
             onChange={(e) => setSourceDbId(e.target.value)}
-            className="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-1.5 text-sm text-gray-200"
+            className="w-full bg-dark-panel border border-dark-border rounded px-3 py-1.5 text-sm text-gray-200"
           >
             <option value="">{tr('-- 选择源库 --', '-- Select Source --')}</option>
             {connections.map((c) => (
@@ -138,7 +138,7 @@ export function ModelCompare({ onCancel }: ModelCompareProps) {
           <select
             value={targetDbId}
             onChange={(e) => setTargetDbId(e.target.value)}
-            className="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-1.5 text-sm text-gray-200"
+            className="w-full bg-dark-panel border border-dark-border rounded px-3 py-1.5 text-sm text-gray-200"
           >
             <option value="">{tr('-- 选择目标库 --', '-- Select Target --')}</option>
             {connections.map((c) => (
@@ -157,7 +157,7 @@ export function ModelCompare({ onCancel }: ModelCompareProps) {
         </button>
       </div>
 
-      <div className="px-6 py-2 border-b border-[#30363d] bg-[#0d1117] text-xs text-gray-500">
+      <div className="px-6 py-2 border-b border-dark-border bg-dark-bg text-xs text-gray-500">
         {tr('源库：', 'Source: ')}
         {selectedSource?.name || sourceDbId || '-'}
         {'  |  '}
@@ -171,7 +171,7 @@ export function ModelCompare({ onCancel }: ModelCompareProps) {
 
       {diff && (
         <div className="mx-6 mt-4 grid grid-cols-5 gap-2">
-          <div className="border border-[#30363d] rounded p-2 bg-[#0d1117] text-center">
+          <div className="border border-dark-border rounded p-2 bg-dark-bg text-center">
             <div className="text-xs text-gray-500">Total</div>
             <div className="text-sm text-gray-200 font-bold">{summary.total}</div>
           </div>
@@ -187,7 +187,7 @@ export function ModelCompare({ onCancel }: ModelCompareProps) {
             <div className="text-xs text-blue-300">{tr('变更', 'Modified')}</div>
             <div className="text-sm text-blue-300 font-bold">{summary.modified}</div>
           </div>
-          <div className="border border-[#30363d] rounded p-2 bg-[#0d1117] text-center">
+          <div className="border border-dark-border rounded p-2 bg-dark-bg text-center">
             <div className="text-xs text-gray-500">{tr('一致', 'Unchanged')}</div>
             <div className="text-sm text-gray-200 font-bold">{summary.unchanged}</div>
           </div>

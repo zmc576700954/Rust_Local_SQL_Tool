@@ -5,6 +5,7 @@ import { api } from '../api';
 import { useToast } from './Toast';
 import { dbLevelDisplayName, dbTypeDisplayName } from '../utils/dbCapabilities'
 import { tr } from '../i18n';
+import { Button } from './ui';
 
 interface StructureSyncProps {
   onCancel: () => void;
@@ -113,7 +114,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
                 setDiff(null);
                 setDdl('');
               }}
-              className="bg-[#0d1117] border border-[#30363d] rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+              className="bg-dark-bg border border-dark-border rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
               <option value="">{tr('-- 选择源库 --', '-- Select Source --')}</option>
               {dbConnections.map(conn => (
@@ -132,7 +133,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
                 setDiff(null);
                 setDdl('');
               }}
-              className="bg-[#0d1117] border border-[#30363d] rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+              className="bg-dark-bg border border-dark-border rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
               <option value="">{tr('-- 选择目标库 --', '-- Select Target --')}</option>
               {dbConnections.map(conn => (
@@ -142,17 +143,18 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
               ))}
             </select>
           </div>
-          <button
+          <Button
+            variant="secondary" size="md"
             onClick={async () => {
               if (await handleCompare()) {
                 toast(tr('对比完成，请点击下一步。', 'Comparison complete. Click Next.'), 'success');
               }
             }}
             disabled={!sourceDbId || !targetDbId}
-            className="self-start mt-4 px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white disabled:opacity-50"
+            className="self-start mt-4 disabled:opacity-50"
           >
             {tr('开始对比', 'Compare Databases')}
-          </button>
+          </Button>
         </div>
       )
     },
@@ -164,7 +166,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
         <div className="flex flex-col gap-4 h-full">
           <div className="text-sm text-gray-300 font-bold">{tr('步骤 2：选择要同步的表', 'Step 2: Select Tables to Sync')}</div>
           {diff ? (
-            <div className="flex-1 overflow-y-auto bg-[#0d1117] border border-[#30363d] rounded p-4">
+            <div className="flex-1 overflow-y-auto bg-dark-bg border border-dark-border rounded p-4">
               {diffSummary && (
                 <div className="mb-3 text-xs text-gray-400">
                   {tr(
@@ -178,7 +180,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
               ) : (
                 <div className="flex flex-col gap-2">
                   {diff.tables.filter((t: any) => t.status !== 'unchanged').map((t: any) => (
-                    <label key={t.table_name} className="flex items-center gap-3 p-2 hover:bg-[#21262d] rounded cursor-pointer">
+                    <label key={t.table_name} className="flex items-center gap-3 p-2 hover:bg-dark-surface rounded cursor-pointer transition-colors">
                       <input
                         type="checkbox"
                         checked={selectedTables.includes(t.table_name)}
@@ -219,17 +221,18 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
           ) : (
             <div className="text-gray-500 text-sm">{tr('请返回上一步执行对比。', 'Please go back and run comparison.')}</div>
           )}
-          <button
+          <Button
+            variant="secondary" size="md"
             onClick={async () => {
               if (await handleGenerateDdl()) {
                 toast(tr('DDL 已生成，请点击下一步。', 'DDL generated. Click Next.'), 'success');
               }
             }}
             disabled={selectedTables.length === 0}
-            className="self-start px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white disabled:opacity-50"
+            className="self-start disabled:opacity-50"
           >
             {tr('生成 DDL', 'Generate DDL')}
-          </button>
+          </Button>
         </div>
       )
     },
@@ -243,7 +246,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
           <textarea
             readOnly
             value={ddl}
-            className="flex-1 bg-[#0d1117] border border-[#30363d] rounded p-4 font-mono text-sm text-gray-300 outline-none resize-none"
+            className="flex-1 bg-dark-bg border border-dark-border rounded p-4 font-mono text-sm text-gray-300 outline-none resize-none"
           />
         </div>
       )

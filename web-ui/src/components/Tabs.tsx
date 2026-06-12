@@ -44,10 +44,10 @@ export function Tabs({
               e.preventDefault()
               setContextMenu({ x: e.clientX, y: e.clientY, tabId: tab.id })
             }}
-            className={`group flex items-center h-8 px-3 mx-0.5 rounded-t-md border border-b-0 cursor-pointer min-w-[120px] max-w-[200px] select-none ${
+            className={`group flex items-center h-8 px-3 mx-0.5 rounded-t-md border border-b-0 cursor-pointer min-w-[120px] max-w-[200px] select-none transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset ${
               activeTabId === tab.id
-                ? 'bg-[#0a0c10] border-dark-border text-blue-400'
-                : 'bg-transparent border-transparent text-gray-400 hover:bg-[#161b22] hover:text-gray-200'
+                ? 'bg-dark-canvas border-dark-border text-blue-400'
+                : 'bg-transparent border-transparent text-gray-400 hover:bg-dark-panel hover:text-gray-200'
             }`}
           >
             <span className="truncate flex-1 text-sm">{tab.title}</span>
@@ -57,7 +57,7 @@ export function Tabs({
                   e.stopPropagation()
                   onTabClose(tab.id)
                 }}
-                className="ml-2 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-gray-700/50 transition-all"
+                className="ml-2 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-gray-700/50 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
               >
                 <X className="w-3 h-3" />
               </button>
@@ -67,7 +67,7 @@ export function Tabs({
         {onTabAdd && (
           <button
             onClick={onTabAdd}
-            className="flex items-center justify-center h-8 w-8 mx-1 rounded text-gray-400 hover:bg-[#161b22] hover:text-gray-200 transition-colors shrink-0"
+            className="flex items-center justify-center h-8 w-8 mx-1 rounded text-gray-400 hover:bg-dark-panel hover:text-gray-200 transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
             title="New Query Tab"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -80,11 +80,11 @@ export function Tabs({
 
       {contextMenu && (
         <div 
-          className="fixed bg-[#161b22] border border-[#30363d] rounded-md shadow-2xl py-1 z-[100] min-w-[150px]"
+          className="fixed bg-dark-panel border border-dark-border rounded-md shadow-xl py-1 z-[100] min-w-[150px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
         >
           <button
-            className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-blue-500 hover:text-white transition-colors"
+            className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-blue-500 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset"
             onClick={(e) => {
               e.stopPropagation()
               onTabClose(contextMenu.tabId)
@@ -94,7 +94,7 @@ export function Tabs({
             Close
           </button>
           <button
-            className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-blue-500 hover:text-white transition-colors"
+            className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-blue-500 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset"
             onClick={(e) => {
               e.stopPropagation()
               onTabCloseOthers(contextMenu.tabId)
@@ -104,7 +104,7 @@ export function Tabs({
             Close Others
           </button>
           <button
-            className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-blue-500 hover:text-white transition-colors"
+            className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-blue-500 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset"
             onClick={(e) => {
               e.stopPropagation()
               onTabCloseAll()

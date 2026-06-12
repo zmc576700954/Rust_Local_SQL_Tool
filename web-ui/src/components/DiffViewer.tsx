@@ -71,8 +71,8 @@ export function DiffViewer({ diff }: DiffViewerProps) {
   return (
     <div className="flex flex-col gap-4">
       {modifiedTables.map(table => (
-        <div key={table.table_name} className="border border-[#30363d] rounded-lg bg-[#0d1117] overflow-hidden">
-          <div className="px-4 py-2 border-b border-[#30363d] bg-[#161b22] flex items-center gap-2">
+        <div key={table.table_name} className="border border-dark-border rounded-lg bg-dark-bg overflow-hidden">
+          <div className="px-4 py-2 border-b border-dark-border bg-dark-panel flex items-center gap-2">
             {table.status === 'added' && <Plus className="w-4 h-4 text-green-500" />}
             {table.status === 'removed' && <Minus className="w-4 h-4 text-red-500" />}
             {table.status === 'modified' && <Edit2 className="w-4 h-4 text-blue-500" />}

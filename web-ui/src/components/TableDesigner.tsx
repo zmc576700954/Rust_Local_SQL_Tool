@@ -181,26 +181,26 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
   if (loading) return <div className="p-4 text-gray-400">Loading schema...</div>
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0c10]">
-      <div className="flex items-center justify-between p-4 border-b border-[#30363d] bg-[#161b22]">
+    <div className="flex flex-col h-full bg-dark-canvas">
+      <div className="flex items-center justify-between p-4 border-b border-dark-border bg-dark-panel">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold text-gray-200">Table: {tableName}</h2>
           <div className="flex gap-2">
             <button 
               onClick={() => setActiveTab('columns')}
-              className={`px-3 py-1 rounded text-sm ${activeTab === 'columns' ? 'bg-[#30363d] text-white' : 'text-gray-400 hover:text-white'}`}
+              className={`px-3 py-1 rounded text-sm ${activeTab === 'columns' ? 'bg-dark-border text-white' : 'text-gray-400 hover:text-white'}`}
             >
               Columns
             </button>
             <button 
               onClick={() => setActiveTab('indexes')}
-              className={`px-3 py-1 rounded text-sm ${activeTab === 'indexes' ? 'bg-[#30363d] text-white' : 'text-gray-400 hover:text-white'}`}
+              className={`px-3 py-1 rounded text-sm ${activeTab === 'indexes' ? 'bg-dark-border text-white' : 'text-gray-400 hover:text-white'}`}
             >
               Indexes
             </button>
             <button 
               onClick={() => setActiveTab('foreignKeys')}
-              className={`px-3 py-1 rounded text-sm ${activeTab === 'foreignKeys' ? 'bg-[#30363d] text-white' : 'text-gray-400 hover:text-white'}`}
+              className={`px-3 py-1 rounded text-sm ${activeTab === 'foreignKeys' ? 'bg-dark-border text-white' : 'text-gray-400 hover:text-white'}`}
             >
               Foreign Keys
             </button>
@@ -220,13 +220,13 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
           <div>
             <div className="flex justify-between items-center mb-2">
               <h3 className="text-gray-300 font-medium">Columns</h3>
-              <button onClick={addColumn} className="text-xs bg-[#21262d] hover:bg-[#30363d] text-gray-300 px-2 py-1 rounded flex items-center gap-1">
+              <button onClick={addColumn} className="text-xs bg-dark-surface hover:bg-dark-border text-gray-300 px-2 py-1 rounded flex items-center gap-1">
                 <Plus className="w-3 h-3" /> Add Column
               </button>
             </div>
             <table className="w-full text-left text-sm text-gray-300 border-collapse">
               <thead>
-                <tr className="border-b border-[#30363d] bg-[#21262d]">
+                <tr className="border-b border-dark-border bg-dark-surface">
                   <th className="p-2">Name</th>
                   <th className="p-2">Type (Length)</th>
                   <th className="p-2">PK</th>
@@ -239,11 +239,11 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
               </thead>
               <tbody>
                 {columns.map((col: any, idx: number) => (
-                  <tr key={idx} className="border-b border-[#30363d]/50 hover:bg-[#21262d]/50">
+                  <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-surface/50">
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={col.column_name} 
                         onChange={e => updateColumn(idx, 'column_name', e.target.value)} 
                       />
@@ -251,7 +251,7 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={col.column_type} 
                         onChange={e => updateColumn(idx, 'column_type', e.target.value)} 
                       />
@@ -280,7 +280,7 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={col.column_default || ''} 
                         onChange={e => updateColumn(idx, 'column_default', e.target.value || null)} 
                       />
@@ -288,7 +288,7 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={col.column_comment || ''} 
                         onChange={e => updateColumn(idx, 'column_comment', e.target.value)} 
                       />
@@ -313,14 +313,14 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                 <button onClick={handleAISuggestIndexes} disabled={isSuggesting} className="text-xs bg-purple-600/20 hover:bg-purple-600/40 text-purple-400 border border-purple-500/30 px-2 py-1 rounded flex items-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                   <Sparkles className="w-3 h-3" /> {isSuggesting ? 'Thinking...' : 'AI Suggest Indexes'}
                 </button>
-                <button onClick={addIndex} className="text-xs bg-[#21262d] hover:bg-[#30363d] text-gray-300 px-2 py-1 rounded flex items-center gap-1">
+                <button onClick={addIndex} className="text-xs bg-dark-surface hover:bg-dark-border text-gray-300 px-2 py-1 rounded flex items-center gap-1">
                   <Plus className="w-3 h-3" /> Add Index
                 </button>
               </div>
             </div>
             <table className="w-full text-left text-sm text-gray-300 border-collapse">
               <thead>
-                <tr className="border-b border-[#30363d] bg-[#21262d]">
+                <tr className="border-b border-dark-border bg-dark-surface">
                   <th className="p-2">Index Name</th>
                   <th className="p-2">Column Name</th>
                   <th className="p-2">Unique</th>
@@ -330,11 +330,11 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
               </thead>
               <tbody>
                 {indexes.map((idxItem: any, idx: number) => (
-                  <tr key={idx} className="border-b border-[#30363d]/50 hover:bg-[#21262d]/50">
+                  <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-surface/50">
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={idxItem.index_name} 
                         onChange={e => updateIndex(idx, 'index_name', e.target.value)} 
                       />
@@ -342,7 +342,7 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={idxItem.column_name} 
                         onChange={e => updateIndex(idx, 'column_name', e.target.value)} 
                       />
@@ -357,7 +357,7 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={idxItem.index_type} 
                         onChange={e => updateIndex(idx, 'index_type', e.target.value)} 
                       />
@@ -378,13 +378,13 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
           <div>
             <div className="flex justify-between items-center mb-2">
               <h3 className="text-gray-300 font-medium">Foreign Keys</h3>
-              <button onClick={addForeignKey} className="text-xs bg-[#21262d] hover:bg-[#30363d] text-gray-300 px-2 py-1 rounded flex items-center gap-1">
+              <button onClick={addForeignKey} className="text-xs bg-dark-surface hover:bg-dark-border text-gray-300 px-2 py-1 rounded flex items-center gap-1">
                 <Plus className="w-3 h-3" /> Add Foreign Key
               </button>
             </div>
             <table className="w-full text-left text-sm text-gray-300 border-collapse">
               <thead>
-                <tr className="border-b border-[#30363d] bg-[#21262d]">
+                <tr className="border-b border-dark-border bg-dark-surface">
                   <th className="p-2">Constraint Name</th>
                   <th className="p-2">Column</th>
                   <th className="p-2">Ref Table</th>
@@ -396,11 +396,11 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
               </thead>
               <tbody>
                 {foreignKeys.map((fk: any, idx: number) => (
-                  <tr key={idx} className="border-b border-[#30363d]/50 hover:bg-[#21262d]/50">
+                  <tr key={idx} className="border-b border-dark-border/50 hover:bg-dark-surface/50">
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={fk.constraint_name} 
                         onChange={e => updateForeignKey(idx, 'constraint_name', e.target.value)} 
                       />
@@ -408,7 +408,7 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={fk.column_name} 
                         onChange={e => updateForeignKey(idx, 'column_name', e.target.value)} 
                       />
@@ -416,7 +416,7 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={fk.referenced_table_name} 
                         onChange={e => updateForeignKey(idx, 'referenced_table_name', e.target.value)} 
                       />
@@ -424,14 +424,14 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                     <td className="p-2">
                       <input 
                         type="text" 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={fk.referenced_column_name} 
                         onChange={e => updateForeignKey(idx, 'referenced_column_name', e.target.value)} 
                       />
                     </td>
                     <td className="p-2">
                       <select 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={fk.delete_rule} 
                         onChange={e => updateForeignKey(idx, 'delete_rule', e.target.value)}
                       >
@@ -443,7 +443,7 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
                     </td>
                     <td className="p-2">
                       <select 
-                        className="bg-transparent border border-[#30363d] rounded px-1 py-0.5 w-full"
+                        className="bg-transparent border border-dark-border rounded px-1 py-0.5 w-full"
                         value={fk.update_rule} 
                         onChange={e => updateForeignKey(idx, 'update_rule', e.target.value)}
                       >
@@ -468,20 +468,20 @@ Columns: ${JSON.stringify(columns.map(c => ({ name: c.column_name, type: c.colum
 
       {previewSql !== null && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[#161b22] border border-[#30363d] rounded-lg shadow-xl w-[600px] flex flex-col max-h-[80vh]">
-            <div className="p-4 border-b border-[#30363d] flex justify-between items-center">
+          <div className="bg-dark-panel border border-dark-border rounded-lg shadow-xl w-[600px] flex flex-col max-h-[80vh]">
+            <div className="p-4 border-b border-dark-border flex justify-between items-center">
               <h3 className="text-lg font-semibold text-gray-200">{tr('预览 DDL', 'Preview DDL')}</h3>
               <button onClick={() => setPreviewSql(null)} className="text-gray-400 hover:text-white">&times;</button>
             </div>
             <div className="p-4 overflow-auto flex-1">
-              <pre className="bg-[#0d1117] p-4 rounded text-sm text-green-400 whitespace-pre-wrap font-mono">
+              <pre className="bg-dark-bg p-4 rounded text-sm text-green-400 whitespace-pre-wrap font-mono">
                 {previewSql}
               </pre>
             </div>
-            <div className="p-4 border-t border-[#30363d] flex justify-end gap-2">
+            <div className="p-4 border-t border-dark-border flex justify-end gap-2">
               <button 
                 onClick={() => setPreviewSql(null)}
-                className="px-4 py-2 rounded text-sm text-gray-300 hover:bg-[#30363d] transition-colors"
+                className="px-4 py-2 rounded text-sm text-gray-300 hover:bg-dark-border transition-colors"
               >
                 {tr('取消', 'Cancel')}
               </button>

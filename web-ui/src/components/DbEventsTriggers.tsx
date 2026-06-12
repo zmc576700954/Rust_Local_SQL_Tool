@@ -242,19 +242,19 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#161b22] text-gray-300 rounded-xl overflow-hidden shadow-2xl border border-[#30363d]">
-      <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117] shrink-0">
+    <div className="flex flex-col h-full bg-dark-panel text-gray-300 rounded-xl overflow-hidden shadow-2xl border border-dark-border">
+      <div className="px-6 py-4 border-b border-dark-border flex items-center justify-between bg-dark-bg shrink-0">
         <h3 className="text-gray-200 font-bold text-lg">{tr('事件 / 触发器', 'Events / Triggers')}</h3>
         <button onClick={onCancel} className="text-gray-500 hover:text-white transition-colors">
           {tr('关闭', 'Close')}
         </button>
       </div>
 
-      <div className="px-6 py-3 border-b border-[#30363d] bg-[#0d1117] flex items-center gap-2 shrink-0">
+      <div className="px-6 py-3 border-b border-dark-border bg-dark-bg flex items-center gap-2 shrink-0">
         <select
           value={selectedConnId}
           onChange={(e) => setSelectedConnId(e.target.value)}
-          className="min-w-[260px] bg-[#161b22] border border-[#30363d] rounded px-3 py-1.5 text-sm text-gray-200"
+          className="min-w-[260px] bg-dark-panel border border-dark-border rounded px-3 py-1.5 text-sm text-gray-200"
         >
           <option value="">{tr('-- 选择连接 --', '-- Select connection --')}</option>
           {connections.map((c) => (
@@ -267,12 +267,12 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder={tr('筛选名称...', 'Filter name...')}
-          className="flex-1 bg-[#161b22] border border-[#30363d] rounded px-3 py-1.5 text-sm text-gray-200"
+          className="flex-1 bg-dark-panel border border-dark-border rounded px-3 py-1.5 text-sm text-gray-200"
         />
         <button
           onClick={() => loadObjects(selectedConnId)}
           disabled={!selectedConnId || isLoading}
-          className="px-3 py-1.5 rounded border border-[#30363d] text-sm text-gray-200 hover:bg-[#30363d] disabled:opacity-50"
+          className="px-3 py-1.5 rounded border border-dark-border text-sm text-gray-200 hover:bg-dark-border disabled:opacity-50"
         >
           {tr('刷新', 'Refresh')}
         </button>
@@ -297,8 +297,8 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
 
       <div className="flex-1 min-h-0 px-6 py-4">
         <div className="h-full grid grid-cols-[320px_1fr] gap-4">
-          <div className="min-h-0 border border-[#30363d] rounded overflow-hidden flex flex-col">
-            <div className="flex border-b border-[#30363d]">
+          <div className="min-h-0 border border-dark-border rounded overflow-hidden flex flex-col">
+            <div className="flex border-b border-dark-border">
               <button
                 className={`flex-1 py-2 text-sm ${activeTab === 'triggers' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-gray-200'}`}
                 onClick={() => setActiveTab('triggers')}
@@ -312,13 +312,13 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
                 {tr('事件', 'Events')} ({filteredEvents.length})
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto bg-[#0d1117]">
+            <div className="flex-1 overflow-y-auto bg-dark-bg">
               {activeTab === 'triggers' &&
                 filteredTriggers.map((row) => (
                   <button
                     key={row.TRIGGER_NAME}
                     onClick={() => setSelectedTriggerName(row.TRIGGER_NAME)}
-                    className={`w-full text-left px-3 py-2 border-b border-[#30363d] hover:bg-[#21262d] ${
+                    className={`w-full text-left px-3 py-2 border-b border-dark-border hover:bg-dark-surface ${
                       selectedTriggerName === row.TRIGGER_NAME ? 'bg-blue-500/10' : ''
                     }`}
                   >
@@ -333,7 +333,7 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
                   <button
                     key={row.EVENT_NAME}
                     onClick={() => setSelectedEventName(row.EVENT_NAME)}
-                    className={`w-full text-left px-3 py-2 border-b border-[#30363d] hover:bg-[#21262d] ${
+                    className={`w-full text-left px-3 py-2 border-b border-dark-border hover:bg-dark-surface ${
                       selectedEventName === row.EVENT_NAME ? 'bg-blue-500/10' : ''
                     }`}
                   >
@@ -346,7 +346,7 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
             </div>
           </div>
 
-          <div className="min-h-0 border border-[#30363d] rounded bg-[#0d1117] p-4 flex flex-col gap-3">
+          <div className="min-h-0 border border-dark-border rounded bg-dark-bg p-4 flex flex-col gap-3">
             <div className="text-sm text-gray-300 font-medium">
               {activeTab === 'triggers' ? tr('详情与定义', 'Detail & Definition') : tr('详情与定义', 'Detail & Definition')}
             </div>
@@ -381,7 +381,7 @@ export function DbEventsTriggers({ onCancel }: DbEventsTriggersProps) {
               readOnly
               value={previewSql}
               placeholder={tr('选择左侧条目后预览定义 SQL。', 'Select an item on the left to preview SQL definition.')}
-              className="flex-1 min-h-[220px] bg-[#161b22] border border-[#30363d] rounded p-3 font-mono text-xs text-gray-300 outline-none resize-none"
+              className="flex-1 min-h-[220px] bg-dark-panel border border-dark-border rounded p-3 font-mono text-xs text-gray-300 outline-none resize-none"
             />
           </div>
         </div>

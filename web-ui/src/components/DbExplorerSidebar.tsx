@@ -606,7 +606,7 @@ export function DbExplorerSidebar({
             <button
               title={tr('新建分组', 'New Group')}
               onClick={() => setGroupCreate({ name: '', connIds: [] })}
-              className="flex items-center justify-center w-7 h-7 rounded border border-[#30363d] bg-[#0d1117] hover:bg-[#161b22] text-gray-400 hover:text-gray-200 transition-colors"
+              className="flex items-center justify-center w-7 h-7 rounded border border-dark-border bg-dark-bg hover:bg-dark-panel text-gray-400 hover:text-gray-200 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
             >
               <FolderPlus className="w-3.5 h-3.5" />
             </button>
@@ -622,15 +622,15 @@ export function DbExplorerSidebar({
               }}
               className={`flex items-center justify-center w-7 h-7 rounded border transition-colors ${
                 batchMode
-                  ? 'border-blue-500/40 bg-blue-500/15 text-blue-300'
-                  : 'border-[#30363d] bg-[#0d1117] text-gray-400 hover:bg-[#161b22] hover:text-gray-200'
+                  ? 'border-blue-500/40 bg-blue-500/15 text-blue-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50'
+                  : 'border-dark-border bg-dark-bg text-gray-400 hover:bg-dark-panel hover:text-gray-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50'
               }`}
             >
               {batchMode ? <CheckSquare className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
             </button>
             {showSqlUpload && (
               <label
-                className="flex items-center justify-center w-7 h-7 rounded border border-blue-500/30 bg-blue-500/10 hover:bg-blue-500/15 text-blue-400 hover:text-blue-300 transition-colors cursor-pointer"
+                className="flex items-center justify-center w-7 h-7 rounded border border-blue-500/30 bg-blue-500/10 hover:bg-blue-500/15 text-blue-400 hover:text-blue-300 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset"
                 title={tr('导入离线 DDL', 'Upload offline DDL')}
               >
                 <FileUp className="w-3.5 h-3.5" />
@@ -640,14 +640,14 @@ export function DbExplorerSidebar({
             <button
               title={tr('刷新', 'Refresh')}
               onClick={onRefreshSchema}
-              className="flex items-center justify-center w-7 h-7 rounded border border-[#30363d] bg-[#0d1117] hover:bg-[#161b22] text-gray-400 hover:text-gray-200 transition-colors"
+              className="flex items-center justify-center w-7 h-7 rounded border border-dark-border bg-dark-bg hover:bg-dark-panel text-gray-400 hover:text-gray-200 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingSchema ? 'animate-spin' : ''}`} />
             </button>
             <button
               title={tr('新建连接', 'New Connection')}
               onClick={() => setShowAdd(true)}
-              className="flex items-center justify-center w-7 h-7 rounded border border-[#30363d] bg-[#0d1117] hover:bg-[#161b22] text-gray-400 hover:text-gray-200 transition-colors"
+              className="flex items-center justify-center w-7 h-7 rounded border border-dark-border bg-dark-bg hover:bg-dark-panel text-gray-400 hover:text-gray-200 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
             >
               <Plus className="w-3.5 h-3.5" />
             </button>
@@ -657,7 +657,7 @@ export function DbExplorerSidebar({
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder={tr('筛选连接...', 'Filter connections...')}
-          className="mt-2 w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 placeholder:text-gray-600 outline-none focus:border-blue-500/50"
+          className="mt-2 w-full bg-dark-bg border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200 placeholder:text-gray-600 outline-none focus:border-blue-500/50"
         />
         {batchMode && (
           <div className="mt-2 flex items-center gap-2">
@@ -665,7 +665,7 @@ export function DbExplorerSidebar({
               value={batchTargetGroup}
               onChange={(e) => setBatchTargetGroup(e.target.value)}
               placeholder={tr('输入目标分组，留空表示未分组', 'Target group, empty for ungrouped')}
-              className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200"
+              className="flex-1 bg-dark-bg border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200"
             />
             <button
               onClick={() => {
@@ -675,7 +675,7 @@ export function DbExplorerSidebar({
                 setBatchMode(false)
               }}
               disabled={selectedConnIds.length === 0}
-              className="px-2 py-1.5 rounded text-xs border border-[#30363d] bg-[#21262d] text-gray-200 hover:bg-[#30363d] disabled:opacity-50"
+              className="px-2 py-1.5 rounded text-xs border border-dark-border bg-dark-surface text-gray-200 hover:bg-dark-border disabled:opacity-50"
             >
               {tr('应用', 'Apply')}
             </button>
@@ -709,20 +709,20 @@ export function DbExplorerSidebar({
                 setDragOverGroup(null)
               }}
             >
-              <div className="px-2 py-1 text-[10px] text-gray-500 uppercase tracking-wider font-bold flex items-center justify-between gap-2">
+              <div className="px-2 py-1 text-[11px] text-gray-500 uppercase tracking-wider font-bold flex items-center justify-between gap-2">
                 <span>{groupName}</span>
                 {groupName !== ungroupedLabel && (
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => setGroupRename({ oldName: groupName, newName: groupName })}
-                      className="w-5 h-5 rounded border border-[#30363d] bg-[#0d1117] text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors flex items-center justify-center"
+                      className="w-5 h-5 rounded border border-dark-border bg-dark-bg text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors flex items-center justify-center"
                       title={tr('重命名分组', 'Rename group')}
                     >
                       <Pencil className="w-3 h-3" />
                     </button>
                     <button
                       onClick={() => setGroupClearConfirm(groupName)}
-                      className="w-5 h-5 rounded border border-[#30363d] bg-[#0d1117] text-gray-500 hover:text-orange-300 hover:bg-orange-500/10 transition-colors flex items-center justify-center"
+                      className="w-5 h-5 rounded border border-dark-border bg-dark-bg text-gray-500 hover:text-orange-300 hover:bg-orange-500/10 transition-colors flex items-center justify-center"
                       title={tr('清空分组', 'Clear group')}
                     >
                       <Trash2 className="w-3 h-3" />
@@ -747,7 +747,7 @@ export function DbExplorerSidebar({
               <div key={c.id} className="mb-1">
                 <div
                   className={`flex items-center gap-2 px-2 py-2 rounded cursor-pointer transition-colors ${
-                    isActive ? 'bg-blue-500/10 border border-blue-500/20' : 'hover:bg-[#21262d]'
+                    isActive ? 'bg-blue-500/10 border border-blue-500/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset' : 'hover:bg-dark-surface focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset'
                   }`}
                   draggable
                   onDragStart={() => setDragConnId(c.id)}
@@ -771,22 +771,22 @@ export function DbExplorerSidebar({
                           return [...prev, c.id]
                         })
                       }}
-                      className="w-4 h-4 flex items-center justify-center text-gray-500 hover:text-gray-200"
+                      className="w-4 h-4 flex items-center justify-center text-gray-500 hover:text-gray-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
                     >
                       {selectedConnIds.includes(c.id) ? <CheckSquare className="w-4 h-4 text-blue-400" /> : <Square className="w-4 h-4" />}
                     </button>
                   )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      const nextExpanded = !isExpanded
-                      setExpandedState(c.id, nextExpanded)
-                    }}
-                    className="w-5 h-5 flex items-center justify-center text-gray-500 hover:text-gray-200"
-                    title={isExpanded ? tr('折叠', 'Collapse') : tr('展开', 'Expand')}
-                  >
-                    {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                  </button>
+                   <button
+                     onClick={(e) => {
+                       e.stopPropagation()
+                       const nextExpanded = !isExpanded
+                       setExpandedState(c.id, nextExpanded)
+                     }}
+                     className="w-5 h-5 flex items-center justify-center text-gray-500 hover:text-gray-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
+                     title={isExpanded ? tr('折叠', 'Collapse') : tr('展开', 'Expand')}
+                   >
+                     {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                   </button>
                   <div
                     className="w-2.5 h-2.5 rounded-full border border-black/40"
                     style={{ backgroundColor: String(c.color || '#3b82f6') }}
@@ -798,12 +798,12 @@ export function DbExplorerSidebar({
                       {!!c.is_favorite && <Star className="inline w-3 h-3 text-yellow-400 mr-1.5 -mt-0.5" />}
                       {String(c.name || c.id)}
                       {isActive && c.is_read_only && (
-                        <span className="ml-2 text-[10px] bg-red-500/20 text-red-500 border border-red-500/30 px-1.5 py-0.5 rounded uppercase tracking-wider font-bold shadow-sm">
+                        <span className="ml-2 text-[11px] bg-red-500/20 text-red-500 border border-red-500/30 px-1.5 py-0.5 rounded uppercase tracking-wider font-bold shadow-sm">
                           [只读]
                         </span>
                       )}
                     </div>
-                    <div className="text-[10px] text-gray-500 font-mono truncate" title={redactUrl(displayHost(c.url))}>
+                    <div className="text-[11px] text-gray-500 font-mono truncate" title={redactUrl(displayHost(c.url))}>
                       {redactUrl(displayHost(c.url))}
                     </div>
                   </div>
@@ -812,7 +812,7 @@ export function DbExplorerSidebar({
                       e.stopPropagation()
                       openEditDialog(c)
                     }}
-                    className="p-1.5 rounded border border-[#30363d] bg-[#0d1117] text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
+                    className="p-1.5 rounded border border-dark-border bg-dark-bg text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
                     title={tr('编辑', 'Edit')}
                   >
                     <Pencil className="w-3.5 h-3.5" />
@@ -822,7 +822,7 @@ export function DbExplorerSidebar({
                       e.stopPropagation()
                       onUpdateConnection(c.id, { is_favorite: !c.is_favorite })
                     }}
-                    className={`p-1.5 rounded border border-[#30363d] bg-[#0d1117] transition-colors ${
+                    className={`p-1.5 rounded border border-dark-border bg-dark-bg transition-colors ${
                       c.is_favorite ? 'text-yellow-400 hover:bg-yellow-500/10' : 'text-gray-500 hover:text-yellow-300 hover:bg-yellow-500/10'
                     }`}
                     title={tr('收藏', 'Favorite')}
@@ -834,7 +834,7 @@ export function DbExplorerSidebar({
                       e.stopPropagation()
                       onDeleteConnection(c.id)
                     }}
-                    className="p-1.5 rounded border border-[#30363d] bg-[#0d1117] text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                    className="p-1.5 rounded border border-dark-border bg-dark-bg text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
                     title={tr('删除', 'Delete')}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -860,24 +860,24 @@ export function DbExplorerSidebar({
                             value={tableFilters[c.id] || ''}
                             onChange={(e) => setTableFilters((prev) => ({ ...prev, [c.id]: e.target.value }))}
                             placeholder={tr('筛选表 / 视图...', 'Filter tables / views...')}
-                            className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 text-xs text-gray-200 placeholder:text-gray-600 outline-none focus:border-blue-500/50"
+                            className="w-full bg-dark-bg border border-dark-border rounded px-2 py-1.5 text-xs text-gray-200 placeholder:text-gray-600 outline-none focus:border-blue-500/50"
                           />
                         </div>
                         <div className="mt-1">
-                          <div className="px-2 py-1 text-[10px] text-gray-500 uppercase font-bold tracking-wider flex items-center justify-between">
+                          <div className="px-2 py-1 text-[11px] text-gray-500 uppercase font-bold tracking-wider flex items-center justify-between">
                             <span>{tr(`表 (${visibleTables.length}/${dbSchema?.tables?.length || 0})`, `Tables (${visibleTables.length}/${dbSchema?.tables?.length || 0})`)}</span>
                           </div>
                           {visibleTables.length === 0 ? (
                             <div className="px-2 py-2 text-xs text-gray-600">{tr('无匹配表', 'No matching tables')}</div>
                           ) : visibleTables.map((t) => (
-                            <div
-                              key={t.table_name}
-                              className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors duration-150 group hover:bg-[#21262d] text-gray-300"
-                              onContextMenu={(e) => {
-                                e.preventDefault()
-                                onTableContextMenu(e.clientX, e.clientY, { table_name: t.table_name })
-                              }}
-                            >
+                             <div
+                               key={t.table_name}
+                               className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors duration-150 group hover:bg-dark-surface text-gray-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset"
+                               onContextMenu={(e) => {
+                                 e.preventDefault()
+                                 onTableContextMenu(e.clientX, e.clientY, { table_name: t.table_name })
+                               }}
+                             >
                               <div
                                 className="flex items-center gap-2 flex-1 overflow-hidden"
                                 onDoubleClick={() => onOpenTable(c.id, String(c.name || c.id), t.table_name)}
@@ -885,32 +885,32 @@ export function DbExplorerSidebar({
                                 <Table className="w-4 h-4 flex-shrink-0" />
                                 <span className="text-sm truncate" title={t.table_name}>{t.table_name}</span>
                               </div>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  onOpenTable(c.id, String(c.name || c.id), t.table_name)
-                                }}
-                                className="p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all"
-                                title={tr('打开表数据', 'Open table data')}
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  onInsertTableName(t.table_name)
-                                }}
-                                className="opacity-0 group-hover:opacity-100 p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all"
-                                title={tr('插入表名到编辑器', 'Insert table name into editor')}
-                              >
-                                <AlignLeft className="w-3.5 h-3.5" />
-                              </button>
+                               <button
+                                 onClick={(e) => {
+                                   e.stopPropagation()
+                                   onOpenTable(c.id, String(c.name || c.id), t.table_name)
+                                 }}
+                                 className="p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
+                                 title={tr('打开表数据', 'Open table data')}
+                               >
+                                 <Eye className="w-3.5 h-3.5" />
+                               </button>
+                               <button
+                                 onClick={(e) => {
+                                   e.stopPropagation()
+                                   onInsertTableName(t.table_name)
+                                 }}
+                                 className="opacity-0 group-hover:opacity-100 p-1 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400 transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
+                                 title={tr('插入表名到编辑器', 'Insert table name into editor')}
+                               >
+                                 <AlignLeft className="w-3.5 h-3.5" />
+                               </button>
                             </div>
                           ))}
                         </div>
 
                         <div className="mt-3">
-                          <div className="px-2 py-1 text-[10px] text-gray-500 uppercase font-bold tracking-wider flex items-center justify-between">
+                          <div className="px-2 py-1 text-[11px] text-gray-500 uppercase font-bold tracking-wider flex items-center justify-between">
                             <span>{tr(`视图 (${visibleViews.length}/${dbSchema?.views?.length || 0})`, `Views (${visibleViews.length}/${dbSchema?.views?.length || 0})`)}</span>
                           </div>
                           {visibleViews.length === 0 ? (
@@ -920,7 +920,7 @@ export function DbExplorerSidebar({
                             return (
                               <div
                                 key={viewName}
-                                className="flex items-center gap-2 px-2 py-1.5 rounded text-gray-400 hover:bg-[#21262d] transition-colors cursor-pointer group"
+                                className="flex items-center gap-2 px-2 py-1.5 rounded text-gray-400 hover:bg-dark-surface transition-colors cursor-pointer group"
                                 onDoubleClick={() => onOpenTable(c.id, String(c.name || c.id), viewName)}
                               >
                                 <Eye className="w-4 h-4" />
@@ -963,7 +963,7 @@ export function DbExplorerSidebar({
 
       {connMenu && (
         <div
-          className="fixed z-[80] min-w-[180px] bg-[#161b22] border border-[#30363d] rounded-md shadow-2xl py-1 text-sm text-gray-300"
+          className="fixed z-[80] min-w-[180px] bg-dark-panel border border-dark-border rounded-md shadow-xl py-1 text-sm text-gray-300"
           style={{ top: connMenu.y, left: connMenu.x }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -1032,8 +1032,8 @@ export function DbExplorerSidebar({
 
       {groupRename && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-[520px] overflow-hidden">
-            <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117]">
+          <div className="bg-dark-panel border border-dark-border rounded-xl shadow-2xl w-[520px] overflow-hidden">
+            <div className="px-6 py-4 border-b border-dark-border flex items-center justify-between bg-dark-bg">
               <h3 className="text-gray-200 font-bold text-lg">{tr('重命名分组', 'Rename Group')}</h3>
               <button onClick={() => setGroupRename(null)} className="text-gray-500 hover:text-gray-300">
                 <X className="w-5 h-5" />
@@ -1045,18 +1045,18 @@ export function DbExplorerSidebar({
                 <input
                   value={groupRename.newName}
                   onChange={(e) => setGroupRename({ ...groupRename, newName: e.target.value })}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200"
+                  className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200"
                 />
               </div>
               <div className="flex justify-end gap-2">
-                <button onClick={() => setGroupRename(null)} className="px-3 py-2 rounded-lg text-sm border border-[#30363d] bg-[#0d1117] text-gray-300 hover:bg-[#161b22]">{tr('取消', 'Cancel')}</button>
+                <button onClick={() => setGroupRename(null)} className="px-3 py-2 rounded-lg text-sm border border-dark-border bg-dark-bg text-gray-300 hover:bg-dark-panel">{tr('取消', 'Cancel')}</button>
                 <button
                   onClick={() => {
                     onRenameGroup(groupRename.oldName, groupRename.newName)
                     setGroupRename(null)
                   }}
                   disabled={!groupRename.newName.trim() || groupRename.newName.trim() === groupRename.oldName}
-                  className="px-3 py-2 rounded-lg text-sm bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-gray-200 disabled:opacity-60"
+                  className="px-3 py-2 rounded-lg text-sm bg-dark-surface hover:bg-dark-border border border-dark-border text-gray-200 disabled:opacity-60"
                 >
                   {tr('保存', 'Save')}
                 </button>
@@ -1068,8 +1068,8 @@ export function DbExplorerSidebar({
 
       {groupClearConfirm && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-[520px] overflow-hidden">
-            <div className="px-6 py-4 border-b border-[#30363d] bg-[#0d1117]">
+          <div className="bg-dark-panel border border-dark-border rounded-xl shadow-2xl w-[520px] overflow-hidden">
+            <div className="px-6 py-4 border-b border-dark-border bg-dark-bg">
               <h3 className="text-gray-200 font-bold text-lg">{tr('确认清空分组', 'Confirm Clear Group')}</h3>
             </div>
             <div className="p-6 space-y-4">
@@ -1077,7 +1077,7 @@ export function DbExplorerSidebar({
                 {tr(`将清空分组 "${groupClearConfirm}" 下所有连接的分组信息，确认继续吗？`, `Clear group "${groupClearConfirm}" for all connections?`)}
               </p>
               <div className="flex justify-end gap-2">
-                <button onClick={() => setGroupClearConfirm(null)} className="px-3 py-2 rounded-lg text-sm border border-[#30363d] bg-[#0d1117] text-gray-300 hover:bg-[#161b22]">{tr('取消', 'Cancel')}</button>
+                <button onClick={() => setGroupClearConfirm(null)} className="px-3 py-2 rounded-lg text-sm border border-dark-border bg-dark-bg text-gray-300 hover:bg-dark-panel">{tr('取消', 'Cancel')}</button>
                 <button
                   onClick={() => {
                     onClearGroup(groupClearConfirm)
@@ -1095,8 +1095,8 @@ export function DbExplorerSidebar({
 
       {groupCreate && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-[620px] overflow-hidden">
-            <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117]">
+          <div className="bg-dark-panel border border-dark-border rounded-xl shadow-2xl w-[620px] overflow-hidden">
+            <div className="px-6 py-4 border-b border-dark-border flex items-center justify-between bg-dark-bg">
               <h3 className="text-gray-200 font-bold text-lg">{tr('新建分组', 'New Group')}</h3>
               <button onClick={() => setGroupCreate(null)} className="text-gray-500 hover:text-gray-300">
                 <X className="w-5 h-5" />
@@ -1109,14 +1109,14 @@ export function DbExplorerSidebar({
                   value={groupCreate.name}
                   onChange={(e) => setGroupCreate({ ...groupCreate, name: e.target.value })}
                   placeholder={tr('例如：生产环境', 'e.g. Production')}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200"
+                  className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200"
                 />
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-2">{tr('选择要移动到该分组的连接', 'Select connections to move')}</div>
                 <div className="max-h-48 overflow-auto space-y-1 pr-1">
                   {connections.map((c) => (
-                    <label key={c.id} className="flex items-center gap-2 text-sm text-gray-300 px-2 py-1.5 rounded hover:bg-[#21262d]">
+                    <label key={c.id} className="flex items-center gap-2 text-sm text-gray-300 px-2 py-1.5 rounded hover:bg-dark-surface">
                       <input
                         type="checkbox"
                         checked={groupCreate.connIds.includes(c.id)}
@@ -1133,14 +1133,14 @@ export function DbExplorerSidebar({
                 </div>
               </div>
               <div className="flex justify-end gap-2">
-                <button onClick={() => setGroupCreate(null)} className="px-3 py-2 rounded-lg text-sm border border-[#30363d] bg-[#0d1117] text-gray-300 hover:bg-[#161b22]">{tr('取消', 'Cancel')}</button>
+                <button onClick={() => setGroupCreate(null)} className="px-3 py-2 rounded-lg text-sm border border-dark-border bg-dark-bg text-gray-300 hover:bg-dark-panel">{tr('取消', 'Cancel')}</button>
                 <button
                   onClick={() => {
                     onBatchMoveConnections(groupCreate.connIds, groupCreate.name.trim())
                     setGroupCreate(null)
                   }}
                   disabled={!groupCreate.name.trim() || groupCreate.connIds.length === 0}
-                  className="px-3 py-2 rounded-lg text-sm bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-gray-200 disabled:opacity-60"
+                  className="px-3 py-2 rounded-lg text-sm bg-dark-surface hover:bg-dark-border border border-dark-border text-gray-200 disabled:opacity-60"
                 >
                   {tr('创建并移动', 'Create & Move')}
                 </button>
@@ -1152,8 +1152,8 @@ export function DbExplorerSidebar({
 
       {showAdd && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-[720px] overflow-hidden">
-            <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117]">
+          <div className="bg-dark-panel border border-dark-border rounded-xl shadow-2xl w-[720px] overflow-hidden">
+            <div className="px-6 py-4 border-b border-dark-border flex items-center justify-between bg-dark-bg">
               <h3 className="text-gray-200 font-bold text-lg">{tr('新建连接', 'New Connection')}</h3>
               <button
                 onClick={() => {
@@ -1174,7 +1174,7 @@ export function DbExplorerSidebar({
                     value={draftName}
                     onChange={(e) => setDraftName(e.target.value)}
                     placeholder="e.g. My Prod DB"
-                    className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200"
+                    className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200"
                   />
                 </div>
                 <div>
@@ -1183,7 +1183,7 @@ export function DbExplorerSidebar({
                     value={draftUrl}
                     onChange={(e) => setDraftUrl(e.target.value)}
                     placeholder="mysql://user:pass@host:3306/db"
-                    className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200"
+                    className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200"
                   />
                 </div>
               </div>
@@ -1194,7 +1194,7 @@ export function DbExplorerSidebar({
                     setDraftName('')
                     setDraftUrl('')
                   }}
-                  className="px-3 py-2 rounded-lg text-sm border border-[#30363d] bg-[#0d1117] text-gray-300 hover:bg-[#161b22]"
+                  className="px-3 py-2 rounded-lg text-sm border border-dark-border bg-dark-bg text-gray-300 hover:bg-dark-panel"
                 >
                   {tr('取消', 'Cancel')}
                 </button>
@@ -1206,7 +1206,7 @@ export function DbExplorerSidebar({
                     setDraftUrl('')
                   }}
                   disabled={!draftUrl.trim()}
-                  className="px-3 py-2 rounded-lg text-sm bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-gray-200 disabled:opacity-60"
+                  className="px-3 py-2 rounded-lg text-sm bg-dark-surface hover:bg-dark-border border border-dark-border text-gray-200 disabled:opacity-60"
                 >
                   {tr('添加', 'Add')}
                 </button>
@@ -1218,15 +1218,15 @@ export function DbExplorerSidebar({
 
       {editingConnId && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm">
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-[720px] overflow-hidden">
-            <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117]">
+          <div className="bg-dark-panel border border-dark-border rounded-xl shadow-2xl w-[720px] overflow-hidden">
+            <div className="px-6 py-4 border-b border-dark-border flex items-center justify-between bg-dark-bg">
               <h3 className="text-gray-200 font-bold text-lg">{tr('编辑连接', 'Edit Connection')}</h3>
               <button onClick={() => setEditingConnId(null)} className="text-gray-500 hover:text-gray-300">
                 <X className="w-5 h-5" />
               </button>
             </div>
             <div className="p-6 space-y-4">
-              <div className="flex items-center gap-2 border-b border-[#30363d] pb-2">
+              <div className="flex items-center gap-2 border-b border-dark-border pb-2">
                 <button
                   onClick={() => setEditTab('general')}
                   className={`px-3 py-1.5 rounded text-sm ${editTab === 'general' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30' : 'text-gray-400 hover:text-gray-200'}`}
@@ -1246,30 +1246,30 @@ export function DbExplorerSidebar({
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <div className="text-xs text-gray-500 mb-1">{tr('名称', 'Name')}</div>
-                      <input value={editName} onChange={(e) => setEditName(e.target.value)} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200" />
+                      <input value={editName} onChange={(e) => setEditName(e.target.value)} className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200" />
                     </div>
                     <div>
                       <div className="text-xs text-gray-500 mb-1">{tr('连接地址', 'Connection URL')}</div>
-                      <input ref={editUrlRef} value={editUrl} onChange={(e) => setEditUrl(e.target.value)} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200" />
+                      <input ref={editUrlRef} value={editUrl} onChange={(e) => setEditUrl(e.target.value)} className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200" />
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <div className="text-xs text-gray-500 mb-1">{tr('分组', 'Group')}</div>
-                      <input value={editGroup} onChange={(e) => setEditGroup(e.target.value)} placeholder={tr('例如：生产环境', 'e.g. Production')} className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200" />
+                      <input value={editGroup} onChange={(e) => setEditGroup(e.target.value)} placeholder={tr('例如：生产环境', 'e.g. Production')} className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200" />
                     </div>
                     <div>
                       <div className="text-xs text-gray-500 mb-1">{tr('颜色', 'Color')}</div>
                       <div className="flex items-center gap-2">
-                        <input type="color" value={editColor} onChange={(e) => setEditColor(e.target.value)} className="w-10 h-10 p-1 bg-[#0d1117] border border-[#30363d] rounded" />
-                        <input value={editColor} onChange={(e) => setEditColor(e.target.value)} className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200" />
+                        <input type="color" value={editColor} onChange={(e) => setEditColor(e.target.value)} className="w-10 h-10 p-1 bg-dark-bg border border-dark-border rounded" />
+                        <input value={editColor} onChange={(e) => setEditColor(e.target.value)} className="flex-1 bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200" />
                       </div>
                     </div>
                   </div>
                 </>
               ) : (
                 <>
-                  <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-4">
+                  <div className="bg-dark-bg border border-dark-border rounded-lg p-4">
                     <div className="text-xs text-gray-500 mb-2 uppercase tracking-wider font-bold">
                       {tr('连接向导', 'Connection Wizard')}
                     </div>
@@ -1282,7 +1282,7 @@ export function DbExplorerSidebar({
                             className={`px-2.5 py-1.5 rounded text-xs border transition-colors ${
                               !editSshEnabled
                                 ? 'border-blue-500/40 bg-blue-500/15 text-blue-300'
-                                : 'border-[#30363d] bg-[#0b0f14] text-gray-300 hover:bg-[#161b22]'
+                                : 'border-dark-border bg-[#0b0f14] text-gray-300 hover:bg-dark-panel'
                             }`}
                           >
                             {tr('直连数据库', 'Direct Connection')}
@@ -1292,7 +1292,7 @@ export function DbExplorerSidebar({
                             className={`px-2.5 py-1.5 rounded text-xs border transition-colors ${
                               editSshEnabled
                                 ? 'border-blue-500/40 bg-blue-500/15 text-blue-300'
-                                : 'border-[#30363d] bg-[#0b0f14] text-gray-300 hover:bg-[#161b22]'
+                                : 'border-dark-border bg-[#0b0f14] text-gray-300 hover:bg-dark-panel'
                             }`}
                           >
                             {tr('经 SSH 隧道', 'Via SSH Tunnel')}
@@ -1310,7 +1310,7 @@ export function DbExplorerSidebar({
                             className={`px-2.5 py-1.5 rounded text-xs border transition-colors ${
                               !editSslEnabled || editSslMode === 'disabled'
                                 ? 'border-blue-500/40 bg-blue-500/15 text-blue-300'
-                                : 'border-[#30363d] bg-[#0b0f14] text-gray-300 hover:bg-[#161b22]'
+                                : 'border-dark-border bg-[#0b0f14] text-gray-300 hover:bg-dark-panel'
                             }`}
                           >
                             {tr('禁用 SSL', 'Disable SSL')}
@@ -1323,7 +1323,7 @@ export function DbExplorerSidebar({
                             className={`px-2.5 py-1.5 rounded text-xs border transition-colors ${
                               editSslEnabled && editSslMode === 'preferred'
                                 ? 'border-blue-500/40 bg-blue-500/15 text-blue-300'
-                                : 'border-[#30363d] bg-[#0b0f14] text-gray-300 hover:bg-[#161b22]'
+                                : 'border-dark-border bg-[#0b0f14] text-gray-300 hover:bg-dark-panel'
                             }`}
                           >
                             {tr('首选 SSL', 'Preferred SSL')}
@@ -1336,7 +1336,7 @@ export function DbExplorerSidebar({
                             className={`px-2.5 py-1.5 rounded text-xs border transition-colors ${
                               editSslEnabled && editSslMode === 'required'
                                 ? 'border-blue-500/40 bg-blue-500/15 text-blue-300'
-                                : 'border-[#30363d] bg-[#0b0f14] text-gray-300 hover:bg-[#161b22]'
+                                : 'border-dark-border bg-[#0b0f14] text-gray-300 hover:bg-dark-panel'
                             }`}
                           >
                             {tr('强制 SSL', 'Required SSL')}
@@ -1358,14 +1358,14 @@ export function DbExplorerSidebar({
                               <button
                                 onClick={() => applySslPresetAndRetest('preferred')}
                                 disabled={!editUrl.trim() || isTestingConnection}
-                                className="px-2.5 py-1.5 rounded text-xs border border-[#30363d] bg-[#0b0f14] text-gray-200 hover:bg-[#161b22] disabled:opacity-60"
+                                className="px-2.5 py-1.5 rounded text-xs border border-dark-border bg-[#0b0f14] text-gray-200 hover:bg-dark-panel disabled:opacity-60"
                               >
                                 {tr('一键改为 Preferred 并重测', 'Use Preferred & Retest')}
                               </button>
                               <button
                                 onClick={() => applySslPresetAndRetest('disabled')}
                                 disabled={!editUrl.trim() || isTestingConnection}
-                                className="px-2.5 py-1.5 rounded text-xs border border-[#30363d] bg-[#0b0f14] text-gray-200 hover:bg-[#161b22] disabled:opacity-60"
+                                className="px-2.5 py-1.5 rounded text-xs border border-dark-border bg-[#0b0f14] text-gray-200 hover:bg-dark-panel disabled:opacity-60"
                               >
                                 {tr('一键禁用 SSL 并重测', 'Disable SSL & Retest')}
                               </button>
@@ -1375,19 +1375,19 @@ export function DbExplorerSidebar({
                       </div>
                     </div>
                   </div>
-                  <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-4">
+                  <div className="bg-dark-bg border border-dark-border rounded-lg p-4">
                     <label className="flex items-center gap-2 text-sm text-gray-200 mb-3">
                       <input type="checkbox" checked={editSshEnabled} onChange={(e) => setEditSshEnabled(e.target.checked)} />
                       {tr('启用 SSH 隧道', 'Enable SSH Tunnel')}
                     </label>
                     <div className="grid grid-cols-2 gap-3">
-                      <input ref={editSshHostRef} value={editSshHost} onChange={(e) => setEditSshHost(e.target.value)} placeholder={tr('SSH Host', 'SSH Host')} disabled={!editSshEnabled} className="w-full bg-[#0b0f14] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50" />
-                      <input value={editSshPort} onChange={(e) => setEditSshPort(e.target.value)} placeholder={tr('SSH Port', 'SSH Port')} disabled={!editSshEnabled} className="w-full bg-[#0b0f14] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50" />
-                      <input ref={editSshUserRef} value={editSshUser} onChange={(e) => setEditSshUser(e.target.value)} placeholder={tr('SSH Username', 'SSH Username')} disabled={!editSshEnabled} className="w-full bg-[#0b0f14] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50" />
-                      <input ref={editSshPasswordRef} value={editSshPassword} onChange={(e) => setEditSshPassword(e.target.value)} placeholder={tr('SSH Password', 'SSH Password')} type="password" disabled={!editSshEnabled} className="w-full bg-[#0b0f14] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50" />
+                      <input ref={editSshHostRef} value={editSshHost} onChange={(e) => setEditSshHost(e.target.value)} placeholder={tr('SSH Host', 'SSH Host')} disabled={!editSshEnabled} className="w-full bg-[#0b0f14] border border-dark-border rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50" />
+                      <input value={editSshPort} onChange={(e) => setEditSshPort(e.target.value)} placeholder={tr('SSH Port', 'SSH Port')} disabled={!editSshEnabled} className="w-full bg-[#0b0f14] border border-dark-border rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50" />
+                      <input ref={editSshUserRef} value={editSshUser} onChange={(e) => setEditSshUser(e.target.value)} placeholder={tr('SSH Username', 'SSH Username')} disabled={!editSshEnabled} className="w-full bg-[#0b0f14] border border-dark-border rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50" />
+                      <input ref={editSshPasswordRef} value={editSshPassword} onChange={(e) => setEditSshPassword(e.target.value)} placeholder={tr('SSH Password', 'SSH Password')} type="password" disabled={!editSshEnabled} className="w-full bg-[#0b0f14] border border-dark-border rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50" />
                     </div>
                   </div>
-                  <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-4">
+                  <div className="bg-dark-bg border border-dark-border rounded-lg p-4">
                     <label className="flex items-center gap-2 text-sm text-gray-200 mb-3">
                       <input type="checkbox" checked={editSslEnabled} onChange={(e) => setEditSslEnabled(e.target.checked)} />
                       {tr('启用 SSL', 'Enable SSL')}
@@ -1397,7 +1397,7 @@ export function DbExplorerSidebar({
                       value={editSslMode}
                       onChange={(e) => setEditSslMode(e.target.value)}
                       disabled={!editSslEnabled}
-                      className="w-full bg-[#0b0f14] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50"
+                      className="w-full bg-[#0b0f14] border border-dark-border rounded px-3 py-2 text-sm text-gray-200 disabled:opacity-50"
                     >
                       <option value="disabled">{tr('禁用', 'Disabled')}</option>
                       <option value="preferred">{tr('首选', 'Preferred')}</option>
@@ -1478,7 +1478,7 @@ export function DbExplorerSidebar({
                 >
                   {isTestingConnection ? tr('测试中...', 'Testing...') : tr('测试连接', 'Test Connection')}
                 </button>
-                <button onClick={() => setEditingConnId(null)} className="px-3 py-2 rounded-lg text-sm border border-[#30363d] bg-[#0d1117] text-gray-300 hover:bg-[#161b22]">{tr('取消', 'Cancel')}</button>
+                <button onClick={() => setEditingConnId(null)} className="px-3 py-2 rounded-lg text-sm border border-dark-border bg-dark-bg text-gray-300 hover:bg-dark-panel">{tr('取消', 'Cancel')}</button>
                 <button
                   onClick={() => {
                     onUpdateConnection(editingConnId, {
@@ -1501,7 +1501,7 @@ export function DbExplorerSidebar({
                     setEditingConnId(null)
                   }}
                   disabled={!editUrl.trim()}
-                  className="px-3 py-2 rounded-lg text-sm bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-gray-200 disabled:opacity-60"
+                  className="px-3 py-2 rounded-lg text-sm bg-dark-surface hover:bg-dark-border border border-dark-border text-gray-200 disabled:opacity-60"
                 >
                   {tr('保存', 'Save')}
                 </button>

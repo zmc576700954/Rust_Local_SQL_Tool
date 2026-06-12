@@ -209,7 +209,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
           <button
             onClick={loadList}
             disabled={loadingList}
-            className="px-2 py-1 rounded text-xs font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
+            className="px-2 py-1 rounded text-xs font-medium bg-dark-surface hover:bg-dark-border text-gray-100 border border-dark-border disabled:opacity-50"
           >
             {tr('刷新', 'Refresh')}
           </button>
@@ -227,7 +227,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
               <button
                 key={id || `row-${idx}`}
                 onClick={() => setSelectedJobId(id)}
-                className={`w-full text-left px-4 py-3 border-b border-dark-border hover:bg-[#161b22] transition-colors ${active ? 'bg-[#0a0c10]' : ''}`}
+                className={`w-full text-left px-4 py-3 border-b border-dark-border hover:bg-dark-panel transition-colors ${active ? 'bg-dark-canvas' : ''}`}
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm text-gray-200 truncate">{id}</div>
@@ -252,7 +252,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
             {selectedJobId && (
               <button
                 onClick={() => downloadGoLiveReport(selectedJobId)}
-                className="px-2 py-1 rounded text-xs font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d]"
+                className="px-2 py-1 rounded text-xs font-medium bg-dark-surface hover:bg-dark-border text-gray-100 border border-dark-border"
               >
                 {tr('下载 artifacts/data', 'Download artifacts/data')}
               </button>
@@ -261,7 +261,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
               <button
                 onClick={() => loadDetail(selectedJobId)}
                 disabled={loadingDetail}
-                className="px-2 py-1 rounded text-xs font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
+                className="px-2 py-1 rounded text-xs font-medium bg-dark-surface hover:bg-dark-border text-gray-100 border border-dark-border disabled:opacity-50"
               >
                 {tr('重新加载', 'Reload')}
               </button>
@@ -275,7 +275,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
           )}
 
           {selectedJobId && (
-            <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+            <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm font-medium text-gray-200">Summary</div>
                 <div className={`text-xs font-mono ${detail?.passed ? 'text-green-300' : 'text-red-300'}`}>
@@ -293,11 +293,11 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
           )}
 
           {selectedJobId && (
-            <div className="border border-[#30363d] bg-[#0d1117] rounded-lg overflow-hidden">
-              <div className="px-3 py-2 border-b border-[#30363d] text-sm font-medium text-gray-200">Steps</div>
+            <div className="border border-dark-border bg-dark-bg rounded-lg overflow-hidden">
+              <div className="px-3 py-2 border-b border-dark-border text-sm font-medium text-gray-200">Steps</div>
               <div className="overflow-auto">
                 <table className="w-full text-sm">
-                  <thead className="bg-[#161b22] text-gray-400">
+                  <thead className="bg-dark-panel text-gray-400">
                     <tr>
                       <th className="text-left px-3 py-2 font-medium">step</th>
                       <th className="text-left px-3 py-2 font-medium">conn</th>
@@ -309,7 +309,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
                   </thead>
                   <tbody>
                     {detailSteps.map(s => (
-                      <tr key={s.key} className="border-t border-[#30363d]">
+                      <tr key={s.key} className="border-t border-dark-border">
                         <td className="px-3 py-2 text-gray-200 font-mono">{s.name}</td>
                         <td className="px-3 py-2 text-gray-400 font-mono">{s.connection_id || '-'}</td>
                         <td className={`px-3 py-2 font-mono ${statusClass(s.status)}`}>{s.status}</td>
@@ -331,8 +331,8 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
             </div>
           )}
 
-          <div className="border border-[#30363d] bg-[#0d1117] rounded-lg overflow-hidden">
-            <div className="px-3 py-2 border-b border-[#30363d] flex items-center justify-between gap-3">
+          <div className="border border-dark-border bg-dark-bg rounded-lg overflow-hidden">
+            <div className="px-3 py-2 border-b border-dark-border flex items-center justify-between gap-3">
               <div className="text-sm font-medium text-gray-200">{tr('对比两次', 'Compare two')}</div>
               <button
                 onClick={runCompare}
@@ -349,7 +349,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
                   <select
                     value={compareA}
                     onChange={e => setCompareA(e.target.value)}
-                    className="h-9 bg-[#0d1117] border border-[#30363d] rounded px-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+                    className="h-9 bg-dark-bg border border-dark-border rounded px-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                   >
                     <option value="">{tr('请选择', 'Please select')}</option>
                     {sortedRows.map(r => {
@@ -363,7 +363,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
                   <select
                     value={compareB}
                     onChange={e => setCompareB(e.target.value)}
-                    className="h-9 bg-[#0d1117] border border-[#30363d] rounded px-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+                    className="h-9 bg-dark-bg border border-dark-border rounded px-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                   >
                     <option value="">{tr('请选择', 'Please select')}</option>
                     {sortedRows.map(r => {
@@ -375,9 +375,9 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
               </div>
 
               {compareData && (
-                <div className="overflow-auto border border-[#30363d] rounded">
+                <div className="overflow-auto border border-dark-border rounded">
                   <table className="w-full text-sm">
-                    <thead className="bg-[#161b22] text-gray-400">
+                    <thead className="bg-dark-panel text-gray-400">
                       <tr>
                         <th className="text-left px-3 py-2 font-medium">step</th>
                         <th className="text-left px-3 py-2 font-medium">conn</th>
@@ -390,7 +390,7 @@ export function GoLiveReportsTab({ isActive }: { isActive: boolean }) {
                     </thead>
                     <tbody>
                       {compareRows.map(r => (
-                        <tr key={r.key} className="border-t border-[#30363d]">
+                        <tr key={r.key} className="border-t border-dark-border">
                           <td className="px-3 py-2 text-gray-200 font-mono">{r.name}</td>
                           <td className="px-3 py-2 text-gray-400 font-mono">{r.connection_id || '-'}</td>
                           <td className={`px-3 py-2 font-mono ${statusClass(r.aStatus)}`}>{r.aStatus}</td>

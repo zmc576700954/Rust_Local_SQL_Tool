@@ -336,16 +336,16 @@ export function CommandPalette({
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -10, scale: 0.98 }}
               transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-              className="w-[640px] bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl overflow-hidden flex flex-col pointer-events-auto tech-border"
+              className="w-[640px] bg-dark-panel border border-dark-border rounded-xl shadow-2xl overflow-hidden flex flex-col pointer-events-auto tech-border"
             >
-              <div className="bg-[#0d1117] border-b border-[#30363d] px-4 py-2 flex items-center justify-between">
+              <div className="bg-dark-bg border-b border-dark-border px-4 py-2 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="text-lg font-semibold text-blue-400">AI</span>
                   <span className="text-xs font-bold text-blue-400 tracking-wide uppercase bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
                     {tr(`${dialect} 命令面板已就绪`, `${dialect} palette is ready`)}
                   </span>
                 </div>
-                <div className="text-[10px] text-gray-500 flex items-center gap-1">
+                <div className="text-[11px] text-gray-500 flex items-center gap-1">
                   {tr('上下文', 'Context')}:
                   <span className="text-gray-400">
                     {tr(
@@ -359,7 +359,7 @@ export function CommandPalette({
               <div className="p-4 flex items-center gap-3">
                 <Sparkles className={`w-5 h-5 ${isGenerating ? 'text-dark-accent' : 'text-gray-400'}`} />
                 <div className="flex items-center gap-2 flex-1">
-                  <span className="text-sm font-medium text-gray-500 whitespace-nowrap border-r border-[#30363d] pr-2">
+                  <span className="text-sm font-medium text-gray-500 whitespace-nowrap border-r border-dark-border pr-2">
                     [{dialect}]
                   </span>
                   <input
@@ -405,10 +405,10 @@ export function CommandPalette({
                 </div>
               ) : (
                 <>
-                  <div className="border-t border-[#30363d] max-h-[320px] overflow-y-auto pb-2">
+                  <div className="border-t border-dark-border max-h-[320px] overflow-y-auto pb-2">
                     {showAskAI && (
                       <div
-                        className={`px-4 py-2.5 flex items-center gap-3 cursor-pointer transition-colors text-gray-300 text-sm group ${selectedIndex === 0 ? 'bg-[#21262d] text-white' : 'hover:bg-[#21262d]'}`}
+                        className={`px-4 py-2.5 flex items-center gap-3 cursor-pointer transition-colors text-gray-300 text-sm group focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset ${selectedIndex === 0 ? 'bg-dark-surface text-white' : 'hover:bg-dark-surface'}`}
                         onClick={() => handleGenerate()}
                       >
                         <Sparkles className={`w-4 h-4 ${selectedIndex === 0 ? 'text-blue-400' : 'text-gray-500'}`} />
@@ -416,12 +416,12 @@ export function CommandPalette({
                           {tr('让 AI 生成 SQL：', 'Ask AI to generate SQL for:')}{' '}
                           <span className="font-medium text-white">"{query}"</span>
                         </span>
-                        <span className="text-[10px] text-gray-500">{tr('↵ 生成', '↵ generate')}</span>
+                        <span className="text-[11px] text-gray-500">{tr('↵ 生成', '↵ generate')}</span>
                       </div>
                     )}
 
                     {items.length > 0 && (
-                      <div className="px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider sticky top-0 bg-[#161b22]/90 backdrop-blur-sm">
+                      <div className="px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider sticky top-0 bg-dark-panel/90 backdrop-blur-sm">
                         {tr('结果', 'Results')}
                       </div>
                     )}
@@ -433,14 +433,14 @@ export function CommandPalette({
                       return (
                         <div
                           key={`${item.type}-${item.label}-${idx}`}
-                          className={`px-4 py-2 flex items-center gap-3 cursor-pointer transition-colors text-sm group ${isSelected ? 'bg-[#21262d] text-white' : 'text-gray-300 hover:bg-[#21262d]'}`}
+                          className={`px-4 py-2 flex items-center gap-3 cursor-pointer transition-colors text-sm group focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset ${isSelected ? 'bg-dark-surface text-white' : 'text-gray-300 hover:bg-dark-surface'}`}
                           onClick={() => onAction(item.type, item.payload)}
                         >
                           <Icon className={`w-4 h-4 shrink-0 ${isSelected ? 'text-blue-400' : 'text-gray-500'}`} />
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between gap-3">
                               <span className="truncate">{item.label}</span>
-                              <span className="text-[10px] text-gray-500 uppercase tracking-wider shrink-0">{item.badge}</span>
+                              <span className="text-[11px] text-gray-500 uppercase tracking-wider shrink-0">{item.badge}</span>
                             </div>
                             {item.description && (
                               <div className="text-xs text-gray-500 truncate mt-0.5">{item.description}</div>
@@ -457,7 +457,7 @@ export function CommandPalette({
                     )}
                   </div>
 
-                  <div className="p-2.5 px-4 text-[11px] text-gray-500 flex justify-between bg-[#0d1117] border-t border-[#30363d]">
+                  <div className="p-2.5 px-4 text-[11px] text-gray-500 flex justify-between bg-dark-bg border-t border-dark-border">
                     <div className="flex items-center gap-4">
                       <div className="flex items-center gap-1.5">
                         <span className="bg-dark-border px-1.5 py-0.5 rounded text-gray-300">↑</span>

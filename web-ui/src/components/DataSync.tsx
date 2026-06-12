@@ -7,6 +7,7 @@ import { parseError } from '../utils';
 import type { DataDiff, DataSyncJobStatus, DataSyncStrategy } from '../types';
 import { dbLevelDisplayName, dbTypeDisplayName } from '../utils/dbCapabilities'
 import { tr } from '../i18n';
+import { Button } from './ui';
 
 interface DataSyncProps {
   onCancel: () => void;
@@ -205,7 +206,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
     const progress = typeof job.progress === 'number' ? job.progress : undefined;
     const isError = job.status === 'failed';
     return (
-      <div className={`border rounded-lg p-3 ${isError ? 'border-red-500/30 bg-red-500/10' : 'border-[#30363d] bg-[#0d1117]'}`}>
+      <div className={`border rounded-lg p-3 ${isError ? 'border-red-500/30 bg-red-500/10' : 'border-dark-border bg-dark-bg'}`}>
         <div className="flex items-center justify-between gap-4">
           <div className="text-sm font-medium text-gray-200">{title}</div>
           <div className={`text-xs ${isError ? 'text-red-400' : 'text-gray-400'}`}>{statusLabel}</div>
@@ -213,7 +214,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
         {(job.message || progress !== undefined) && (
           <div className="mt-2 flex flex-col gap-2">
             {typeof progress === 'number' && (
-              <div className="w-full h-2 bg-[#21262d] rounded overflow-hidden border border-[#30363d]">
+              <div className="w-full h-2 bg-dark-surface rounded overflow-hidden border border-dark-border">
                 <div className="h-full bg-blue-500/60" style={{ width: `${progress}%` }} />
               </div>
             )}
@@ -454,7 +455,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
               <input
                 value={tableName}
                 onChange={(e) => setTableName(e.target.value)}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
                 placeholder={tr('例如 users', 'e.g. users')}
               />
             </div>
@@ -463,7 +464,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
               <input
                 value={primaryKey}
                 onChange={(e) => setPrimaryKey(e.target.value)}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
                 placeholder={tr('例如 id', 'e.g. id')}
               />
             </div>
@@ -471,7 +472,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
           <div className="flex flex-col gap-2">
             <label className="text-sm text-gray-400">{tr('同步策略', 'Strategy')}</label>
             <div className="flex flex-wrap gap-3">
-              <label className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer transition-colors ${strategy === 'mirror' ? 'border-blue-500/60 bg-blue-500/10 text-blue-300' : 'border-[#30363d] bg-[#0d1117] text-gray-300 hover:bg-[#21262d]'}`}>
+              <label className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer transition-colors ${strategy === 'mirror' ? 'border-blue-500/60 bg-blue-500/10 text-blue-300' : 'border-dark-border bg-dark-bg text-gray-300 hover:bg-dark-surface'}`}>
                 <input
                   type="radio"
                   checked={strategy === 'mirror'}
@@ -485,7 +486,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
                   <span className="text-xs opacity-80">INSERT / UPDATE / DELETE</span>
                 </div>
               </label>
-              <label className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer transition-colors ${strategy === 'upsert_only' ? 'border-blue-500/60 bg-blue-500/10 text-blue-300' : 'border-[#30363d] bg-[#0d1117] text-gray-300 hover:bg-[#21262d]'}`}>
+              <label className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer transition-colors ${strategy === 'upsert_only' ? 'border-blue-500/60 bg-blue-500/10 text-blue-300' : 'border-dark-border bg-dark-bg text-gray-300 hover:bg-dark-surface'}`}>
                 <input
                   type="radio"
                   checked={strategy === 'upsert_only'}
@@ -509,7 +510,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
                 resetRunState();
                 setSourceDbId(e.target.value);
               }}
-              className="bg-[#0d1117] border border-[#30363d] rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+              className="bg-dark-bg border border-dark-border rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
               <option value="">{tr('-- 选择源库 --', '-- Select Source --')}</option>
               {dbConnections.map(conn => (
@@ -527,7 +528,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
                 resetRunState();
                 setTargetDbId(e.target.value);
               }}
-              className="bg-[#0d1117] border border-[#30363d] rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+              className="bg-dark-bg border border-dark-border rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
               <option value="">{tr('-- 选择目标库 --', '-- Select Target --')}</option>
               {dbConnections.map(conn => (
@@ -538,17 +539,18 @@ export function DataSync({ onCancel }: DataSyncProps) {
             </select>
           </div>
           {renderJobCard(compareJob, tr('对比作业', 'Compare Job'))}
-          <button
+          <Button
+            variant="secondary" size="md"
             onClick={async () => {
               if (await handleCompare()) {
                 toast(tr('对比完成，请点击下一步。', 'Comparison complete. Click Next.'), 'success');
               }
             }}
             disabled={isLoading}
-            className="self-start mt-4 px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white disabled:opacity-50"
+            className="self-start mt-4 disabled:opacity-50"
           >
             {tr('开始对比', 'Compare')}
-          </button>
+          </Button>
         </div>
       )
     },
@@ -567,26 +569,26 @@ export function DataSync({ onCancel }: DataSyncProps) {
           )}
           {renderJobCard(previewJob, tr('预览作业', 'Preview Job'))}
           {recordPreview && (
-            <div className="text-xs text-gray-500 border border-[#30363d] rounded p-3 bg-[#0d1117]">
+            <div className="text-xs text-gray-500 border border-dark-border rounded p-3 bg-dark-bg">
               {tr('记录变更样本：', 'Record change samples:')}
               <div>{tr(`新增样本 ${recordPreview.inserts.length} 条`, `${recordPreview.inserts.length} insert samples`)}</div>
               <div>{tr(`修改样本 ${recordPreview.updates.length} 条`, `${recordPreview.updates.length} update samples`)}</div>
               <div>{tr(`删除样本 ${recordPreview.deletes.length} 条`, `${recordPreview.deletes.length} delete samples`)}</div>
             </div>
           )}
-          <div className="flex-1 overflow-y-auto bg-[#0d1117] border border-[#30363d] rounded p-4">
+          <div className="flex-1 overflow-y-auto bg-dark-bg border border-dark-border rounded p-4">
             {diffs.length === 0 ? (
               <div className="text-gray-500 text-sm">{tr('暂无对比结果，请返回上一步先执行对比。', 'No compare result, please go back and run compare.')}</div>
             ) : (
               <div className="flex flex-col gap-6">
                 {diffs.map((diff) => (
-                  <div key={diff.table_name} className="flex flex-col gap-2 border border-[#30363d] rounded-lg overflow-hidden">
-                    <div className="bg-[#21262d] px-4 py-2 font-bold text-gray-200 border-b border-[#30363d]">
+                  <div key={diff.table_name} className="flex flex-col gap-2 border border-dark-border rounded-lg overflow-hidden">
+                    <div className="bg-dark-surface px-4 py-2 font-bold text-gray-200 border-b border-dark-border">
                       {diff.table_name}
                     </div>
                     <div className="p-4 flex flex-col gap-3">
                       {diff.insert_count > 0 && (
-                        <label className="flex items-center gap-3 p-2 hover:bg-[#21262d] rounded cursor-pointer">
+                        <label className="flex items-center gap-3 p-2 hover:bg-dark-surface rounded cursor-pointer transition-colors">
                           <input
                             type="checkbox"
                             checked={(selections[diff.table_name] || []).includes('insert')}
@@ -598,7 +600,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
                         </label>
                       )}
                       {diff.update_count > 0 && (
-                        <label className="flex items-center gap-3 p-2 hover:bg-[#21262d] rounded cursor-pointer">
+                        <label className="flex items-center gap-3 p-2 hover:bg-dark-surface rounded cursor-pointer transition-colors">
                           <input
                             type="checkbox"
                             checked={(selections[diff.table_name] || []).includes('update')}
@@ -610,7 +612,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
                         </label>
                       )}
                       {(diff.delete_count > 0 || strategy === 'upsert_only') && (
-                        <label className={`flex items-center gap-3 p-2 rounded ${strategy === 'upsert_only' ? 'opacity-60 cursor-not-allowed' : 'hover:bg-[#21262d] cursor-pointer'}`}>
+                        <label className={`flex items-center gap-3 p-2 rounded ${strategy === 'upsert_only' ? 'opacity-60 cursor-not-allowed' : 'hover:bg-dark-surface cursor-pointer'}`}>
                           <input
                             type="checkbox"
                             checked={(selections[diff.table_name] || []).includes('delete')}
@@ -637,17 +639,18 @@ export function DataSync({ onCancel }: DataSyncProps) {
               </div>
             )}
           </div>
-          <button
+          <Button
+            variant="secondary" size="md"
             onClick={async () => {
               if (await handleGenerateDml()) {
                 toast(tr('预览已生成，请点击下一步。', 'Preview generated. Click Next.'), 'success');
               }
             }}
             disabled={Object.values(selections).every(ops => ops.length === 0)}
-            className="self-start px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white disabled:opacity-50"
+            className="self-start disabled:opacity-50"
           >
             {tr('生成预览', 'Generate Preview')}
-          </button>
+          </Button>
         </div>
       )
     },
@@ -668,7 +671,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
           <textarea
             readOnly
             value={dml}
-            className="flex-1 bg-[#0d1117] border border-[#30363d] rounded p-4 font-mono text-sm text-gray-300 outline-none resize-none"
+            className="flex-1 bg-dark-bg border border-dark-border rounded p-4 font-mono text-sm text-gray-300 outline-none resize-none"
           />
         </div>
       )

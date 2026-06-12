@@ -24,6 +24,7 @@ import { PerfDiagnosticsPanel } from '../components/PerfDiagnosticsPanel'
 import { SqlHistory } from '../components/SqlHistory'
 import { AiTrainingPanel } from '../components/ai'
 import { DbExplorerSidebar } from '../components/DbExplorerSidebar'
+import { ModalShell } from '../components/ui'
 import { api } from '../api'
 import { runAiExplain, runAiOptimize, runExplainErrorWithAi, runFixWithAi, runGenerateSqlStream } from '../queryAiActions'
 import { getStatementKind, getStatementLabel, isPotentiallyDangerousSql, splitSqlStatements } from '../sqlStatements'
@@ -1824,14 +1825,14 @@ function App() {
               <span className="font-semibold tracking-wide flex items-center gap-2">
                 {tr('本地 AI SQL', 'Local AI SQL')}
                 {configData?.db_connections?.find((c: DbConnection) => c.id === configData.active_db_id)?.is_read_only && (
-                  <span className="text-[10px] bg-red-500/20 text-red-500 border border-red-500/30 px-1.5 py-0.5 rounded uppercase tracking-wider font-bold shadow-sm">
+                  <span className="text-[11px] bg-red-500/20 text-red-500 border border-red-500/30 px-1.5 py-0.5 rounded uppercase tracking-wider font-bold shadow-sm">
                     [只读]
                   </span>
                 )}
               </span>
             </div>
             <div
-              className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]"
+              className="w-2 h-2 rounded-full bg-green-500 shadow-glow-green"
               title={
                 configData?.active_db_id
                   ? (configData?.db_connections || []).find((c: DbConnection) => c.id === configData.active_db_id)?.url || "Connected"
@@ -1939,18 +1940,18 @@ function App() {
             />
           </div>
         )}
-        <div className="p-3 border-t border-dark-border flex items-center gap-2 hover:bg-[#21262d] cursor-pointer transition-colors duration-150" onClick={() => setShowRulesPanel(true)}>
+        <div className="p-3 border-t border-dark-border flex items-center gap-2 hover:bg-dark-surface cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-dark-bg" onClick={() => setShowRulesPanel(true)}>
           <BookMarked className="w-4 h-4 text-gray-400" />
           <span className="text-sm text-gray-400 flex-1">{tr('智能规则', 'Smart Rules')}</span>
           {rules.length > 0 && (
-            <span className="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 rounded">{rules.length}</span>
+            <span className="text-[11px] bg-blue-500/20 text-blue-400 px-1.5 rounded">{rules.length}</span>
           )}
         </div>
-        <div className="p-3 border-t border-dark-border flex items-center gap-2 hover:bg-[#21262d] cursor-pointer transition-colors duration-150" onClick={() => setShowSettings(true)}>
+        <div className="p-3 border-t border-dark-border flex items-center gap-2 hover:bg-dark-surface cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-dark-bg" onClick={() => setShowSettings(true)}>
           <Settings className="w-4 h-4 text-gray-400" />
           <span className="text-sm text-gray-400 flex-1">{tr('设置', 'Settings')}</span>
         </div>
-        <div className="p-3 border-t border-dark-border flex items-center gap-2 hover:bg-[#21262d] cursor-pointer transition-colors duration-150" onClick={() => setShowHelpModal(true)}>
+        <div className="p-3 border-t border-dark-border flex items-center gap-2 hover:bg-dark-surface cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-dark-bg" onClick={() => setShowHelpModal(true)}>
           <Keyboard className="w-4 h-4 text-gray-400" />
           <span className="text-sm text-gray-400 flex-1">{tr('快捷键帮助', 'Shortcuts Help')}</span>
         </div>
@@ -1958,13 +1959,13 @@ function App() {
 
       {/* Sidebar Resizer */}
       <div
-        className={`w-1.5 shrink-0 cursor-col-resize bg-[#0d1117] hover:bg-[#161b22] ${isResizingSidebar ? 'bg-[#161b22]' : ''}`}
+        className={`w-1.5 shrink-0 cursor-col-resize bg-dark-bg hover:bg-dark-panel ${isResizingSidebar ? 'bg-dark-panel' : ''}`}
         onMouseDown={() => setIsResizingSidebar(true)}
         title="拖动调整左侧栏宽度"
       />
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col relative bg-[#0a0c10]">
+      <div className="flex-1 flex flex-col relative bg-dark-canvas">
         {/* Tools Navigation Bar */}
         <ToolsNav 
           onSelectTool={(toolId) => {
@@ -2349,9 +2350,9 @@ function App() {
                 animate={{ x: 0 }}
                 exit={{ x: '100%' }}
                 transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-                className="absolute right-0 top-0 bottom-0 w-[500px] bg-[#161b22] border-l border-[#30363d] z-50 flex flex-col shadow-2xl"
+                className="absolute right-0 top-0 bottom-0 w-[500px] bg-dark-panel border-l border-dark-border z-50 flex flex-col shadow-2xl"
               >
-                <div className="p-5 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117]">
+                <div className="p-5 border-b border-dark-border flex items-center justify-between bg-dark-bg">
                   <div className="flex items-center gap-2">
                     <BookMarked className="w-5 h-5 text-blue-400" />
                     <h2 className="text-lg font-semibold text-white">Smart Rules</h2>
@@ -2373,7 +2374,7 @@ function App() {
                   ) : (
                     <div className="space-y-4">
                       {rules.map((r, i) => (
-                        <div key={i} className="bg-[#0d1117] border border-[#30363d] rounded-lg p-4 group relative">
+                        <div key={i} className="bg-dark-bg border border-dark-border rounded-lg p-4 group relative">
                           <button 
                             onClick={() => handleDeleteRule(r.id)}
                             className="absolute top-3 right-3 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
@@ -2381,15 +2382,15 @@ function App() {
                             ×
                           </button>
                           <div className="flex items-center gap-2 mb-2">
-                            <span className="px-2 py-0.5 bg-blue-500/10 text-blue-400 text-[10px] font-bold rounded uppercase tracking-wider">
+                            <span className="px-2 py-0.5 bg-blue-500/10 text-blue-400 text-[11px] font-bold rounded uppercase tracking-wider">
                               {r.rule_type}
                             </span>
                             <span className="text-sm font-medium text-gray-200">{r.prompt_pattern}</span>
                           </div>
-                          <div className="bg-[#161b22] p-3 rounded border border-[#30363d] text-xs text-green-400/80 font-mono overflow-x-auto">
+                          <div className="bg-dark-panel p-3 rounded border border-dark-border text-xs text-green-400/80 font-mono overflow-x-auto">
                             <pre>{r.sql_template}</pre>
                           </div>
-                          <div className="mt-2 text-[10px] text-gray-500 text-right">
+                          <div className="mt-2 text-[11px] text-gray-500 text-right">
                             Used {r.hit_count} times
                           </div>
                         </div>
@@ -2404,162 +2405,130 @@ function App() {
 
         {/* Dangerous SQL Confirmation Modal */}
         <AnimatePresence>
-          {showVariablesModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
-          <div className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col">
-            <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117]">
-              <h3 className="text-gray-200 font-bold text-lg">Enter Variable Values</h3>
-              <button onClick={() => setShowVariablesModal(false)} className="text-gray-500 hover:text-gray-300">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="p-6 space-y-4">
-              {sqlVariables.map((v, i) => (
-                <div key={v.name}>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">
-                    :{v.name}
-                  </label>
-                  <input
-                    type="text"
-                    className="w-full bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-gray-200 focus:outline-none focus:border-blue-500 transition-colors"
-                    value={v.value}
-                    onChange={(e) => {
-                      const newVars = [...sqlVariables];
-                      newVars[i].value = e.target.value;
-                      setSqlVariables(newVars);
-                    }}
-                    autoFocus={i === 0}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        const allFilled = sqlVariables.every(v => v.value.trim() !== '');
-                        if (allFilled) {
-                          const finalSql = substituteSqlVariables(pendingSqlWithVars, sqlVariables);
-                          setShowVariablesModal(false);
-                          handleExecute(false, finalSql);
-                        }
-                      }
-                    }}
-                  />
-                </div>
-              ))}
-            </div>
-            <div className="px-6 py-4 border-t border-[#30363d] bg-[#0d1117] flex justify-end gap-3">
-              <button
-                onClick={() => setShowVariablesModal(false)}
-                className="px-4 py-2 text-sm font-medium text-gray-300 hover:text-white transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  const finalSql = substituteSqlVariables(pendingSqlWithVars, sqlVariables);
-                  setShowVariablesModal(false);
-                  handleExecute(false, finalSql);
+          <ModalShell isOpen={showVariablesModal} onClose={() => setShowVariablesModal(false)} title="Enter Variable Values" maxWidth="max-w-md">
+        <div className="space-y-4">
+          {sqlVariables.map((v, i) => (
+            <div key={v.name}>
+              <label className="block text-sm font-medium text-gray-300 mb-1">
+                :{v.name}
+              </label>
+              <input
+                type="text"
+                className="w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-gray-200 focus:outline-none focus:border-blue-500 transition-colors"
+                value={v.value}
+                onChange={(e) => {
+                  const newVars = [...sqlVariables];
+                  newVars[i].value = e.target.value;
+                  setSqlVariables(newVars);
                 }}
-                className="px-4 py-2 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center gap-2"
-              >
-                Execute
-              </button>
+                autoFocus={i === 0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const allFilled = sqlVariables.every(v => v.value.trim() !== '');
+                    if (allFilled) {
+                      const finalSql = substituteSqlVariables(pendingSqlWithVars, sqlVariables);
+                      setShowVariablesModal(false);
+                      handleExecute(false, finalSql);
+                    }
+                  }
+                }}
+              />
             </div>
+          ))}
+        </div>
+        <div className="flex justify-end gap-3 mt-4 pt-4 border-t border-dark-border">
+          <button
+            onClick={() => setShowVariablesModal(false)}
+            className="px-4 py-2 text-sm font-medium text-gray-300 hover:text-white transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              const finalSql = substituteSqlVariables(pendingSqlWithVars, sqlVariables);
+              setShowVariablesModal(false);
+              handleExecute(false, finalSql);
+            }}
+            className="px-4 py-2 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center gap-2"
+          >
+            Execute
+          </button>
+        </div>
+      </ModalShell>
+
+      <ModalShell isOpen={showConfirmModal} onClose={() => { setShowConfirmModal(false); setPendingDangerousSql(''); }} maxWidth="max-w-xl" padding={false}>
+        <div className="bg-red-500/10 px-6 py-4 border-b border-red-500/20 flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center flex-shrink-0">
+            <span className="text-red-500 text-xl">⚠️</span>
+          </div>
+          <div>
+            <h3 className="text-red-400 font-bold text-lg">高危操作警告</h3>
+            <p className="text-red-300/70 text-sm">系统检测到该 SQL 可能对数据造成不可逆的修改或删除。</p>
           </div>
         </div>
-      )}
-
-      {showConfirmModal && (
-            <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center">
-              <motion.div
-                initial={{ scale: 0.95, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.95, opacity: 0 }}
-                className="bg-[#161b22] border border-red-500/50 rounded-xl shadow-2xl max-w-xl w-full mx-4 overflow-hidden"
-              >
-                <div className="bg-red-500/10 px-6 py-4 border-b border-red-500/20 flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center flex-shrink-0">
-                    <span className="text-red-500 text-xl">⚠️</span>
-                  </div>
-                  <div>
-                    <h3 className="text-red-400 font-bold text-lg">高危操作警告</h3>
-                    <p className="text-red-300/70 text-sm">系统检测到该 SQL 可能对数据造成不可逆的修改或删除。</p>
-                  </div>
-                </div>
-                <div className="p-6">
-                  <p className="text-gray-300 text-sm mb-3">即将执行的 SQL 语句：</p>
-                  <div className="bg-[#0d1117] border border-[#30363d] rounded-lg p-4 font-mono text-red-400/90 text-sm overflow-x-auto whitespace-pre-wrap max-h-60">
-                    {pendingDangerousSql}
-                  </div>
-                </div>
-                <div className="bg-[#0d1117] px-6 py-4 flex justify-end gap-3 border-t border-[#30363d]">
-                  <button
-                    onClick={() => {
-                      setShowConfirmModal(false)
-                      setPendingDangerousSql('')
-                    }}
-                    className="px-4 py-2 rounded-lg text-sm font-medium text-gray-300 hover:bg-[#30363d] transition-colors"
-                  >
-                    取消执行 (Cancel)
-                  </button>
-                  <button
-                    onClick={() => handleExecute(true, pendingDangerousSql)}
-                    className="px-4 py-2 rounded-lg text-sm font-bold bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-500/20 transition-all active:scale-95 flex items-center gap-2"
-                  >
-                    我已确认风险，强制执行
-                  </button>
-                </div>
-              </motion.div>
-            </div>
-          )}
+        <div className="p-6">
+          <p className="text-gray-300 text-sm mb-3">即将执行的 SQL 语句：</p>
+          <div className="bg-dark-bg border border-dark-border rounded-lg p-4 font-mono text-red-400/90 text-sm overflow-x-auto whitespace-pre-wrap max-h-60">
+            {pendingDangerousSql}
+          </div>
+        </div>
+        <div className="bg-dark-bg px-6 py-4 flex justify-end gap-3 border-t border-dark-border">
+          <button
+            onClick={() => {
+              setShowConfirmModal(false)
+              setPendingDangerousSql('')
+            }}
+            className="px-4 py-2 rounded-lg text-sm font-medium text-gray-300 hover:bg-dark-border transition-colors"
+          >
+            取消执行 (Cancel)
+          </button>
+          <button
+            onClick={() => handleExecute(true, pendingDangerousSql)}
+            className="px-4 py-2 rounded-lg text-sm font-bold bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-500/20 transition-all active:scale-95 flex items-center gap-2"
+          >
+            我已确认风险，强制执行
+          </button>
+        </div>
+      </ModalShell>
         </AnimatePresence>
 
         {/* Shortcuts Help Modal */}
         <AnimatePresence>
-          {showHelpModal && (
-            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-              <motion.div
-                initial={{ scale: 0.95, opacity: 0, y: 10 }}
-                animate={{ scale: 1, opacity: 1, y: 0 }}
-                exit={{ scale: 0.95, opacity: 0, y: 10 }}
-                className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl max-w-lg w-full mx-4 overflow-hidden"
-              >
-                <div className="px-6 py-4 border-b border-[#30363d] flex items-center gap-3 bg-[#0d1117]">
-                  <Keyboard className="w-5 h-5 text-gray-400" />
-                  <h3 className="text-gray-200 font-bold text-lg">Keyboard Shortcuts</h3>
-                </div>
-                <div className="p-2">
-                  {[
-                    { label: 'Ask AI to generate/modify SQL', win: ['Ctrl', 'K'], mac: ['⌘', 'K'] },
-                    { label: 'Execute current SQL query', win: ['Ctrl', 'Enter'], mac: ['⌘', 'Enter'] },
-                    { label: 'Format SQL code', win: ['Shift', 'Alt', 'F'], mac: ['⇧', '⌥', 'F'] },
-                    { label: 'Save current SQL as Smart Rule', win: ['Ctrl', 'S'], mac: ['⌘', 'S'] },
-                    { label: 'Close modals / Cancel', win: ['Esc'], mac: ['Esc'] },
-                    { label: 'Show this help menu', win: ['Ctrl', '/'], mac: ['⌘', '/'] },
-                  ].map((item, idx) => {
-                    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-                    const keys = isMac ? item.mac : item.win;
-                    return (
-                      <div key={idx} className="flex items-center justify-between px-4 py-3 hover:bg-[#21262d] rounded-lg transition-colors group">
-                        <span className="text-sm text-gray-300 group-hover:text-gray-100 transition-colors">{item.label}</span>
-                        <div className="flex gap-1.5">
-                          {keys.map((k, i) => (
-                            <kbd key={i} className="px-2 py-1 bg-[#0d1117] border border-[#30363d] rounded text-xs font-mono text-gray-400 shadow-sm min-w-[24px] text-center">
-                              {k}
-                            </kbd>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="bg-[#0d1117] px-6 py-3 flex justify-end border-t border-[#30363d]">
-                  <button
-                    onClick={() => setShowHelpModal(false)}
-                    className="px-4 py-1.5 rounded-lg text-sm font-medium text-gray-300 hover:bg-[#30363d] transition-colors"
-                  >
-                    Close
-                  </button>
-                </div>
-              </motion.div>
+      <ModalShell isOpen={showHelpModal} onClose={() => setShowHelpModal(false)} title="Keyboard Shortcuts" maxWidth="max-w-lg">
+            <div className="space-y-1">
+              {[
+                { label: 'Ask AI to generate/modify SQL', win: ['Ctrl', 'K'], mac: ['⌘', 'K'] },
+                { label: 'Execute current SQL query', win: ['Ctrl', 'Enter'], mac: ['⌘', 'Enter'] },
+                { label: 'Format SQL code', win: ['Shift', 'Alt', 'F'], mac: ['⇧', '⌥', 'F'] },
+                { label: 'Save current SQL as Smart Rule', win: ['Ctrl', 'S'], mac: ['⌘', 'S'] },
+                { label: 'Close modals / Cancel', win: ['Esc'], mac: ['Esc'] },
+                { label: 'Show this help menu', win: ['Ctrl', '/'], mac: ['⌘', '/'] },
+              ].map((item, idx) => {
+                const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+                const keys = isMac ? item.mac : item.win;
+                return (
+                  <div key={idx} className="flex items-center justify-between px-4 py-3 hover:bg-dark-surface rounded-lg transition-colors group">
+                    <span className="text-sm text-gray-300 group-hover:text-gray-100 transition-colors">{item.label}</span>
+                    <div className="flex gap-1.5">
+                      {keys.map((k, i) => (
+                        <kbd key={i} className="px-2 py-1 bg-dark-bg border border-dark-border rounded text-xs font-mono text-gray-400 shadow-sm min-w-[24px] text-center">
+                          {k}
+                        </kbd>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          )}
+            <div className="flex justify-end mt-4 pt-4 border-t border-dark-border">
+              <button
+                onClick={() => setShowHelpModal(false)}
+                className="px-4 py-1.5 rounded-lg text-sm font-medium text-gray-300 hover:bg-dark-border transition-colors"
+              >
+                Close
+              </button>
+            </div>
+      </ModalShell>
         </AnimatePresence>
 
         {/* Settings Panel */}

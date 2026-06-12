@@ -61,7 +61,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                   ? 'bg-green-950/80 border-green-500/30 text-green-400'
                   : t.type === 'error'
                   ? 'bg-red-950/80 border-red-500/30 text-red-400'
-                  : 'bg-[#161b22]/90 border-[#30363d] text-blue-400'
+                  : 'bg-dark-panel/90 border-dark-border text-blue-400'
               } backdrop-blur-md`}
             >
               <div className="mt-0.5 flex-shrink-0">

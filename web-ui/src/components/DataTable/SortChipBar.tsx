@@ -17,7 +17,7 @@ export function SortChipBar({ sorts, setSorts, onOpenPanel }: Props) {
     setSorts(sorts.filter((_, i) => i !== idx))
 
   return (
-    <div className="flex items-center gap-1 flex-wrap px-2 py-1 bg-[#0d1117]/60 border-b border-[#30363d] text-[11px]">
+    <div className="flex items-center gap-1 flex-wrap px-2 py-1 bg-dark-bg/60 border-b border-dark-border text-[11px]">
       <span className="text-gray-500">{tr('排序', 'Sort')}:</span>
       {sorts.map((s, idx) => {
         const label = s.kind === 'column' ? (s.column || '?') : `f(${(s.expression || '').slice(0, 16)}…)`

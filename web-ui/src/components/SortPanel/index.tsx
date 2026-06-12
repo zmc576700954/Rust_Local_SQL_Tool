@@ -46,18 +46,18 @@ export function SortPanel({ open, initialRules, availableColumns, title, onClose
         onClick={onClose}
       />
       <aside
-        className="fixed inset-y-0 right-0 w-[360px] bg-[#161b22] border-l border-[#30363d] shadow-2xl z-50 flex flex-col"
+        className="fixed inset-y-0 right-0 w-[360px] bg-dark-panel border-l border-dark-border shadow-2xl z-50 flex flex-col"
         role="dialog"
         aria-label={title || tr('排序面板', 'Sort panel')}
       >
-        <header className="flex items-center justify-between px-3 py-2 border-b border-[#30363d]">
+        <header className="flex items-center justify-between px-3 py-2 border-b border-dark-border">
           <h3 className="text-sm font-medium text-gray-200">
             {title || tr('排序面板', 'Sort panel')}
           </h3>
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded hover:bg-[#21262d] text-gray-400 hover:text-white"
+            className="p-1 rounded hover:bg-dark-surface text-gray-400 hover:text-white"
             aria-label={tr('取消', 'Cancel')}
           >
             <X className="w-4 h-4" />
@@ -85,19 +85,19 @@ export function SortPanel({ open, initialRules, availableColumns, title, onClose
           <button
             type="button"
             onClick={addRule}
-            className="w-full flex items-center justify-center gap-1 py-1.5 text-xs text-blue-300 border border-dashed border-[#30363d] hover:border-blue-500/40 rounded"
+            className="w-full flex items-center justify-center gap-1 py-1.5 text-xs text-blue-300 border border-dashed border-dark-border hover:border-blue-500/40 rounded"
           >
             <Plus className="w-3 h-3" />
             {tr('添加排序', 'Add sort')}
           </button>
         </div>
 
-        <footer className="flex items-center gap-2 px-3 py-2 border-t border-[#30363d]">
+        <footer className="flex items-center gap-2 px-3 py-2 border-t border-dark-border">
           <button
             type="button"
             onClick={clearAll}
             disabled={rules.length === 0}
-            className="text-xs px-3 py-1 rounded border border-[#30363d] text-gray-300 hover:bg-[#21262d] disabled:opacity-40"
+            className="text-xs px-3 py-1 rounded border border-dark-border text-gray-300 hover:bg-dark-surface disabled:opacity-40"
           >
             {tr('清空', 'Clear all')}
           </button>
@@ -105,7 +105,7 @@ export function SortPanel({ open, initialRules, availableColumns, title, onClose
           <button
             type="button"
             onClick={onClose}
-            className="text-xs px-3 py-1 rounded border border-[#30363d] text-gray-300 hover:bg-[#21262d]"
+            className="text-xs px-3 py-1 rounded border border-dark-border text-gray-300 hover:bg-dark-surface"
           >
             {tr('取消', 'Cancel')}
           </button>

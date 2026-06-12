@@ -10,6 +10,7 @@ import { ColumnSortMenu } from './ColumnSortMenu'
 import { SortChipBar } from './SortChipBar'
 import { tr } from '../../i18n'
 import { DEFAULT_COLUMN_WIDTH, APPROX_ROW_HEIGHT, SAVE_REVIEW_PREVIEW_LIMIT, STALE_CONFLICT_OVERVIEW_GROUP_ORDER, STALE_CONFLICT_OVERVIEW_GROUP_LABELS, STALE_CONFLICT_OVERVIEW_GROUP_HINTS, STALE_CONFLICT_QUEUE_FILTER_LABELS, createStaleConflictOverviewCollapsedState, matchesStaleConflictQueueFilter, getStaleConflictOverviewGroup, getPreferredStaleConflictOverviewGroup, buildDefaultColumnLayout, normalizeColumnLayout } from './helpers';
+import { Button } from '../ui'
 
 function useResetTableState(
   tableName: string,
@@ -1183,7 +1184,7 @@ export function DataTable({
       case 'server_only':
         return 'border-amber-400/30 bg-amber-500/10 text-amber-100';
       default:
-        return 'border-[#30363d] bg-[#161b22] text-gray-300';
+        return 'border-dark-border bg-dark-panel text-gray-300';
     }
   }, []);
 
@@ -2747,14 +2748,14 @@ export function DataTable({
           <button
             onClick={handleUndo}
             disabled={isSaving || isRefreshing}
-            className="flex items-center gap-1 px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm text-white transition-colors disabled:opacity-50"
+            className="flex items-center gap-1 px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm text-white transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
           >
             <Undo className="w-4 h-4" /> Undo
           </button>
           <button
             onClick={requestSaveReview}
             disabled={isSaving || isRefreshing}
-            className="flex items-center gap-1 px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-sm text-white transition-colors disabled:opacity-50"
+            className="flex items-center gap-1 px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-sm text-white transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
           >
             <Save className="w-4 h-4" /> Review & Save
           </button>
@@ -2775,7 +2776,7 @@ export function DataTable({
           </div>
           <button
             onClick={focusFirstValidationIssue}
-            className="rounded border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-100 hover:bg-red-500/20 transition-colors"
+            className="rounded border border-red-400/30 bg-red-500/10 px-3 py-1.5 text-xs text-red-100 hover:bg-red-500/20 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
           >
             Jump to First Error
           </button>
@@ -2806,7 +2807,7 @@ export function DataTable({
               <button
                 onClick={() => handleOpenStaleConflictOverview('all')}
                 disabled={Boolean(pendingStaleRecovery)}
-                className="rounded border border-blue-400/30 bg-[#161b22] px-3 py-1.5 text-xs text-blue-50 hover:bg-[#21262d] transition-colors disabled:opacity-50"
+                className="rounded border border-blue-400/30 bg-dark-panel px-3 py-1.5 text-xs text-blue-50 hover:bg-dark-surface transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
               >
                 Conflict Queue
               </button>
@@ -2815,7 +2816,7 @@ export function DataTable({
               <button
                 onClick={handleOpenFirstStaleConflict}
                 disabled={Boolean(pendingStaleRecovery) || isRefreshing}
-                className="rounded border border-blue-400/30 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-50 hover:bg-blue-500/20 transition-colors disabled:opacity-50"
+                className="rounded border border-blue-400/30 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-50 hover:bg-blue-500/20 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
               >
                 Review First Conflict
               </button>
@@ -2824,7 +2825,7 @@ export function DataTable({
               <button
                 onClick={handleRecoverAllStaleFailures}
                 disabled={Boolean(pendingStaleRecovery) || isRefreshing}
-                className="rounded border border-blue-400/30 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-50 hover:bg-blue-500/20 transition-colors disabled:opacity-50"
+                className="rounded border border-blue-400/30 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-50 hover:bg-blue-500/20 transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
               >
                 {pendingStaleRecovery ? 'Refreshing Stale...' : 'Refresh & Recover Stale'}
               </button>
@@ -2833,7 +2834,7 @@ export function DataTable({
               <button
                 onClick={handleDiscardAllStaleFailures}
                 disabled={Boolean(pendingStaleRecovery)}
-                className="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-50 hover:bg-amber-500/20 transition-colors"
+                className="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-50 hover:bg-amber-500/20 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
               >
                 Drop Stale
               </button>
@@ -2841,20 +2842,20 @@ export function DataTable({
             <button
               onClick={handleDiscardAllFailedChanges}
               disabled={Boolean(pendingStaleRecovery)}
-              className="rounded border border-amber-400/30 bg-[#161b22] px-3 py-1.5 text-xs text-amber-50 hover:bg-[#21262d] transition-colors disabled:opacity-50"
+              className="rounded border border-amber-400/30 bg-dark-panel px-3 py-1.5 text-xs text-amber-50 hover:bg-dark-surface transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
             >
               Drop Failed
             </button>
             <button
               onClick={() => setShowSaveReviewModal(true)}
-              className="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-50 hover:bg-amber-500/20 transition-colors"
+              className="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-50 hover:bg-amber-500/20 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
             >
               Review Failures
             </button>
             <button
               onClick={handleReloadServerCopy}
               disabled={Boolean(pendingStaleRecovery)}
-              className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-200 hover:bg-[#21262d] transition-colors disabled:opacity-50"
+              className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-200 hover:bg-dark-surface transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
             >
               Reload Server Copy
             </button>
@@ -2864,9 +2865,9 @@ export function DataTable({
 
       <SortChipBar sorts={sorts} setSorts={setSorts} onOpenPanel={onOpenSortPanel} />
 
-      <div ref={parentRef} className="flex-1 overflow-auto rounded border border-dark-border bg-[#0d1117]">
+      <div ref={parentRef} className="flex-1 overflow-auto rounded border border-dark-border bg-dark-bg">
         <table className="w-full text-left text-sm whitespace-nowrap">
-          <thead className="bg-[#161b22] sticky top-0 shadow-sm text-gray-400 text-xs tracking-wider z-20">
+          <thead className="bg-dark-panel sticky top-0 shadow-sm text-gray-400 text-xs tracking-wider z-20">
             <tr>
               {visibleColumns.map((k: string) => {
                 const sortItem = sorts.find(s => s.kind === 'column' && s.column === k);
@@ -2875,12 +2876,12 @@ export function DataTable({
                 return (
                   <th 
                     key={k} 
-                    className="py-2 px-3 font-medium border-r border-[#30363d] relative select-none"
+                    className="py-2 px-3 font-medium border-r border-dark-border relative select-none"
                     style={{ width: `${getColumnWidth(k)}px`, minWidth: `${getColumnWidth(k)}px`, maxWidth: `${getColumnWidth(k)}px` }}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div
-                        className="flex-1 cursor-pointer hover:text-white flex items-center gap-1"
+                        className="flex-1 cursor-pointer hover:text-white flex items-center gap-1 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset"
                         onClick={(e) => handleSort(k, e)}
                         onContextMenu={(e) => { e.preventDefault(); setSortMenu({ col: k, x: e.clientX, y: e.clientY }); }}
                         title={tr('Shift 点击可多列排序', 'Shift+click for multi-column sort')}
@@ -2891,7 +2892,7 @@ export function DataTable({
                         </span>
                       </div>
                       <div 
-                        className={`cursor-pointer p-1 rounded hover:bg-gray-700 ${hasFilter ? 'text-blue-400' : 'text-gray-500'}`}
+                        className={`cursor-pointer p-1 rounded hover:bg-gray-700 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50 focus-visible:ring-inset ${hasFilter ? 'text-blue-400' : 'text-gray-500'}`}
                         onClick={(e) => { e.stopPropagation(); setFilterMenu({ col: k }); }}
                       >
                         <Filter className="w-3 h-3" />
@@ -2918,7 +2919,7 @@ export function DataTable({
               })}
             </tr>
           </thead>
-          <tbody className="divide-y divide-[#30363d]/50">
+          <tbody className="divide-y divide-dark-border/50">
             {rowVirtualizer.getVirtualItems().length > 0 && rowVirtualizer.getVirtualItems()[0].start > 0 && (
               <tr>
                 <td colSpan={visibleColumns.length} style={{ height: `${rowVirtualizer.getVirtualItems()[0].start}px` }} />
@@ -2936,7 +2937,7 @@ export function DataTable({
                   key={virtualRow.key}
                   data-index={virtualRow.index}
                   ref={rowVirtualizer.measureElement}
-                  className={`hover:bg-[#161b22] even:bg-[#0d1117] ${isModifiedRow ? 'bg-blue-900/10' : ''} ${existingValidationRowSet.has(i) ? 'bg-red-900/5' : ''} ${existingSaveFailureRowSet.has(i) ? 'bg-amber-900/5' : ''}`}
+                  className={`hover:bg-dark-panel even:bg-dark-bg ${isModifiedRow ? 'bg-blue-900/10' : ''} ${existingValidationRowSet.has(i) ? 'bg-red-900/5' : ''} ${existingSaveFailureRowSet.has(i) ? 'bg-amber-900/5' : ''}`}
                 >
                   {visibleColumns.map((k: string) => {
                     const validationMessage = validationIssueMap.get(buildValidationCellKey(i, k, false));
@@ -2952,7 +2953,7 @@ export function DataTable({
                     return (
                       <td 
                         key={k} 
-                        className={`py-1 px-3 border-r border-[#30363d]/50 max-w-[300px] truncate ${isChangedCell ? 'bg-blue-500/20' : ''} ${validationMessage ? 'bg-red-500/10 ring-1 ring-inset ring-red-500/40' : ''} ${!validationMessage && hasSaveFailure ? 'bg-amber-500/10 ring-1 ring-inset ring-amber-500/40' : ''}`}
+                        className={`py-1 px-3 border-r border-dark-border/50 max-w-[300px] truncate ${isChangedCell ? 'bg-blue-500/20' : ''} ${validationMessage ? 'bg-red-500/10 ring-1 ring-inset ring-red-500/40' : ''} ${!validationMessage && hasSaveFailure ? 'bg-amber-500/10 ring-1 ring-inset ring-amber-500/40' : ''}`}
                         style={{ width: `${getColumnWidth(k)}px`, minWidth: `${getColumnWidth(k)}px`, maxWidth: `${getColumnWidth(k)}px` }}
                         onDoubleClick={() => handleCellDoubleClick(i, k, false)}
                         onContextMenu={(e) => {
@@ -3050,29 +3051,31 @@ export function DataTable({
           </tbody>
         </table>
         
-        <div className="p-3 border-t border-[#30363d] flex justify-between items-center gap-3">
+        <div className="p-3 border-t border-dark-border flex justify-between items-center gap-3">
           <div className="flex items-center gap-2 flex-wrap">
             <button 
               onClick={handleAddNewRow}
-              className="flex items-center gap-1 text-sm text-gray-400 hover:text-white px-3 py-1.5 rounded hover:bg-[#21262d] transition-colors"
+              className="flex items-center gap-1 text-sm text-gray-400 hover:text-white px-3 py-1.5 rounded hover:bg-dark-surface transition-colors"
             >
               <Plus className="w-4 h-4" /> Add Row
             </button>
             <button
               onClick={() => setShowPasteModal(true)}
-              className="flex items-center gap-1 text-sm text-gray-400 hover:text-white px-3 py-1.5 rounded hover:bg-[#21262d] transition-colors"
+              className="flex items-center gap-1 text-sm text-gray-400 hover:text-white px-3 py-1.5 rounded hover:bg-dark-surface transition-colors"
             >
               <Copy className="w-4 h-4" /> Paste Rows
             </button>
             <div className="relative" onClick={(event) => event.stopPropagation()}>
-              <button
+              <Button
+                variant="toolbar"
+                size="sm"
                 onClick={() => setShowColumnMenu((prev) => !prev)}
-                className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-3 py-1.5 rounded border border-[#30363d] transition-colors"
+                className="py-1.5 text-gray-400"
               >
                 Columns
-              </button>
+              </Button>
               {showColumnMenu && (
-                <div className="absolute bottom-full left-0 mb-2 w-72 rounded border border-[#30363d] bg-[#161b22] p-3 shadow-2xl z-30">
+                <div className="absolute bottom-full left-0 mb-2 w-72 rounded border border-dark-border bg-dark-panel p-3 shadow-2xl z-30">
                   <div className="mb-2 flex items-center justify-between">
                     <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Column Layout</div>
                     <button
@@ -3086,7 +3089,7 @@ export function DataTable({
                     {orderedColumns.map((column, index) => {
                       const isVisible = !columnLayout.hidden.includes(column);
                       return (
-                        <div key={column} className="flex items-center gap-2 rounded border border-[#30363d] bg-[#0d1117] px-2 py-1.5">
+                        <div key={column} className="flex items-center gap-2 rounded border border-dark-border bg-dark-bg px-2 py-1.5">
                           <input
                             type="checkbox"
                             checked={isVisible}
@@ -3094,11 +3097,11 @@ export function DataTable({
                             className="accent-blue-500"
                           />
                           <span className="min-w-0 flex-1 truncate text-xs text-gray-200" title={column}>{column}</span>
-                          <span className="text-[10px] text-gray-500">{Math.round(getColumnWidth(column))} px</span>
+                          <span className="text-[11px] text-gray-500">{Math.round(getColumnWidth(column))} px</span>
                           <button
                             onClick={() => moveColumn(column, 'left')}
                             disabled={index === 0}
-                            className="rounded border border-[#30363d] px-1 py-0.5 text-[10px] text-gray-300 hover:text-white disabled:opacity-30"
+                            className="rounded border border-dark-border px-1 py-0.5 text-[11px] text-gray-300 hover:text-white disabled:opacity-30"
                             title="Move left"
                           >
                             <ArrowUp className="w-3 h-3 rotate-[-90deg]" />
@@ -3106,7 +3109,7 @@ export function DataTable({
                           <button
                             onClick={() => moveColumn(column, 'right')}
                             disabled={index === orderedColumns.length - 1}
-                            className="rounded border border-[#30363d] px-1 py-0.5 text-[10px] text-gray-300 hover:text-white disabled:opacity-30"
+                            className="rounded border border-dark-border px-1 py-0.5 text-[11px] text-gray-300 hover:text-white disabled:opacity-30"
                             title="Move right"
                           >
                             <ArrowDown className="w-3 h-3 rotate-[-90deg]" />
@@ -3121,20 +3124,24 @@ export function DataTable({
                 </div>
               )}
             </div>
-            <button
+            <Button
+              variant="toolbar"
+              size="sm"
               onClick={resetColumnLayout}
               disabled={visibleColumns.length === columns.length && orderedColumns.every((column, index) => column === columns[index]) && Object.keys(columnLayout.widths).length === 0}
-              className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-3 py-1.5 rounded border border-[#30363d] transition-colors disabled:opacity-50 disabled:hover:bg-[#21262d] disabled:hover:text-gray-400"
+              className="py-1.5 text-gray-400 disabled:hover:bg-dark-surface disabled:hover:text-gray-400"
             >
               Reset Layout
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="toolbar"
+              size="sm"
               onClick={clearGridTweaks}
               disabled={!hasGridTweaks}
-              className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-3 py-1.5 rounded border border-[#30363d] transition-colors disabled:opacity-50 disabled:hover:bg-[#21262d] disabled:hover:text-gray-400"
+              className="py-1.5 text-gray-400 disabled:hover:bg-dark-surface disabled:hover:text-gray-400"
             >
               Clear Filters/Sorts
-            </button>
+            </Button>
             {hasGridTweaks && (
               <span className="text-[11px] text-gray-500">
                 {hasActiveFilters ? `${filters.length} filter${filters.length > 1 ? 's' : ''}` : '0 filters'}
@@ -3143,26 +3150,30 @@ export function DataTable({
             )}
           </div>
           <div className="flex gap-2">
-            <button 
+            <Button 
+              variant="toolbar"
+              size="sm"
               onClick={downloadCsv}
-              className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-3 py-1.5 rounded border border-[#30363d] transition-colors"
+              className="py-1.5 text-gray-400"
             >
               Download CSV
-            </button>
-            <button 
+            </Button>
+            <Button 
+              variant="toolbar"
+              size="sm"
               onClick={downloadSql}
-              className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-3 py-1.5 rounded border border-[#30363d] transition-colors"
+              className="py-1.5 text-gray-400"
             >
               Download SQL
-            </button>
+            </Button>
           </div>
         </div>
       </div>
 
       {showSaveReviewModal && (
         <div className="fixed inset-0 z-[68] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-5xl max-h-[85vh] bg-[#161b22] border border-[#30363d] rounded-lg shadow-2xl overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+          <div className="w-full max-w-5xl max-h-[85vh] bg-dark-panel border border-dark-border rounded-lg shadow-2xl overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-dark-border">
               <div>
                 <div className="text-sm font-medium text-white">Review Pending Table Changes</div>
                 <div className="text-xs text-gray-400">
@@ -3178,20 +3189,20 @@ export function DataTable({
               </button>
             </div>
 
-            <div className="grid gap-3 border-b border-[#30363d] bg-[#0d1117] px-4 py-3 md:grid-cols-4">
-              <div className="rounded border border-[#30363d] bg-[#161b22] px-3 py-2">
+            <div className="grid gap-3 border-b border-dark-border bg-dark-bg px-4 py-3 md:grid-cols-4">
+              <div className="rounded border border-dark-border bg-dark-panel px-3 py-2">
                 <div className="text-[11px] uppercase tracking-wide text-gray-500">Inserts</div>
                 <div className="mt-1 text-lg font-semibold text-green-300">{saveReviewCounts.inserted}</div>
               </div>
-              <div className="rounded border border-[#30363d] bg-[#161b22] px-3 py-2">
+              <div className="rounded border border-dark-border bg-dark-panel px-3 py-2">
                 <div className="text-[11px] uppercase tracking-wide text-gray-500">Updates</div>
                 <div className="mt-1 text-lg font-semibold text-blue-300">{saveReviewCounts.updated}</div>
               </div>
-              <div className="rounded border border-[#30363d] bg-[#161b22] px-3 py-2">
+              <div className="rounded border border-dark-border bg-dark-panel px-3 py-2">
                 <div className="text-[11px] uppercase tracking-wide text-gray-500">Deletes</div>
                 <div className="mt-1 text-lg font-semibold text-red-300">{saveReviewCounts.deleted}</div>
               </div>
-              <div className="rounded border border-[#30363d] bg-[#161b22] px-3 py-2">
+              <div className="rounded border border-dark-border bg-dark-panel px-3 py-2">
                 <div className="text-[11px] uppercase tracking-wide text-gray-500">Total</div>
                 <div className="mt-1 text-lg font-semibold text-white">{saveReviewCounts.total}</div>
               </div>
@@ -3219,7 +3230,7 @@ export function DataTable({
                           type="button"
                           onClick={() => handleOpenStaleConflictOverview('all')}
                           disabled={Boolean(pendingStaleRecovery)}
-                          className="rounded border border-blue-400/30 bg-[#161b22] px-2.5 py-1 text-[11px] text-blue-50 hover:bg-[#21262d] transition-colors disabled:opacity-50"
+                          className="rounded border border-blue-400/30 bg-dark-panel px-2.5 py-1 text-[11px] text-blue-50 hover:bg-dark-surface transition-colors disabled:opacity-50"
                         >
                           Conflict Queue
                         </button>
@@ -3258,7 +3269,7 @@ export function DataTable({
                         type="button"
                         onClick={handleDiscardAllFailedChanges}
                         disabled={Boolean(pendingStaleRecovery)}
-                        className="rounded border border-amber-400/30 bg-[#161b22] px-2.5 py-1 text-[11px] text-amber-50 hover:bg-[#21262d] transition-colors disabled:opacity-50"
+                        className="rounded border border-amber-400/30 bg-dark-panel px-2.5 py-1 text-[11px] text-amber-50 hover:bg-dark-surface transition-colors disabled:opacity-50"
                       >
                         Drop All Failed Changes
                       </button>
@@ -3266,7 +3277,7 @@ export function DataTable({
                         type="button"
                         onClick={handleReloadServerCopy}
                         disabled={Boolean(pendingStaleRecovery)}
-                        className="rounded border border-[#30363d] bg-[#161b22] px-2.5 py-1 text-[11px] text-gray-200 hover:bg-[#21262d] transition-colors disabled:opacity-50"
+                        className="rounded border border-dark-border bg-dark-panel px-2.5 py-1 text-[11px] text-gray-200 hover:bg-dark-surface transition-colors disabled:opacity-50"
                       >
                         Reload Server Copy
                       </button>
@@ -3274,7 +3285,7 @@ export function DataTable({
                     {saveAttemptReport.failures.map((failure, index) => (
                       <div
                         key={`save-failure-${failure.action}-${failure.isNew ? 'new' : 'existing'}-${failure.rowIdx}-${index}`}
-                        className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-2"
+                        className="rounded border border-dark-border bg-dark-bg px-3 py-2"
                       >
                         <button
                           type="button"
@@ -3283,19 +3294,19 @@ export function DataTable({
                         >
                           <div>
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className="rounded border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-100">
+                              <span className="rounded border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-amber-100">
                                 {getSaveFailureKindLabel(failure.kind)}
                               </span>
                               <div className="text-xs font-medium text-amber-50">{failure.summary}</div>
                             </div>
                             <div className="mt-1 text-[11px] text-gray-300">{failure.message}</div>
                             {failure.rawMessage && failure.rawMessage !== failure.message && (
-                              <div className="mt-1 text-[10px] text-gray-500 break-all">
+                              <div className="mt-1 text-[11px] text-gray-500 break-all">
                                 Raw: {failure.rawMessage}
                               </div>
                             )}
                             {failure.recoveryNote && (
-                              <div className="mt-1 text-[10px] text-blue-300/80">
+                              <div className="mt-1 text-[11px] text-blue-300/80">
                                 {failure.recoveryNote}
                               </div>
                             )}
@@ -3310,7 +3321,7 @@ export function DataTable({
                                 scope: buildStaleConflictReviewScope(staleFailures, 'All Stale Conflicts'),
                               })}
                               disabled={Boolean(pendingStaleRecovery)}
-                              className="rounded border border-blue-400/30 bg-[#161b22] px-2.5 py-1 text-[11px] text-blue-50 hover:bg-[#21262d] transition-colors disabled:opacity-50"
+                              className="rounded border border-blue-400/30 bg-dark-panel px-2.5 py-1 text-[11px] text-blue-50 hover:bg-dark-surface transition-colors disabled:opacity-50"
                             >
                               Review Conflict
                             </button>
@@ -3329,7 +3340,7 @@ export function DataTable({
                             type="button"
                             onClick={() => handleDiscardFailure(failure)}
                             disabled={Boolean(pendingStaleRecovery)}
-                            className="rounded border border-amber-400/30 bg-[#161b22] px-2.5 py-1 text-[11px] text-amber-50 hover:bg-[#21262d] transition-colors disabled:opacity-50"
+                            className="rounded border border-amber-400/30 bg-dark-panel px-2.5 py-1 text-[11px] text-amber-50 hover:bg-dark-surface transition-colors disabled:opacity-50"
                           >
                             {failure.kind === 'stale_row' ? 'Drop Stale Change' : 'Drop This Change'}
                           </button>
@@ -3352,7 +3363,7 @@ export function DataTable({
                         key={`validation-issue-${issue.isNew ? 'new' : 'existing'}-${issue.rowIdx}-${issue.col}-${index}`}
                         type="button"
                         onClick={() => focusValidationIssue(issue)}
-                        className="flex w-full items-start justify-between gap-3 rounded border border-[#30363d] bg-[#0d1117] px-3 py-2 text-left hover:border-red-400/40 hover:bg-[#161b22] transition-colors"
+                        className="flex w-full items-start justify-between gap-3 rounded border border-dark-border bg-dark-bg px-3 py-2 text-left hover:border-red-400/40 hover:bg-dark-panel transition-colors"
                       >
                         <div>
                           <div className="text-xs font-medium text-red-100">
@@ -3380,7 +3391,7 @@ export function DataTable({
                   </div>
                   <div className="space-y-3 p-4">
                     {insertedRowPreviews.slice(0, SAVE_REVIEW_PREVIEW_LIMIT).map((row) => (
-                      <div key={`insert-preview-${row.rowIdx}`} className="rounded border border-[#30363d] bg-[#0d1117] p-3">
+                      <div key={`insert-preview-${row.rowIdx}`} className="rounded border border-dark-border bg-dark-bg p-3">
                         <div className="mb-2 text-xs font-medium text-gray-300">Draft Row #{row.rowIdx + 1}</div>
                         <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-5 text-gray-200">{stringifyJson(row.rowData)}</pre>
                       </div>
@@ -3402,21 +3413,21 @@ export function DataTable({
                   </div>
                   <div className="space-y-3 p-4">
                     {updatedRowPreviews.slice(0, SAVE_REVIEW_PREVIEW_LIMIT).map((row) => (
-                      <div key={`update-preview-${row.rowIdx}`} className="rounded border border-[#30363d] bg-[#0d1117] p-3">
+                      <div key={`update-preview-${row.rowIdx}`} className="rounded border border-dark-border bg-dark-bg p-3">
                         <div className="mb-3 text-xs text-gray-400">
                           <span className="font-medium text-gray-200">Row #{row.rowIdx + 1}</span>
                           <span>{` · ${formatConditionLabel(row.condition)}`}</span>
                         </div>
                         <div className="space-y-2">
                           {row.changes.map((change) => (
-                            <div key={`${row.rowIdx}-${change.column}`} className="grid gap-2 rounded border border-[#30363d] bg-[#161b22] p-2 lg:grid-cols-[160px_minmax(0,1fr)_minmax(0,1fr)]">
+                            <div key={`${row.rowIdx}-${change.column}`} className="grid gap-2 rounded border border-dark-border bg-dark-panel p-2 lg:grid-cols-[160px_minmax(0,1fr)_minmax(0,1fr)]">
                               <div className="text-xs font-medium text-gray-300">{change.column}</div>
                               <div>
-                                <div className="mb-1 text-[10px] uppercase tracking-wide text-gray-500">Before</div>
-                                <div className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded border border-[#30363d] bg-[#0d1117] px-2 py-1 text-[11px] text-gray-300">{formatReviewValue(change.before)}</div>
+                                <div className="mb-1 text-[11px] uppercase tracking-wide text-gray-500">Before</div>
+                                <div className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded border border-dark-border bg-dark-bg px-2 py-1 text-[11px] text-gray-300">{formatReviewValue(change.before)}</div>
                               </div>
                               <div>
-                                <div className="mb-1 text-[10px] uppercase tracking-wide text-gray-500">After</div>
+                                <div className="mb-1 text-[11px] uppercase tracking-wide text-gray-500">After</div>
                                 <div className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded border border-blue-500/20 bg-blue-500/10 px-2 py-1 text-[11px] text-blue-100">{formatReviewValue(change.after)}</div>
                               </div>
                             </div>
@@ -3441,7 +3452,7 @@ export function DataTable({
                   </div>
                   <div className="space-y-3 p-4">
                     {deletedRowPreviews.slice(0, SAVE_REVIEW_PREVIEW_LIMIT).map((row) => (
-                      <div key={`delete-preview-${row.rowIdx}`} className="rounded border border-[#30363d] bg-[#0d1117] p-3">
+                      <div key={`delete-preview-${row.rowIdx}`} className="rounded border border-dark-border bg-dark-bg p-3">
                         <div className="mb-2 text-xs text-gray-400">
                           <span className="font-medium text-gray-200">Row #{row.rowIdx + 1}</span>
                           <span>{` · ${formatConditionLabel(row.condition)}`}</span>
@@ -3459,7 +3470,7 @@ export function DataTable({
               )}
             </div>
 
-            <div className="flex items-center justify-between gap-3 border-t border-[#30363d] bg-[#0d1117] px-4 py-3">
+            <div className="flex items-center justify-between gap-3 border-t border-dark-border bg-dark-bg px-4 py-3">
               <div className="text-xs text-gray-500">
                 {validationIssueCount > 0
                   ? 'Fix the blocking validation errors above before confirming save.'
@@ -3469,7 +3480,7 @@ export function DataTable({
                 <button
                   onClick={() => setShowSaveReviewModal(false)}
                   disabled={isSaving || Boolean(pendingStaleRecovery)}
-                  className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors disabled:opacity-50"
+                  className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -3494,8 +3505,8 @@ export function DataTable({
 
       {showStaleConflictOverview && (
         <div className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-5xl max-h-[85vh] bg-[#161b22] border border-[#30363d] rounded-lg shadow-2xl overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+          <div className="w-full max-w-5xl max-h-[85vh] bg-dark-panel border border-dark-border rounded-lg shadow-2xl overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-dark-border">
               <div>
                 <div className="text-sm font-medium text-white">Stale Conflict Queue</div>
                 <div className="text-xs text-gray-400">
@@ -3511,7 +3522,7 @@ export function DataTable({
               </button>
             </div>
 
-            <div className="grid gap-3 border-b border-[#30363d] bg-[#0d1117] px-4 py-3 md:grid-cols-5">
+            <div className="grid gap-3 border-b border-dark-border bg-dark-bg px-4 py-3 md:grid-cols-5">
               {([
                 ['all', 'All', staleConflictOverviewCounts.all],
                 ['high_risk', 'High Risk', staleConflictOverviewCounts.highRisk],
@@ -3523,7 +3534,7 @@ export function DataTable({
                   key={filterKey}
                   type="button"
                   onClick={() => handleSetStaleConflictOverviewFilter(filterKey)}
-                  className={`rounded border px-3 py-2 text-left transition-colors ${staleConflictQueueFilter === filterKey ? 'border-blue-500/40 bg-blue-500/10 text-blue-100' : 'border-[#30363d] bg-[#161b22] text-gray-300 hover:text-white'}`}
+                  className={`rounded border px-3 py-2 text-left transition-colors ${staleConflictQueueFilter === filterKey ? 'border-blue-500/40 bg-blue-500/10 text-blue-100' : 'border-dark-border bg-dark-panel text-gray-300 hover:text-white'}`}
                 >
                   <div className="text-[11px] uppercase tracking-wide text-gray-500">{label}</div>
                   <div className="mt-1 text-lg font-semibold">{count}</div>
@@ -3531,17 +3542,17 @@ export function DataTable({
               ))}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 border-b border-[#30363d] px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2 border-b border-dark-border px-4 py-3">
               <input
                 value={staleConflictOverviewQuery}
                 onChange={(event) => setStaleConflictOverviewQuery(event.target.value)}
                 placeholder="Search row, condition, summary..."
-                className="min-w-[240px] flex-1 rounded border border-[#30363d] bg-[#0d1117] px-3 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
+                className="min-w-[240px] flex-1 rounded border border-dark-border bg-dark-bg px-3 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
               />
               <select
                 value={staleConflictOverviewSort}
                 onChange={(event) => setStaleConflictOverviewSort(event.target.value as StaleConflictQueueSort)}
-                className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
+                className="rounded border border-dark-border bg-dark-bg px-3 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-500"
               >
                 <option value="risk_desc">Sort: Risk</option>
                 <option value="conflicts_desc">Sort: Conflict Count</option>
@@ -3553,7 +3564,7 @@ export function DataTable({
                 type="button"
                 onClick={handleExpandAllVisibleStaleConflictGroups}
                 disabled={visibleStaleFailureSummaryGroups.length === 0 || allVisibleStaleConflictGroupsExpanded}
-                className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-200 hover:bg-[#21262d] transition-colors disabled:opacity-40"
+                className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-200 hover:bg-dark-surface transition-colors disabled:opacity-40"
               >
                 Expand All Groups
               </button>
@@ -3561,7 +3572,7 @@ export function DataTable({
                 type="button"
                 onClick={handleCollapseAllVisibleStaleConflictGroups}
                 disabled={visibleStaleFailureSummaryGroups.length === 0 || allVisibleStaleConflictGroupsCollapsed}
-                className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-200 hover:bg-[#21262d] transition-colors disabled:opacity-40"
+                className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-200 hover:bg-dark-surface transition-colors disabled:opacity-40"
               >
                 Collapse All Groups
               </button>
@@ -3593,7 +3604,7 @@ export function DataTable({
                 type="button"
                 onClick={handleApplyRecommendedToFilteredStaleConflicts}
                 disabled={visibleStaleConflictOverviewCounts.safeEdits === 0}
-                className="rounded border border-blue-400/30 bg-[#161b22] px-3 py-1.5 text-xs text-blue-100 hover:bg-[#21262d] transition-colors disabled:opacity-40"
+                className="rounded border border-blue-400/30 bg-dark-panel px-3 py-1.5 text-xs text-blue-100 hover:bg-dark-surface transition-colors disabled:opacity-40"
               >
                 Apply Recommended to Safe Edits
               </button>
@@ -3601,7 +3612,7 @@ export function DataTable({
                 type="button"
                 onClick={handleUseLatestForVisibleStaleConflicts}
                 disabled={visibleStaleFailureSummaries.length === 0 || Boolean(pendingStaleRecovery)}
-                className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-200 hover:bg-[#21262d] transition-colors disabled:opacity-40"
+                className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-200 hover:bg-dark-surface transition-colors disabled:opacity-40"
               >
                 Use Latest for Visible
               </button>
@@ -3621,12 +3632,12 @@ export function DataTable({
               {visibleStaleFailureSummaryGroups.length > 0 ? visibleStaleFailureSummaryGroups.map(({ groupKey, label, hint, items }) => (
                 <div
                   key={`stale-group-${groupKey}`}
-                  className={`overflow-hidden rounded border ${groupKey === 'high_risk' ? 'border-red-500/20' : groupKey === 'needs_refresh' ? 'border-amber-500/20' : groupKey === 'safe_edits' ? 'border-green-500/20' : 'border-[#30363d]'} bg-[#0d1117]`}
+                  className={`overflow-hidden rounded border ${groupKey === 'high_risk' ? 'border-red-500/20' : groupKey === 'needs_refresh' ? 'border-amber-500/20' : groupKey === 'safe_edits' ? 'border-green-500/20' : 'border-dark-border'} bg-dark-bg`}
                 >
                   <button
                     type="button"
                     onClick={() => handleToggleStaleConflictOverviewGroup(groupKey)}
-                    className={`flex w-full items-start justify-between gap-3 px-3 py-2 text-left transition-colors ${groupKey === 'high_risk' ? 'bg-red-500/10 hover:bg-red-500/15' : groupKey === 'needs_refresh' ? 'bg-amber-500/10 hover:bg-amber-500/15' : groupKey === 'safe_edits' ? 'bg-green-500/10 hover:bg-green-500/15' : groupKey === 'delete' ? 'bg-red-500/5 hover:bg-red-500/10' : 'bg-[#11161d] hover:bg-[#161b22]'}`}
+                    className={`flex w-full items-start justify-between gap-3 px-3 py-2 text-left transition-colors ${groupKey === 'high_risk' ? 'bg-red-500/10 hover:bg-red-500/15' : groupKey === 'needs_refresh' ? 'bg-amber-500/10 hover:bg-amber-500/15' : groupKey === 'safe_edits' ? 'bg-green-500/10 hover:bg-green-500/15' : groupKey === 'delete' ? 'bg-red-500/5 hover:bg-red-500/10' : 'bg-dark-canvas hover:bg-dark-panel'}`}
                   >
                     <div className="min-w-0 flex items-start gap-2">
                       {staleConflictOverviewCollapsedGroups[groupKey] ? (
@@ -3638,23 +3649,23 @@ export function DataTable({
                         <div className="flex flex-wrap items-center gap-2">
                           <div className="text-xs font-semibold text-white">{label}</div>
                           {groupKey === 'high_risk' && (
-                            <span className="rounded border border-red-400/30 bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-100">
+                            <span className="rounded border border-red-400/30 bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-100">
                               Priority
                             </span>
                           )}
                         </div>
-                        <div className="mt-1 text-[10px] text-gray-400">{hint}</div>
+                        <div className="mt-1 text-[11px] text-gray-400">{hint}</div>
                       </div>
                     </div>
-                    <div className="rounded border border-[#30363d] bg-[#161b22] px-2 py-0.5 text-[10px] text-gray-300">
+                    <div className="rounded border border-dark-border bg-dark-panel px-2 py-0.5 text-[11px] text-gray-300">
                       {items.length}
                     </div>
                   </button>
 
                   {!staleConflictOverviewCollapsedGroups[groupKey] && (
-                    <div className="space-y-3 border-t border-[#30363d] p-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-[#30363d] bg-[#11161d] px-3 py-2">
-                        <div className="text-[10px] text-gray-500">
+                    <div className="space-y-3 border-t border-dark-border p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-dark-border bg-dark-canvas px-3 py-2">
+                        <div className="text-[11px] text-gray-500">
                           {`${items.length} visible conflict${items.length === 1 ? '' : 's'} in this group.`}
                         </div>
                         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -3692,7 +3703,7 @@ export function DataTable({
                               onClick={() => applySafeUpdateModeToStaleSummaries(items, 'recommended', {
                                 successPrefix: 'Applied recommended resolution to',
                               })}
-                              className="rounded border border-blue-400/30 bg-[#161b22] px-2.5 py-1 text-[11px] text-blue-100 hover:bg-[#21262d] transition-colors"
+                              className="rounded border border-blue-400/30 bg-dark-panel px-2.5 py-1 text-[11px] text-blue-100 hover:bg-dark-surface transition-colors"
                             >
                               Apply Recommended
                             </button>
@@ -3702,26 +3713,26 @@ export function DataTable({
                       {items.map(({ failure, details, isHighRisk, needsRefresh, isSafeUpdate }) => (
                         <div
                           key={`stale-queue-${getSaveFailureKey(failure)}`}
-                          className="rounded border border-[#30363d] bg-[#11161d] p-3"
+                          className="rounded border border-dark-border bg-dark-canvas p-3"
                         >
                           <div className="flex flex-wrap items-start justify-between gap-3">
                             <div className="min-w-0 flex-1">
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className={`rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${failure.action === 'delete' ? 'border-red-400/30 bg-red-500/10 text-red-100' : 'border-blue-400/30 bg-blue-500/10 text-blue-100'}`}>
+                                <span className={`rounded border px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide ${failure.action === 'delete' ? 'border-red-400/30 bg-red-500/10 text-red-100' : 'border-blue-400/30 bg-blue-500/10 text-blue-100'}`}>
                                   {failure.action}
                                 </span>
                                 {isHighRisk && (
-                                  <span className="rounded border border-red-400/30 bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-100">
+                                  <span className="rounded border border-red-400/30 bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-100">
                                     High Risk
                                   </span>
                                 )}
                                 {needsRefresh && (
-                                  <span className="rounded border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-100">
+                                  <span className="rounded border border-amber-400/30 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-100">
                                     Needs Refresh
                                   </span>
                                 )}
                                 {isSafeUpdate && (
-                                  <span className="rounded border border-green-400/30 bg-green-500/10 px-1.5 py-0.5 text-[10px] text-green-100">
+                                  <span className="rounded border border-green-400/30 bg-green-500/10 px-1.5 py-0.5 text-[11px] text-green-100">
                                     Safe Recommended Merge
                                   </span>
                                 )}
@@ -3730,14 +3741,14 @@ export function DataTable({
                               <div className="mt-1 text-[11px] text-gray-400">
                                 {`${getRowLabel(failure.rowIdx, failure.isNew)} | ${failure.staleRecovery?.condition ? formatConditionLabel(failure.staleRecovery.condition) : 'No row condition available'}`}
                               </div>
-                              <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-gray-500">
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
                                 <span>{`Conflicts ${details?.conflictCount || 0}`}</span>
                                 <span>{`Local-only ${details?.localPendingCount || 0}`}</span>
                                 <span>{`Server-only ${details?.serverOnlyCount || 0}`}</span>
                                 <span>{`Already applied ${details?.alreadyAppliedCount || 0}`}</span>
                               </div>
                               {failure.recoveryNote && (
-                                <div className="mt-2 text-[10px] text-blue-300/80">
+                                <div className="mt-2 text-[11px] text-blue-300/80">
                                   {failure.recoveryNote}
                                 </div>
                               )}
@@ -3765,7 +3776,7 @@ export function DataTable({
                                 <button
                                   type="button"
                                   onClick={() => handleApplyRecommendedToSingleStaleSummary(getSaveFailureKey(failure))}
-                                  className="rounded border border-blue-400/30 bg-[#161b22] px-2.5 py-1 text-[11px] text-blue-100 hover:bg-[#21262d] transition-colors"
+                                  className="rounded border border-blue-400/30 bg-dark-panel px-2.5 py-1 text-[11px] text-blue-100 hover:bg-dark-surface transition-colors"
                                 >
                                   Apply Recommended
                                 </button>
@@ -3773,14 +3784,14 @@ export function DataTable({
                               <button
                                 type="button"
                                 onClick={() => handleUseLatestForSingleStaleSummary(getSaveFailureKey(failure))}
-                                className="rounded border border-[#30363d] bg-[#161b22] px-2.5 py-1 text-[11px] text-gray-200 hover:bg-[#21262d] transition-colors"
+                                className="rounded border border-dark-border bg-dark-panel px-2.5 py-1 text-[11px] text-gray-200 hover:bg-dark-surface transition-colors"
                               >
                                 Use Latest
                               </button>
                               <button
                                 type="button"
                                 onClick={() => focusSaveFailure(failure)}
-                                className="rounded border border-[#30363d] bg-[#161b22] px-2.5 py-1 text-[11px] text-gray-300 hover:text-white transition-colors"
+                                className="rounded border border-dark-border bg-dark-panel px-2.5 py-1 text-[11px] text-gray-300 hover:text-white transition-colors"
                               >
                                 Jump to Row
                               </button>
@@ -3792,7 +3803,7 @@ export function DataTable({
                   )}
                 </div>
               )) : (
-                <div className="rounded border border-[#30363d] bg-[#0d1117] px-4 py-3 text-sm text-gray-400">
+                <div className="rounded border border-dark-border bg-dark-bg px-4 py-3 text-sm text-gray-400">
                   No stale conflicts match the current filter/search.
                 </div>
               )}
@@ -3803,8 +3814,8 @@ export function DataTable({
 
       {activeStaleConflict && activeStaleConflictDetails && (
         <div className="fixed inset-0 z-[69] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-5xl max-h-[85vh] bg-[#161b22] border border-[#30363d] rounded-lg shadow-2xl overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+          <div className="w-full max-w-5xl max-h-[85vh] bg-dark-panel border border-dark-border rounded-lg shadow-2xl overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-dark-border">
               <div>
                 <div className="text-sm font-medium text-white">
                   {activeStaleConflict.action === 'delete' ? 'Stale Delete Conflict Review' : 'Stale Edit Conflict Review'}
@@ -3829,7 +3840,7 @@ export function DataTable({
                   type="button"
                   onClick={() => handleOpenAdjacentStaleConflict('prev')}
                   disabled={activeStaleConflictScopedIndex <= 0}
-                  className="rounded border border-[#30363d] bg-[#161b22] px-2 py-1 text-[11px] text-gray-300 hover:text-white transition-colors disabled:opacity-40"
+                  className="rounded border border-dark-border bg-dark-panel px-2 py-1 text-[11px] text-gray-300 hover:text-white transition-colors disabled:opacity-40"
                 >
                   Prev
                 </button>
@@ -3837,7 +3848,7 @@ export function DataTable({
                   type="button"
                   onClick={() => handleOpenAdjacentStaleConflict('next')}
                   disabled={activeStaleConflictScopedIndex < 0 || activeStaleConflictScopedIndex >= activeStaleConflictReviewFailures.length - 1}
-                  className="rounded border border-[#30363d] bg-[#161b22] px-2 py-1 text-[11px] text-gray-300 hover:text-white transition-colors disabled:opacity-40"
+                  className="rounded border border-dark-border bg-dark-panel px-2 py-1 text-[11px] text-gray-300 hover:text-white transition-colors disabled:opacity-40"
                 >
                   Next
                 </button>
@@ -3853,19 +3864,19 @@ export function DataTable({
 
             <div className="flex-1 overflow-auto p-4 space-y-4">
               <div className="grid gap-3 md:grid-cols-4">
-                <div className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-2">
+                <div className="rounded border border-dark-border bg-dark-bg px-3 py-2">
                   <div className="text-[11px] uppercase tracking-wide text-gray-500">User changed</div>
                   <div className="mt-1 text-lg font-semibold text-blue-300">{activeStaleConflictDetails.changedColumns.length}</div>
                 </div>
-                <div className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-2">
+                <div className="rounded border border-dark-border bg-dark-bg px-3 py-2">
                   <div className="text-[11px] uppercase tracking-wide text-gray-500">Direct conflicts</div>
                   <div className="mt-1 text-lg font-semibold text-red-300">{activeStaleConflictDetails.conflictCount}</div>
                 </div>
-                <div className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-2">
+                <div className="rounded border border-dark-border bg-dark-bg px-3 py-2">
                   <div className="text-[11px] uppercase tracking-wide text-gray-500">Server-only changes</div>
                   <div className="mt-1 text-lg font-semibold text-amber-300">{activeStaleConflictDetails.serverOnlyCount}</div>
                 </div>
-                <div className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-2">
+                <div className="rounded border border-dark-border bg-dark-bg px-3 py-2">
                   <div className="text-[11px] uppercase tracking-wide text-gray-500">Already applied</div>
                   <div className="mt-1 text-lg font-semibold text-green-300">{activeStaleConflictDetails.alreadyAppliedCount}</div>
                 </div>
@@ -3896,22 +3907,22 @@ export function DataTable({
                 {activeStaleConflictDetails.diffItems.length > 0 ? activeStaleConflictDetails.diffItems.map((item) => (
                   <div
                     key={`stale-conflict-${item.column}`}
-                    className="rounded border border-[#30363d] bg-[#0d1117] p-3"
+                    className="rounded border border-dark-border bg-dark-bg p-3"
                   >
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
                           <div className="text-sm font-medium text-white">{item.column}</div>
-                          <span className={`rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${getStaleConflictStateClasses(item.state)}`}>
+                          <span className={`rounded border px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide ${getStaleConflictStateClasses(item.state)}`}>
                             {getStaleConflictStateLabel(item.state)}
                           </span>
                           {item.userChanged && (
-                            <span className="rounded border border-blue-400/20 bg-blue-500/10 px-1.5 py-0.5 text-[10px] text-blue-100">
+                            <span className="rounded border border-blue-400/20 bg-blue-500/10 px-1.5 py-0.5 text-[11px] text-blue-100">
                               Your edit
                             </span>
                           )}
                           {item.serverChanged && (
-                            <span className="rounded border border-amber-400/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-100">
+                            <span className="rounded border border-amber-400/20 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-100">
                               Server changed
                             </span>
                           )}
@@ -3929,7 +3940,7 @@ export function DataTable({
                         </div>
                       </div>
                       {activeStaleConflict.action === 'update' && item.userChanged && (
-                        <div className="flex items-center gap-1 rounded border border-[#30363d] bg-[#161b22] p-1">
+                        <div className="flex items-center gap-1 rounded border border-dark-border bg-dark-panel p-1">
                           <button
                             type="button"
                             onClick={() => handleSetStaleConflictSelection(item.column, 'pending')}
@@ -3940,7 +3951,7 @@ export function DataTable({
                           <button
                             type="button"
                             onClick={() => handleSetStaleConflictSelection(item.column, 'latest')}
-                            className={`rounded px-2 py-1 text-[11px] transition-colors ${staleConflictSelections[item.column] === 'latest' ? 'bg-[#30363d] text-white' : 'text-gray-300 hover:text-white'}`}
+                            className={`rounded px-2 py-1 text-[11px] transition-colors ${staleConflictSelections[item.column] === 'latest' ? 'bg-dark-border text-white' : 'text-gray-300 hover:text-white'}`}
                           >
                             Use Server
                           </button>
@@ -3951,7 +3962,7 @@ export function DataTable({
                     <div className={`mt-3 grid gap-3 ${activeStaleConflict.action === 'delete' ? 'md:grid-cols-2' : 'md:grid-cols-3'}`}>
                       <div>
                         <div className="mb-1 text-[11px] uppercase tracking-wide text-gray-500">Original matched row</div>
-                        <div className="rounded border border-[#30363d] bg-[#161b22] px-2 py-1 text-[11px] text-gray-200 whitespace-pre-wrap break-all">
+                        <div className="rounded border border-dark-border bg-dark-panel px-2 py-1 text-[11px] text-gray-200 whitespace-pre-wrap break-all">
                           {formatReviewValue(item.originalValue)}
                         </div>
                       </div>
@@ -3976,14 +3987,14 @@ export function DataTable({
                     </div>
                   </div>
                 )) : (
-                  <div className="rounded border border-[#30363d] bg-[#0d1117] px-4 py-3 text-sm text-gray-400">
+                  <div className="rounded border border-dark-border bg-dark-bg px-4 py-3 text-sm text-gray-400">
                     No column-level diff is available for this conflict yet.
                   </div>
                 )}
               </div>
             </div>
 
-            <div className="flex items-center justify-between gap-3 border-t border-[#30363d] bg-[#0d1117] px-4 py-3">
+            <div className="flex items-center justify-between gap-3 border-t border-dark-border bg-dark-bg px-4 py-3">
               <div className="text-xs text-gray-500">
                 {activeStaleConflict.action === 'delete'
                   ? activeStaleConflictDetails.hasFreshLatestRow
@@ -3997,21 +4008,21 @@ export function DataTable({
                     <button
                       type="button"
                       onClick={() => handleApplyStaleConflictPreset('recommended')}
-                      className="rounded border border-blue-400/30 bg-[#161b22] px-3 py-1.5 text-xs text-blue-100 hover:bg-[#21262d] transition-colors"
+                      className="rounded border border-blue-400/30 bg-dark-panel px-3 py-1.5 text-xs text-blue-100 hover:bg-dark-surface transition-colors"
                     >
                       Use Recommended Preset
                     </button>
                     <button
                       type="button"
                       onClick={() => handleApplyStaleConflictPreset('mine')}
-                      className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
+                      className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
                     >
                       Keep All Mine
                     </button>
                     <button
                       type="button"
                       onClick={() => handleApplyStaleConflictPreset('server')}
-                      className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
+                      className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
                     >
                       Use Server For All
                     </button>
@@ -4020,14 +4031,14 @@ export function DataTable({
                 <button
                   type="button"
                   onClick={handleReturnToStaleConflictOverview}
-                  className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
+                  className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
                 >
                   Back to Queue
                 </button>
                 <button
                   type="button"
                   onClick={handleCloseStaleConflict}
-                  className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
+                  className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
                 >
                   Close
                 </button>
@@ -4043,7 +4054,7 @@ export function DataTable({
                   type="button"
                   onClick={() => handleUseLatestServerCopyForConflict()}
                   disabled={Boolean(pendingStaleRecovery)}
-                  className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-200 hover:bg-[#21262d] transition-colors disabled:opacity-50"
+                  className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-200 hover:bg-dark-surface transition-colors disabled:opacity-50"
                 >
                   Use Latest Server Copy
                 </button>
@@ -4051,7 +4062,7 @@ export function DataTable({
                   type="button"
                   onClick={handleUseLatestServerCopyForConflictAndNext}
                   disabled={Boolean(pendingStaleRecovery) || activeStaleConflictReviewFailures.length <= 1}
-                  className="rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-200 hover:bg-[#21262d] transition-colors disabled:opacity-40"
+                  className="rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-200 hover:bg-dark-surface transition-colors disabled:opacity-40"
                 >
                   Use Latest & Next
                 </button>
@@ -4099,8 +4110,8 @@ export function DataTable({
 
       {showPasteModal && (
         <div className="fixed inset-0 z-[65] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-3xl bg-[#161b22] border border-[#30363d] rounded-lg shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+          <div className="w-full max-w-3xl bg-dark-panel border border-dark-border rounded-lg shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-dark-border">
               <div>
                 <div className="text-sm font-medium text-white">Paste Rows into Draft Grid</div>
                 <div className="text-xs text-gray-400">
@@ -4124,7 +4135,7 @@ export function DataTable({
                   <button
                     key={value}
                     onClick={() => setPasteMode(value)}
-                    className={`rounded border px-3 py-1 text-xs transition-colors ${pasteMode === value ? 'border-blue-500/40 bg-blue-500/15 text-blue-300' : 'border-[#30363d] bg-[#0d1117] text-gray-300 hover:text-white'}`}
+                    className={`rounded border px-3 py-1 text-xs transition-colors ${pasteMode === value ? 'border-blue-500/40 bg-blue-500/15 text-blue-300' : 'border-dark-border bg-dark-bg text-gray-300 hover:text-white'}`}
                   >
                     {label}
                   </button>
@@ -4132,14 +4143,14 @@ export function DataTable({
                 <button
                   onClick={() => void handleReadClipboard()}
                   disabled={isReadingClipboard}
-                  className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-1 text-xs text-gray-300 hover:text-white transition-colors disabled:opacity-50"
+                  className="rounded border border-dark-border bg-dark-bg px-3 py-1 text-xs text-gray-300 hover:text-white transition-colors disabled:opacity-50"
                 >
                   {isReadingClipboard ? 'Reading Clipboard...' : 'Read Clipboard'}
                 </button>
                 <button
                   onClick={() => setPasteText('')}
                   disabled={!pasteText.trim()}
-                  className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-1 text-xs text-gray-300 hover:text-white transition-colors disabled:opacity-50"
+                  className="rounded border border-dark-border bg-dark-bg px-3 py-1 text-xs text-gray-300 hover:text-white transition-colors disabled:opacity-50"
                 >
                   Clear
                 </button>
@@ -4148,7 +4159,7 @@ export function DataTable({
                 value={pasteText}
                 onChange={(event) => setPasteText(event.target.value)}
                 placeholder={'Paste TSV or JSON rows here...\n\nExamples:\n- id\\tname\\tage\\n1\\tAlice\\t18\n- [{\"name\":\"Alice\",\"age\":18}]'}
-                className="min-h-[320px] w-full rounded border border-[#30363d] bg-[#0d1117] p-3 text-xs leading-6 text-gray-200 font-mono outline-none focus:border-blue-500"
+                className="min-h-[320px] w-full rounded border border-dark-border bg-dark-bg p-3 text-xs leading-6 text-gray-200 font-mono outline-none focus:border-blue-500"
               />
               <div className="flex items-start justify-between gap-3">
                 <div className="text-xs text-gray-500">
@@ -4157,7 +4168,7 @@ export function DataTable({
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setShowPasteModal(false)}
-                    className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
+                    className="rounded border border-dark-border bg-dark-bg px-3 py-1.5 text-xs text-gray-300 hover:text-white transition-colors"
                   >
                     Cancel
                   </button>
@@ -4177,13 +4188,13 @@ export function DataTable({
 
       {contextMenu && (
         <div 
-          className="fixed bg-[#1c2128] border border-[#30363d] shadow-xl rounded overflow-hidden z-50 min-w-[150px]"
+          className="fixed bg-dark-panel border border-dark-border shadow-xl rounded overflow-hidden z-50 min-w-[150px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
         >
           {contextMenu.col && (
             <button
               type="button"
-              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-[#30363d]"
+              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border"
               onClick={() => handlePreviewCell(contextMenu.rowIdx, contextMenu.col!, contextMenu.isNew)}
             >
               <Eye className="w-4 h-4" /> Open Cell Viewer
@@ -4192,7 +4203,7 @@ export function DataTable({
           {contextMenu.col && (
             <button
               type="button"
-              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-[#30363d]"
+              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border"
               onClick={() => handleCopyCell(contextMenu.rowIdx, contextMenu.col!, contextMenu.isNew)}
             >
               <Copy className="w-4 h-4" /> Copy Cell Value
@@ -4202,7 +4213,7 @@ export function DataTable({
             <button
               type="button"
               disabled={!isNullableColumn(contextMenu.col)}
-              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-[#30363d] disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => handleSetCellNull(contextMenu.rowIdx, contextMenu.col!, contextMenu.isNew)}
             >
               <X className="w-4 h-4" /> Set NULL
@@ -4212,42 +4223,42 @@ export function DataTable({
             <button
               type="button"
               disabled={!resolveLiteralColumnDefault(contextMenu.col).supported}
-              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-[#30363d] disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => handleApplyColumnDefault(contextMenu.rowIdx, contextMenu.col!, contextMenu.isNew)}
             >
               <Save className="w-4 h-4" /> Apply Schema Default
             </button>
           )}
-          <div className="h-px bg-[#30363d] my-1" />
+          <div className="h-px bg-dark-border my-1" />
           <button
             type="button"
-            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-[#30363d]"
+            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border"
             onClick={() => handleDuplicateRow(contextMenu.rowIdx, contextMenu.isNew)}
           >
             <Plus className="w-4 h-4" /> Duplicate Row
           </button>
           <button
             type="button"
-            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-[#30363d]"
+            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border"
             onClick={() => handleCopyRow(contextMenu.rowIdx, contextMenu.isNew)}
           >
             <Copy className="w-4 h-4" /> Copy Row (Excel/TSV)
           </button>
           <button
             type="button"
-            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-[#30363d]"
+            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border"
             onClick={() => handleCopyRowJson(contextMenu.rowIdx, contextMenu.isNew)}
           >
             <Copy className="w-4 h-4" /> Copy Row JSON
           </button>
           <button
             type="button"
-            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-[#30363d]"
+            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border"
             onClick={() => handleCopyRowSql(contextMenu.rowIdx, contextMenu.isNew)}
           >
             <Copy className="w-4 h-4" /> Copy Row SQL
           </button>
-          <div className="h-px bg-[#30363d] my-1" />
+          <div className="h-px bg-dark-border my-1" />
           <button
             type="button"
             className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-red-400 hover:bg-red-500/20"
@@ -4260,8 +4271,8 @@ export function DataTable({
 
       {previewCell && (
         <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-4xl max-h-[80vh] bg-[#161b22] border border-[#30363d] rounded-lg shadow-2xl flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+          <div className="w-full max-w-4xl max-h-[80vh] bg-dark-panel border border-dark-border rounded-lg shadow-2xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-dark-border">
               <div>
                 <div className="text-sm font-medium text-white">{previewCell.title}</div>
                 <div className="text-xs text-gray-400">
@@ -4270,18 +4281,20 @@ export function DataTable({
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button
+                <Button
+                  variant="toolbar"
+                  size="md"
                   onClick={() => void handleCopyPreviewValue()}
-                  className="text-xs text-gray-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors"
                 >
                   Copy
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="toolbar"
+                  size="md"
                   onClick={handleDownloadPreviewValue}
-                  className="text-xs text-gray-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors"
                 >
                   Download
-                </button>
+                </Button>
                 <button
                   onClick={() => setPreviewCell(null)}
                   className="text-gray-400 hover:text-white transition-colors"
@@ -4294,22 +4307,24 @@ export function DataTable({
               <textarea
                 value={previewCell.draft}
                 onChange={(e) => setPreviewCell((prev) => prev ? { ...prev, draft: e.target.value } : prev)}
-                className="min-h-[360px] w-full rounded border border-[#30363d] bg-[#0d1117] p-3 text-xs leading-6 text-gray-200 whitespace-pre-wrap break-words font-mono outline-none focus:border-blue-500"
+                className="min-h-[360px] w-full rounded border border-dark-border bg-dark-bg p-3 text-xs leading-6 text-gray-200 whitespace-pre-wrap break-words font-mono outline-none focus:border-blue-500"
               />
             </div>
-            <div className="flex items-center justify-between gap-3 border-t border-[#30363d] bg-[#0d1117] px-4 py-3">
+            <div className="flex items-center justify-between gap-3 border-t border-dark-border bg-dark-bg px-4 py-3">
               <div className="text-xs text-gray-500">
                 {previewCell.format === 'json'
                   ? 'Edit JSON/text here, then apply it back to the grid.'
                   : 'Edit the full text here, then apply it back to the grid.'}
               </div>
               <div className="flex items-center gap-2">
-                <button
+                <Button
+                  variant="toolbar"
+                  size="sm"
                   onClick={() => setPreviewCell(null)}
-                  className="text-xs text-gray-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-3 py-1.5 rounded border border-[#30363d] transition-colors"
+                  className="py-1.5 text-gray-300"
                 >
                   Cancel
-                </button>
+                </Button>
                 <button
                   onClick={handleApplyPreviewEdit}
                   className="text-xs text-white bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded border border-blue-500/30 transition-colors"
@@ -4355,7 +4370,7 @@ function CellDisplay({
     return (
       <span
         title={titleText}
-        className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${val ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}
+        className={`px-1.5 py-0.5 rounded text-[11px] font-bold uppercase ${val ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}
       >
         {val ? 'TRUE' : 'FALSE'}
       </span>
@@ -4408,14 +4423,14 @@ function FilterDropdown({ col, filters, setFilters, onClose }: {
 
   return (
     <div 
-      className="absolute top-full left-0 mt-1 bg-[#1c2128] border border-[#30363d] shadow-xl rounded p-3 z-50 w-56"
+      className="absolute top-full left-0 mt-1 bg-dark-panel border border-dark-border shadow-xl rounded p-3 z-50 w-56"
       onClick={e => e.stopPropagation()}
     >
       <div className="text-xs font-semibold mb-2 text-gray-300">Filter {col}</div>
       <select 
         value={operator} 
         onChange={e => setOperator(e.target.value)}
-        className="w-full bg-[#0d1117] border border-[#30363d] rounded p-1 mb-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+        className="w-full bg-dark-bg border border-dark-border rounded p-1 mb-2 text-sm text-gray-200 outline-none focus:border-blue-500"
       >
         <option value="equals">Equals</option>
         <option value="not_equals">Not Equals</option>
@@ -4437,7 +4452,7 @@ function FilterDropdown({ col, filters, setFilters, onClose }: {
             value={value} 
             onChange={e => setValue(e.target.value)}
             placeholder={inputPlaceholder}
-            className="w-full bg-[#0d1117] border border-[#30363d] rounded p-1 text-sm text-gray-200 outline-none focus:border-blue-500"
+            className="w-full bg-dark-bg border border-dark-border rounded p-1 text-sm text-gray-200 outline-none focus:border-blue-500"
             onKeyDown={e => { if (e.key === 'Enter') apply(); }}
           />
           <div className="mb-3 mt-1 min-h-[16px] text-[11px] text-gray-500">
@@ -4445,7 +4460,7 @@ function FilterDropdown({ col, filters, setFilters, onClose }: {
           </div>
         </>
       ) : (
-        <div className="mb-3 rounded border border-[#30363d] bg-[#0d1117] px-2 py-1.5 text-xs text-gray-400">
+        <div className="mb-3 rounded border border-dark-border bg-dark-bg px-2 py-1.5 text-xs text-gray-400">
           This filter does not require a value.
         </div>
       )}

@@ -281,18 +281,18 @@ export function GoLive({ onCancel }: GoLiveProps) {
       isValid: canRun,
       content: (
         <div className="flex flex-col gap-4 h-full">
-          <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+          <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
             <div className="text-sm font-medium text-gray-200">{tr('Operator（可选）', 'Operator (optional)')}</div>
             <input
               value={operator}
               onChange={e => setOperator(e.target.value)}
               placeholder={tr('填写操作人，如：alice', 'Enter operator, e.g. alice')}
-              className="mt-2 w-full px-3 py-2 rounded bg-[#0d1117] border border-[#30363d] text-gray-100 text-sm outline-none focus:border-blue-500"
+              className="mt-2 w-full px-3 py-2 rounded bg-dark-bg border border-dark-border text-gray-100 text-sm outline-none focus:border-blue-500"
               disabled={isLoading || String(job?.status || '').toLowerCase() === 'running'}
             />
           </div>
 
-          <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+          <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
             <div className="text-sm font-medium text-gray-200">{tr('Steps（多选）', 'Steps (multi-select)')}</div>
             <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
               {stepOptions.map(opt => (
@@ -315,7 +315,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
             </div>
           </div>
 
-          <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+          <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
             <div className="text-sm font-medium text-gray-200">{tr('Thresholds（可选）', 'Thresholds (optional)')}</div>
             <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="flex flex-col gap-1">
@@ -324,7 +324,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
                   value={maxTotalMs}
                   onChange={e => setMaxTotalMs(e.target.value)}
                   placeholder={tr('例如：30000', 'e.g. 30000')}
-                  className="px-3 py-2 rounded bg-[#0d1117] border border-[#30363d] text-gray-100 text-sm outline-none focus:border-blue-500"
+                  className="px-3 py-2 rounded bg-dark-bg border border-dark-border text-gray-100 text-sm outline-none focus:border-blue-500"
                   disabled={isLoading || String(job?.status || '').toLowerCase() === 'running'}
                 />
               </div>
@@ -338,7 +338,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
                         value={perStepMaxMs[opt.id] || ''}
                         onChange={e => setPerStepMaxMs(prev => ({ ...prev, [opt.id]: e.target.value }))}
                         placeholder="ms"
-                        className="flex-1 px-3 py-2 rounded bg-[#0d1117] border border-[#30363d] text-gray-100 text-sm outline-none focus:border-blue-500"
+                        className="flex-1 px-3 py-2 rounded bg-dark-bg border border-dark-border text-gray-100 text-sm outline-none focus:border-blue-500"
                         disabled={isLoading || String(job?.status || '').toLowerCase() === 'running'}
                       />
                     </div>
@@ -348,7 +348,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
             </div>
           </div>
 
-          <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+          <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
             <div className="text-sm font-medium text-gray-200">{tr('Connections（多选）', 'Connections (multi-select)')}</div>
             <div className="mt-2 flex flex-col gap-2">
               {dbConnections.map((c: any) => {
@@ -376,7 +376,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
             </div>
           </div>
 
-          <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+          <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
             <button
               onClick={() => setShowAdvanced(v => !v)}
               className="text-sm font-medium text-blue-400 hover:text-blue-300"
@@ -390,7 +390,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
                 <textarea
                   value={payloadText}
                   onChange={e => setPayloadText(e.target.value)}
-                  className="mt-2 w-full min-h-[110px] bg-[#0d1117] border border-[#30363d] rounded p-3 font-mono text-xs text-gray-200 outline-none focus:border-blue-500"
+                  className="mt-2 w-full min-h-[110px] bg-dark-bg border border-dark-border rounded p-3 font-mono text-xs text-gray-200 outline-none focus:border-blue-500"
                   placeholder="{ }"
                   disabled={isLoading || String(job?.status || '').toLowerCase() === 'running'}
                 />
@@ -401,20 +401,20 @@ export function GoLive({ onCancel }: GoLiveProps) {
             </div>
           </div>
 
-          <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+          <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
             <div className="text-sm font-medium text-gray-200">{tr('恢复 Job', 'Resume Job')}</div>
             <div className="mt-2 flex items-center gap-2">
               <input
                 value={resumeJobId}
                 onChange={e => setResumeJobId(e.target.value)}
                 placeholder={tr('输入 job_id', 'Enter job_id')}
-                className="flex-1 px-3 py-2 rounded bg-[#0d1117] border border-[#30363d] text-gray-100 text-sm"
+                className="flex-1 px-3 py-2 rounded bg-dark-bg border border-dark-border text-gray-100 text-sm"
                 disabled={isLoading}
               />
               <button
                 onClick={() => startPolling(resumeJobId)}
                 disabled={!resumeJobId.trim() || isLoading}
-                className="px-3 py-2 rounded text-sm font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
+                className="px-3 py-2 rounded text-sm font-medium bg-dark-surface hover:bg-dark-border text-gray-100 border border-dark-border disabled:opacity-50"
               >
                 {tr('恢复查看', 'Resume')}
               </button>
@@ -438,7 +438,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
           )}
 
           {jobId && (
-            <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+            <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm font-medium text-gray-200">Job</div>
                 <div className="text-xs text-gray-400">{jobStatusLabel(job?.status)}</div>
@@ -451,7 +451,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
                     <div>progress</div>
                     <div className="font-mono">{progress.label}</div>
                   </div>
-                  <div className="mt-2 h-2 bg-[#161b22] rounded overflow-hidden border border-[#30363d]">
+                  <div className="mt-2 h-2 bg-dark-panel rounded overflow-hidden border border-dark-border">
                     <div className="h-full bg-blue-600" style={{ width: `${progress.percent}%` }} />
                   </div>
                 </div>
@@ -482,14 +482,14 @@ export function GoLive({ onCancel }: GoLiveProps) {
                 <button
                   onClick={() => downloadArtifact('data')}
                   disabled={!canDownload}
-                  className="px-3 py-2 rounded text-sm font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
+                  className="px-3 py-2 rounded text-sm font-medium bg-dark-surface hover:bg-dark-border text-gray-100 border border-dark-border disabled:opacity-50"
                 >
                   {tr('下载 artifacts/data', 'Download artifacts/data')}
                 </button>
                 <button
                   onClick={handleCancelJob}
                   disabled={!canCancel || isLoading}
-                  className="px-3 py-2 rounded text-sm font-medium bg-[#21262d] hover:bg-[#30363d] text-red-300 border border-[#30363d] disabled:opacity-50"
+                  className="px-3 py-2 rounded text-sm font-medium bg-dark-surface hover:bg-dark-border text-red-300 border border-dark-border disabled:opacity-50"
                 >
                   {tr('取消任务', 'Cancel Job')}
                 </button>
@@ -498,12 +498,12 @@ export function GoLive({ onCancel }: GoLiveProps) {
           )}
 
           {reportJson && (
-            <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3 flex flex-col">
+            <div className="border border-dark-border bg-dark-bg rounded-lg p-3 flex flex-col">
               <div className="text-sm font-medium text-gray-200">{tr('报告（JSON）', 'Report (JSON)')}</div>
               <textarea
                 readOnly
                 value={reportJson}
-                className="mt-2 w-full min-h-[220px] bg-[#0d1117] border border-[#30363d] rounded p-3 font-mono text-xs text-gray-200 outline-none"
+                className="mt-2 w-full min-h-[220px] bg-dark-bg border border-dark-border rounded p-3 font-mono text-xs text-gray-200 outline-none"
               />
             </div>
           )}

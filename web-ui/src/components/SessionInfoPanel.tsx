@@ -103,7 +103,7 @@ export function SessionInfoPanel({
   }
 
   return (
-    <div className="flex h-full flex-col bg-[#0a0c10] text-gray-200">
+    <div className="flex h-full flex-col bg-dark-canvas text-gray-200">
       <div className="flex items-center justify-between border-b border-dark-border bg-dark-panel px-5 py-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-gray-100">
@@ -122,7 +122,7 @@ export function SessionInfoPanel({
           <button
             onClick={() => void loadSessionInfo()}
             disabled={isLoading}
-            className="flex items-center gap-2 rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-300 transition-colors hover:bg-[#21262d] hover:text-white disabled:cursor-wait disabled:opacity-50"
+            className="flex items-center gap-2 rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-300 transition-colors hover:bg-dark-surface hover:text-white disabled:cursor-wait disabled:opacity-50"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
             Refresh
@@ -130,7 +130,7 @@ export function SessionInfoPanel({
           <button
             onClick={handleCopyJson}
             disabled={!sessionInfo}
-            className="flex items-center gap-2 rounded border border-[#30363d] bg-[#161b22] px-3 py-1.5 text-xs text-gray-300 transition-colors hover:bg-[#21262d] hover:text-white disabled:opacity-50"
+            className="flex items-center gap-2 rounded border border-dark-border bg-dark-panel px-3 py-1.5 text-xs text-gray-300 transition-colors hover:bg-dark-surface hover:text-white disabled:opacity-50"
           >
             <Copy className="h-3.5 w-3.5" />
             Copy JSON
@@ -159,8 +159,8 @@ export function SessionInfoPanel({
 
         {sessionInfo && (
           <div className="space-y-5">
-            <section className="rounded-xl border border-[#30363d] bg-[#0d1117]">
-              <div className="flex items-center justify-between border-b border-[#30363d] px-4 py-3">
+            <section className="rounded-xl border border-dark-border bg-dark-bg">
+              <div className="flex items-center justify-between border-b border-dark-border px-4 py-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-gray-100">
                   <Database className="h-4 w-4 text-blue-300" />
                   Summary
@@ -174,7 +174,7 @@ export function SessionInfoPanel({
               </div>
               <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
                 {summaryItems.map((item) => (
-                  <div key={item.key} className="rounded-lg border border-[#30363d] bg-[#161b22] p-3">
+                  <div key={item.key} className="rounded-lg border border-dark-border bg-dark-panel p-3">
                     <div className="text-[11px] uppercase tracking-wide text-gray-500">
                       {formatKeyLabel(item.key)}
                     </div>
@@ -187,8 +187,8 @@ export function SessionInfoPanel({
             </section>
 
             <div className="grid gap-5 xl:grid-cols-2">
-              <section className="rounded-xl border border-[#30363d] bg-[#0d1117]">
-                <div className="flex items-center justify-between border-b border-[#30363d] px-4 py-3">
+              <section className="rounded-xl border border-dark-border bg-dark-bg">
+                <div className="flex items-center justify-between border-b border-dark-border px-4 py-3">
                   <div className="flex items-center gap-2 text-sm font-medium text-gray-100">
                     <Server className="h-4 w-4 text-cyan-300" />
                     Session Variables
@@ -200,7 +200,7 @@ export function SessionInfoPanel({
                     Copy
                   </button>
                 </div>
-                <div className="divide-y divide-[#21262d]">
+                <div className="divide-y divide-dark-surface">
                   {sessionInfo.session_variables.map((item) => (
                     <div key={item.key} className="flex items-start justify-between gap-3 px-4 py-3">
                       <div className="text-sm text-gray-400">{formatKeyLabel(item.key)}</div>
@@ -212,8 +212,8 @@ export function SessionInfoPanel({
                 </div>
               </section>
 
-              <section className="rounded-xl border border-[#30363d] bg-[#0d1117]">
-                <div className="flex items-center justify-between border-b border-[#30363d] px-4 py-3">
+              <section className="rounded-xl border border-dark-border bg-dark-bg">
+                <div className="flex items-center justify-between border-b border-dark-border px-4 py-3">
                   <div className="flex items-center gap-2 text-sm font-medium text-gray-100">
                     <Shield className="h-4 w-4 text-amber-300" />
                     Server Variables
@@ -225,7 +225,7 @@ export function SessionInfoPanel({
                     Copy
                   </button>
                 </div>
-                <div className="divide-y divide-[#21262d]">
+                <div className="divide-y divide-dark-surface">
                   {sessionInfo.global_variables.map((item) => (
                     <div key={item.key} className="flex items-start justify-between gap-3 px-4 py-3">
                       <div className="text-sm text-gray-400">{formatKeyLabel(item.key)}</div>

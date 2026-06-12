@@ -2,6 +2,7 @@ import { Copy, Database, Play, Sparkles, Table, Trash2 } from 'lucide-react'
 import { DataCharts } from './DataCharts'
 import { SimpleDataTable } from './SimpleDataTable'
 import { Skeleton } from './Skeleton'
+import { Button } from '../ui'
 import type { QueryErrorInsight, QueryExecutionResult, QueryResultCompareReport } from '../types'
 import type { AppError } from '../utils'
 import { tr } from '../i18n'
@@ -180,7 +181,7 @@ export function QueryResultsPanel({
   return (
     <>
       <div
-        className={`h-2 shrink-0 cursor-row-resize bg-[#0d1117] border-y border-dark-border flex items-center justify-center ${isResizingResults ? 'bg-[#161b22]' : ''}`}
+        className={`h-2 shrink-0 cursor-row-resize bg-dark-bg border-y border-dark-border flex items-center justify-center ${isResizingResults ? 'bg-dark-panel' : ''}`}
         onMouseDown={onStartResize}
         title="Drag to resize results panel"
       >
@@ -223,16 +224,16 @@ export function QueryResultsPanel({
                 </span>
               )}
               {hasRows && (
-                <div className="flex items-center bg-[#21262d] rounded overflow-hidden border border-[#30363d]">
+                <div className="flex items-center bg-dark-surface rounded overflow-hidden border border-dark-border">
                   <button
                     onClick={() => onSetResultsView('table')}
-                    className={`px-2 py-0.5 text-xs transition-colors ${tabState.resultsView === 'table' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-[#30363d]'}`}
+                    className={`px-2 py-0.5 text-xs transition-colors ${tabState.resultsView === 'table' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-dark-border'}`}
                   >
                     Table
                   </button>
                   <button
                     onClick={() => onSetResultsView('chart')}
-                    className={`px-2 py-0.5 text-xs transition-colors ${tabState.resultsView === 'chart' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-[#30363d]'}`}
+                    className={`px-2 py-0.5 text-xs transition-colors ${tabState.resultsView === 'chart' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-dark-border'}`}
                   >
                     Chart
                   </button>
@@ -242,39 +243,45 @@ export function QueryResultsPanel({
             {hasActiveResult && (
               <div className="flex flex-wrap items-center justify-end gap-2">
                 {activeResult?.has_more && !panelError && transactionCanLoadMore && (
-                  <button
+                  <Button
+                    variant="toolbar"
+                    size="sm"
                     onClick={onLoadMoreResults}
                     disabled={Boolean(tabState.isLoadingMoreResults)}
-                    className="text-xs text-blue-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors disabled:opacity-50 disabled:cursor-wait"
+                    className="text-blue-300 disabled:cursor-wait"
                   >
                     {tabState.isLoadingMoreResults ? 'Loading...' : `Load More (${activeResult.chunk_size || queryChunkSize})`}
-                  </button>
+                  </Button>
                 )}
                 {activeResult?.status === 'success' && tabState.sql && onOpenSortPanel && (() => {
                   const trimmed = tabState.sql.trim().replace(/;+$/, '')
                   const first = trimmed.split(/\s+/)[0]?.toUpperCase() || ''
                   const isSelect = first === 'SELECT' || first === 'WITH'
                   return (
-                    <button
+                    <Button
+                      variant="toolbar"
+                      size="sm"
                       type="button"
                       disabled={!isSelect}
                       onClick={() => onOpenSortPanel(trimmed)}
                       title={isSelect
                         ? tr('打开排序面板', 'Open sort panel')
                         : tr('仅 SELECT 结果支持排序', 'Only SELECT results support sorting')}
-                      className="text-xs text-purple-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors disabled:opacity-40 disabled:hover:bg-[#21262d] disabled:cursor-not-allowed"
+                      className="text-purple-300 disabled:opacity-40 disabled:hover:bg-dark-surface"
                     >
                       {tr('排序', 'Sort')}
-                    </button>
+                    </Button>
                   )
                 })()}
-                <button
+                <Button
+                  variant="toolbar"
+                  size="sm"
                   onClick={onClearResults}
-                  className="text-xs text-red-400 hover:text-red-300 bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors flex items-center gap-1"
+                  className="text-red-400 hover:text-red-300"
                 >
                   <Trash2 className="w-3 h-3" />
                   Clear Results
-                </button>
+                </Button>
                 {currentResultCanBeBaseline && (
                   <button
                     onClick={onSetCompareBaseline}
@@ -286,38 +293,43 @@ export function QueryResultsPanel({
                 {hasSavedBaseline && (
                   <button
                     onClick={onClearCompareBaseline}
-                    className="text-xs text-violet-200 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-violet-500/20 transition-colors"
+                    className="text-xs text-violet-200 hover:text-white bg-dark-surface hover:bg-dark-border px-2 py-0.5 rounded border border-violet-500/20 transition-colors"
                   >
                     Clear Baseline
                   </button>
                 )}
                 {hasRows && (
                   <>
-                    <button
+                    <Button
+                      variant="toolbar"
+                      size="sm"
                       onClick={handleCopyJson}
-                      className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors flex items-center gap-1"
+                      className="gap-1"
                     >
                       <Copy className="w-3 h-3" />
                       Copy JSON
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="toolbar"
+                      size="sm"
                       onClick={handleDownloadJson}
-                      className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors"
                     >
                       Download JSON
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="toolbar"
+                      size="sm"
                       onClick={onDownloadCsv}
-                      className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors"
                     >
                       Download CSV
-                    </button>
-                    <button
+                    </Button>
+                    <Button
+                      variant="toolbar"
+                      size="sm"
                       onClick={onDownloadSql}
-                      className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors"
                     >
                       Download SQL
-                    </button>
+                    </Button>
                   </>
                 )}
               </div>
@@ -338,13 +350,13 @@ export function QueryResultsPanel({
                   <button
                     key={`${result.statement_label || result.statement_kind || 'statement'}-${index}`}
                     onClick={() => onSelectResult(index)}
-                    className={`flex min-w-[140px] items-center justify-between gap-3 rounded border px-3 py-1.5 text-left text-xs transition-colors ${isActive ? 'border-blue-500/50 bg-blue-500/10 text-white' : 'border-[#30363d] bg-[#161b22] text-gray-300 hover:bg-[#21262d]'}`}
+                    className={`flex min-w-[140px] items-center justify-between gap-3 rounded border px-3 py-1.5 text-left text-xs transition-colors ${isActive ? 'border-blue-500/50 bg-blue-500/10 text-white' : 'border-dark-border bg-dark-panel text-gray-300 hover:bg-dark-surface'}`}
                   >
                     <div className="min-w-0">
                       <div className="truncate font-medium">{result.statement_label || `Statement ${index + 1}`}</div>
                       <div className="truncate text-[11px] text-gray-400">{result.statement_kind || 'STATEMENT'}</div>
                     </div>
-                    <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] ${getResultStatusTone(result.status)}`}>
+                    <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[11px] ${getResultStatusTone(result.status)}`}>
                       {secondaryText}
                     </span>
                   </button>
@@ -371,24 +383,26 @@ export function QueryResultsPanel({
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     onClick={onClearCompareBaseline}
-                    className="text-xs text-violet-200 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-violet-500/20 transition-colors"
+                    className="text-xs text-violet-200 hover:text-white bg-dark-surface hover:bg-dark-border px-2 py-1 rounded border border-violet-500/20 transition-colors"
                   >
                     Clear Baseline
                   </button>
-                  <button
+                  <Button
+                    variant="toolbar"
+                    size="md"
                     onClick={onCopyCompareJson}
                     disabled={!compareSummary}
-                    className="text-xs text-gray-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Copy Compare
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="toolbar"
+                    size="md"
                     onClick={onDownloadCompareJson}
                     disabled={!compareSummary}
-                    className="text-xs text-gray-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Download Compare JSON
-                  </button>
+                  </Button>
                 </div>
               </div>
 
@@ -401,8 +415,8 @@ export function QueryResultsPanel({
                     ['Added', compareSummary.added_count],
                     ['Removed', compareSummary.removed_count],
                   ].map(([label, value]) => (
-                    <div key={label} className="rounded border border-[#30363d] bg-[#0d1117] px-3 py-2">
-                      <div className="text-[10px] uppercase tracking-wide text-gray-500">{label}</div>
+                    <div key={label} className="rounded border border-dark-border bg-dark-bg px-3 py-2">
+                      <div className="text-[11px] uppercase tracking-wide text-gray-500">{label}</div>
                       <div className="mt-1 text-sm font-semibold text-gray-200">{value}</div>
                     </div>
                   ))}
@@ -417,7 +431,7 @@ export function QueryResultsPanel({
         </div>
         <div className="flex-1 overflow-auto bg-grid-pattern relative">
           {tabState.isExecuting && (
-            <div className="absolute inset-0 z-30 bg-[#0a0c10]/80 backdrop-blur-sm p-4 flex flex-col gap-3">
+            <div className="absolute inset-0 z-30 bg-dark-canvas/80 backdrop-blur-sm p-4 flex flex-col gap-3">
               <div className="flex items-center gap-4 mb-4">
                 <Skeleton className="h-6 w-24" />
                 <Skeleton className="h-6 w-32" />
@@ -436,7 +450,7 @@ export function QueryResultsPanel({
           )}
           {panelError && (
             <div className="absolute inset-0 p-4 bg-red-950/20 backdrop-blur-sm z-20 flex flex-col items-center justify-center">
-              <div className="bg-[#161b22] border border-red-500/30 rounded-lg p-5 max-w-2xl w-full shadow-2xl">
+              <div className="bg-dark-panel border border-red-500/30 rounded-lg p-5 max-w-2xl w-full shadow-2xl">
                 {activeResult?.statement_label && (
                   <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-2">
                     {activeResult.statement_label}
@@ -458,16 +472,17 @@ export function QueryResultsPanel({
                 {failedSql && (
                   <div className="mt-4 text-sm">
                     <div className="mb-1 text-gray-500 uppercase tracking-wide text-[11px]">Failed SQL</div>
-                    <pre className="max-h-40 overflow-auto rounded border border-[#30363d] bg-[#0d1117] p-3 text-xs text-gray-300 whitespace-pre-wrap break-words">
+                    <pre className="max-h-40 overflow-auto rounded border border-dark-border bg-dark-bg p-3 text-xs text-gray-300 whitespace-pre-wrap break-words">
                       {failedSql}
                     </pre>
                     <div className="mt-2 flex flex-wrap gap-2">
-                      <button
+                      <Button
+                        variant="toolbar"
+                        size="md"
                         onClick={() => void handleCopyText(failedSql, 'Failed SQL copied', 'Failed to copy failed SQL')}
-                        className="text-xs text-gray-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors"
                       >
                         Copy SQL
-                      </button>
+                      </Button>
                       <button
                         onClick={onExplainErrorWithAi}
                         disabled={Boolean(tabState.isExplainingError)}
@@ -492,7 +507,7 @@ export function QueryResultsPanel({
                     {hasSuggestedSql && (
                       <div className="mt-4">
                         <div className="mb-1 text-gray-500 uppercase tracking-wide text-[11px]">Suggested SQL</div>
-                        <pre className="max-h-40 overflow-auto rounded border border-[#30363d] bg-[#0d1117] p-3 text-xs text-gray-300 whitespace-pre-wrap break-words">
+                        <pre className="max-h-40 overflow-auto rounded border border-dark-border bg-dark-bg p-3 text-xs text-gray-300 whitespace-pre-wrap break-words">
                           {suggestedSql}
                         </pre>
                         <div className="mt-2 flex flex-wrap gap-2">
@@ -503,12 +518,13 @@ export function QueryResultsPanel({
                           >
                             {suggestedSqlAlreadyApplied ? 'Already Applied' : 'Apply Suggested SQL'}
                           </button>
-                          <button
+                          <Button
+                            variant="toolbar"
+                            size="md"
                             onClick={() => void handleCopyText(suggestedSql, 'Suggested SQL copied', 'Failed to copy suggested SQL')}
-                            className="text-xs text-gray-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors"
                           >
                             Copy Suggestion
-                          </button>
+                          </Button>
                         </div>
                       </div>
                     )}
@@ -530,12 +546,12 @@ export function QueryResultsPanel({
 
           {!hasActiveResult && !panelError && (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-500 pointer-events-none p-6">
-              <div className="w-16 h-16 bg-[#161b22] rounded-2xl border border-[#30363d] flex items-center justify-center mb-4 shadow-lg">
+              <div className="w-16 h-16 bg-dark-panel rounded-2xl border border-dark-border flex items-center justify-center mb-4 shadow-lg">
                 <Play className="w-8 h-8 text-gray-600" />
               </div>
               <h3 className="text-lg font-medium text-gray-400 mb-2">Awaiting Execution</h3>
               <p className="text-sm text-center max-w-md">
-                Use <kbd className="bg-[#21262d] px-1.5 py-0.5 rounded text-gray-300 mx-1">Cmd/Ctrl + K</kbd> to generate SQL.<br />
+                Use <kbd className="bg-dark-surface px-1.5 py-0.5 rounded text-gray-300 mx-1">Cmd/Ctrl + K</kbd> to generate SQL.<br />
                 Review it, then click <span className="text-green-500">Run</span> to display the results here.
               </p>
             </div>

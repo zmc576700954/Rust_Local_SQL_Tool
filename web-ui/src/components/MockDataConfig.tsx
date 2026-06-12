@@ -62,7 +62,7 @@ export function MockDataConfig({ tableName, rules, onChangeRules }: MockDataConf
   ];
 
   return (
-    <div className="flex flex-col gap-4 bg-[#0d1117] border border-[#30363d] rounded-lg p-4">
+    <div className="flex flex-col gap-4 bg-dark-bg border border-dark-border rounded-lg p-4">
       <h4 className="text-sm font-bold text-gray-300 uppercase tracking-wider mb-2">Field Rules Configuration</h4>
       
       <div className="flex flex-col gap-3">
@@ -72,7 +72,7 @@ export function MockDataConfig({ tableName, rules, onChangeRules }: MockDataConf
           const selectVal = isCustom ? 'custom' : currentVal;
 
           return (
-            <div key={col.column_name} className="flex flex-col gap-1.5 pb-3 border-b border-[#30363d]/50 last:border-0 last:pb-0">
+            <div key={col.column_name} className="flex flex-col gap-1.5 pb-3 border-b border-dark-border/50 last:border-0 last:pb-0">
               <div className="flex items-center gap-2">
                 <span className="font-mono text-sm text-blue-400 font-bold w-32 shrink-0 truncate" title={col.column_name}>{col.column_name}</span>
                 <span className="text-xs text-gray-500 w-24 shrink-0 truncate" title={col.column_type}>{col.column_type}</span>
@@ -91,7 +91,7 @@ export function MockDataConfig({ tableName, rules, onChangeRules }: MockDataConf
                       onChangeRules({ ...rules, [col.column_name]: val });
                     }
                   }}
-                  className="bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-blue-500 w-48 shrink-0"
+                  className="bg-dark-panel border border-dark-border rounded px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-blue-500 w-48 shrink-0"
                 >
                   {commonRules.map(r => (
                     <option key={r.label} value={r.value}>{r.label}</option>
@@ -103,7 +103,7 @@ export function MockDataConfig({ tableName, rules, onChangeRules }: MockDataConf
                     type="text"
                     value={currentVal}
                     onChange={(e) => onChangeRules({ ...rules, [col.column_name]: e.target.value })}
-                    className="flex-1 bg-[#161b22] border border-[#30363d] rounded px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-blue-500 min-w-0"
+                    className="flex-1 bg-dark-panel border border-dark-border rounded px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-blue-500 min-w-0"
                     placeholder="Enter custom regex, enum, or description..."
                   />
                 )}

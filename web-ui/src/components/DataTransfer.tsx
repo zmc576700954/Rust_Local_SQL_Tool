@@ -6,6 +6,7 @@ import { useToast } from './Toast';
 import { dbLevelDisplayName, dbTypeDisplayName } from '../utils/dbCapabilities'
 import { sanitizeForLog } from '../utils'
 import { tr } from '../i18n';
+import { Button } from './ui';
 
 interface DataTransferProps {
   onCancel: () => void;
@@ -288,7 +289,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
               <select
                 value={sourceType}
                 onChange={(e) => setSourceType(e.target.value as any)}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
               >
                 <option value="local_file">{tr('本地文件（CSV/SQL）', 'Local File (CSV/SQL)')}</option>
                 <option value="network_db">{tr('网络数据库', 'Network Database')}</option>
@@ -299,7 +300,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
               <select
                 value={targetDbId}
                 onChange={(e) => setTargetDbId(e.target.value)}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
               >
                 <option value="">{tr('-- 选择目标连接 --', '-- Select Target Connection --')}</option>
                 {dbConnections.map(conn => (
@@ -314,7 +315,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
               <input
                 value={targetTable}
                 onChange={(e) => setTargetTable(e.target.value)}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
                 placeholder={tr('例如 users', 'e.g. users')}
               />
             </div>
@@ -328,7 +329,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
                   type="file"
                   accept=".csv,.txt,.sql"
                   onChange={(e) => setFile(e.target.files?.[0] || null)}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                  className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
                 />
               </div>
               <div className="flex gap-4">
@@ -337,7 +338,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
                   <input
                     value={delimiter}
                     onChange={(e) => setDelimiter(e.target.value)}
-                    className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                    className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
                     placeholder=","
                   />
                 </div>
@@ -346,7 +347,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
                   <select
                     value={encoding}
                     onChange={(e) => setEncoding(e.target.value)}
-                    className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                    className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
                   >
                     <option value="utf-8">UTF-8</option>
                     <option value="gbk">GBK</option>
@@ -362,7 +363,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
                 <select
                   value={sourceDbId}
                   onChange={(e) => setSourceDbId(e.target.value)}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                  className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
                 >
                   <option value="">{tr('-- 选择连接 --', '-- Select Connection --')}</option>
                   {dbConnections.map(conn => (
@@ -377,7 +378,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
                 <input
                   value={sourceTable}
                   onChange={(e) => setSourceTable(e.target.value)}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                  className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
                   placeholder={tr('例如 old_users', 'e.g. old_users')}
                 />
               </div>
@@ -389,23 +390,24 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
             <select
               value={mode}
               onChange={(e) => setMode(e.target.value as any)}
-              className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+              className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
               <option value="Append">{tr('追加（保留原有数据）', 'Append (Keep existing data)')}</option>
               <option value="Replace">{tr('替换（插入前清空）', 'Replace (Truncate before insert)')}</option>
             </select>
           </div>
           
-          <button
+          <Button
+            variant="secondary" size="md"
             onClick={async () => {
               if (await handleSourceNext()) {
                 toast(tr('配置校验通过，请点击下一步。', 'Configuration validated. Click Next.'), 'success');
               }
             }}
-            className="self-start px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white"
+            className="self-start"
           >
             {tr('校验并解析源数据', 'Validate & Parse Source')}
-          </button>
+          </Button>
         </div>
       )
     },
@@ -418,17 +420,17 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
           <div className="text-sm text-gray-300 font-bold">{tr('步骤 2：映射列', 'Step 2: Map Columns')}</div>
           
           {previewData.length > 0 && (
-            <div className="bg-[#0d1117] p-3 rounded border border-[#30363d] overflow-auto max-h-32">
+            <div className="bg-dark-bg p-3 rounded border border-dark-border overflow-auto max-h-32">
               <div className="text-xs text-gray-400 mb-2">{tr('文件预览', 'File Preview')}</div>
               <table className="w-full text-xs text-left">
                 <thead>
                   <tr>
-                    {sourceColumns.map((c, i) => <th key={i} className="px-2 py-1 bg-[#161b22]">{c}</th>)}
+                    {sourceColumns.map((c, i) => <th key={i} className="px-2 py-1 bg-dark-panel">{c}</th>)}
                   </tr>
                 </thead>
                 <tbody>
                   {previewData.map((row, i) => (
-                    <tr key={i} className="border-t border-[#30363d]">
+                    <tr key={i} className="border-t border-dark-border">
                       {row.map((cell, j) => <td key={j} className="px-2 py-1">{cell}</td>)}
                     </tr>
                   ))}
@@ -440,14 +442,14 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
           <div className="flex-1 overflow-auto">
             <table className="w-full text-sm text-left">
               <thead>
-                <tr className="bg-[#161b22] text-gray-400">
+                <tr className="bg-dark-panel text-gray-400">
                   <th className="px-4 py-2 font-medium">{tr('源列', 'Source Column')}</th>
                   <th className="px-4 py-2 font-medium">{tr('目标列', 'Target Column')}</th>
                 </tr>
               </thead>
               <tbody>
                 {sourceColumns.map((col, i) => (
-                  <tr key={i} className="border-b border-[#30363d]">
+                  <tr key={i} className="border-b border-dark-border">
                     <td className="px-4 py-2 text-gray-300">
                       {sourceType === 'network_db' ? (
                         <input
@@ -471,7 +473,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
                         <select
                           value={mappings[col] || ''}
                           onChange={(e) => setMappings({ ...mappings, [col]: e.target.value })}
-                          className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-gray-300 outline-none"
+                          className="w-full bg-dark-bg border border-dark-border rounded px-2 py-1 text-gray-300 outline-none"
                         >
                           <option value="">{tr('-- 忽略 --', '-- Ignore --')}</option>
                           {targetColumns.map(tc => (
@@ -482,7 +484,7 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
                         <input
                           value={mappings[col] || ''}
                           onChange={(e) => setMappings({ ...mappings, [col]: e.target.value })}
-                          className="w-full bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-gray-300 outline-none"
+                          className="w-full bg-dark-bg border border-dark-border rounded px-2 py-1 text-gray-300 outline-none"
                           placeholder={tr('目标列名', 'Target column name')}
                         />
                       )}
@@ -501,16 +503,17 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
               </button>
             )}
           </div>
-          <button
+          <Button
+            variant="secondary" size="md"
             onClick={async () => {
               if (await handleMappingNext()) {
                 toast(tr('映射校验通过，请点击下一步预览。', 'Mapping validated. Click Next to preview.'), 'success');
               }
             }}
-            className="self-start px-4 py-2 bg-[#21262d] border border-[#30363d] rounded hover:bg-[#30363d] text-sm text-white"
+            className="self-start"
           >
             {tr('生成传输脚本', 'Generate Transfer Script')}
-          </button>
+          </Button>
         </div>
       )
     } : null),
@@ -522,14 +525,14 @@ export function DataTransfer({ onCancel }: DataTransferProps) {
         <div className="flex flex-col gap-4 h-full">
           <div className="text-sm text-gray-300 font-bold">{tr('步骤 3：预览传输脚本', 'Step 3: Preview Transfer Script')}</div>
           {transferSummary && (
-            <div className="text-xs text-gray-400 border border-[#30363d] rounded p-3 bg-[#0d1117]">
+            <div className="text-xs text-gray-400 border border-dark-border rounded p-3 bg-dark-bg">
               <div>{tr(`新增记录：${transferSummary.insert_count}`, `Insert records: ${transferSummary.insert_count}`)}</div>
               <div>{tr(`修改记录：${transferSummary.update_count}`, `Update records: ${transferSummary.update_count}`)}</div>
               <div>{tr(`未变化记录：${transferSummary.unchanged_count}`, `Unchanged records: ${transferSummary.unchanged_count}`)}</div>
               <div>{transferSummary.compare_based ? tr('本次传输已基于源/目标连接对比', 'This transfer is compared between source/target connections') : tr('本次传输未启用记录级对比（按映射生成）', 'Record-level compare is not enabled for this transfer')}</div>
             </div>
           )}
-          <div className="flex-1 bg-[#0d1117] border border-[#30363d] rounded overflow-hidden p-2">
+          <div className="flex-1 bg-dark-bg border border-dark-border rounded overflow-hidden p-2">
             <pre className="text-xs text-green-400 font-mono h-full overflow-auto whitespace-pre-wrap">
               {dml || tr('-- 无可执行变更', '-- No changes to execute')}
             </pre>

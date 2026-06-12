@@ -24,7 +24,7 @@ export function SchemaView({ table, dbName, onInsertText }: { table: any, dbName
   if (!table) return null;
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0c10] text-gray-300">
+    <div className="flex flex-col h-full bg-dark-canvas text-gray-300">
       {/* Header Info */}
       <div className="p-4 border-b border-dark-border bg-dark-panel flex items-center gap-3">
         <div className="p-2 bg-dark-bg rounded-md border border-dark-border">
@@ -62,7 +62,7 @@ export function SchemaView({ table, dbName, onInsertText }: { table: any, dbName
       </div>
 
       {/* Content Area */}
-      <div className="flex-1 overflow-auto bg-[#0a0c10]">
+      <div className="flex-1 overflow-auto bg-dark-canvas">
         {activeTab === 'columns' && (
           <table className="w-full text-left text-sm">
             <thead className="bg-dark-panel sticky top-0 shadow-sm text-gray-400 text-xs uppercase tracking-wider">
@@ -76,7 +76,7 @@ export function SchemaView({ table, dbName, onInsertText }: { table: any, dbName
             </thead>
             <tbody className="divide-y divide-dark-border/50">
               {table.columns?.map((col: any, idx: number) => (
-                <tr key={idx} className="hover:bg-[#161b22] transition-colors even:bg-[#0d1117] group">
+                <tr key={idx} className="hover:bg-dark-panel transition-colors even:bg-dark-bg group">
                   <td className="py-2.5 px-4 font-medium text-blue-300 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       {col.column_key === 'PRI' && <Key className="w-3.5 h-3.5 text-yellow-500" />}
@@ -117,7 +117,7 @@ export function SchemaView({ table, dbName, onInsertText }: { table: any, dbName
             </thead>
             <tbody className="divide-y divide-dark-border/50">
               {table.indexes?.map((idx: any, i: number) => (
-                <tr key={i} className="hover:bg-[#161b22] transition-colors even:bg-[#0d1117]">
+                <tr key={i} className="hover:bg-dark-panel transition-colors even:bg-dark-bg">
                   <td className="py-2.5 px-4 font-medium text-gray-200">{idx.index_name}</td>
                   <td className="py-2.5 px-4 text-blue-300">{idx.column_name}</td>
                   <td className="py-2.5 px-4">
@@ -148,7 +148,7 @@ export function SchemaView({ table, dbName, onInsertText }: { table: any, dbName
                   </thead>
                   <tbody className="divide-y divide-dark-border/50">
                     {dataRows.map((row, i) => (
-                      <tr key={i} className="hover:bg-[#161b22] even:bg-[#0d1117]">
+                      <tr key={i} className="hover:bg-dark-panel even:bg-dark-bg">
                         {Object.values(row).map((val: any, j) => (
                           <td key={j} className="py-1.5 px-4 text-gray-300 border-r border-dark-border/50 max-w-[300px] truncate">
                             {val === null ? <span className="text-gray-600 italic">NULL</span> : String(val)}

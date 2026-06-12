@@ -56,31 +56,31 @@ export function ColumnSortMenu({ column, x, y, sorts, setSorts, onOpenPanel, onC
     <div
       ref={ref}
       style={{ left: x, top: y }}
-      className="fixed z-[60] min-w-[180px] bg-[#161b22] border border-[#30363d] rounded shadow-xl py-1 text-xs text-gray-200"
+      className="fixed z-[60] min-w-[180px] bg-dark-panel border border-dark-border rounded shadow-xl py-1 text-xs text-gray-200"
       role="menu"
     >
       <button type="button" onClick={sortAsc}
-        className="w-full text-left px-3 py-1.5 hover:bg-[#21262d]">
+        className="w-full text-left px-3 py-1.5 hover:bg-dark-surface">
         {tr('按此列升序', 'Sort ascending by this column')}
       </button>
       <button type="button" onClick={sortDesc}
-        className="w-full text-left px-3 py-1.5 hover:bg-[#21262d]">
+        className="w-full text-left px-3 py-1.5 hover:bg-dark-surface">
         {tr('按此列降序', 'Sort descending by this column')}
       </button>
       <button type="button" onClick={addToGroup}
-        className="w-full text-left px-3 py-1.5 hover:bg-[#21262d]">
+        className="w-full text-left px-3 py-1.5 hover:bg-dark-surface">
         {tr('加入排序组合', 'Add to sort group')}
       </button>
-      <div className="h-px bg-[#30363d] my-1" />
+      <div className="h-px bg-dark-border my-1" />
       {onOpenPanel && (
         <button type="button" onClick={openPanel}
-          className="w-full text-left px-3 py-1.5 hover:bg-[#21262d]">
+          className="w-full text-left px-3 py-1.5 hover:bg-dark-surface">
           {tr('打开排序面板', 'Open sort panel')}…
         </button>
       )}
       <button type="button" onClick={clearAll}
         disabled={sorts.length === 0}
-        className="w-full text-left px-3 py-1.5 hover:bg-[#21262d] disabled:opacity-40 disabled:hover:bg-transparent text-red-300">
+        className="w-full text-left px-3 py-1.5 hover:bg-dark-surface disabled:opacity-40 disabled:hover:bg-transparent text-red-300">
         {tr('清除全部排序', 'Clear all sorts')}
       </button>
     </div>

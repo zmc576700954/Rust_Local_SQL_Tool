@@ -345,7 +345,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
     const progress = typeof job.progress === 'number' ? job.progress : undefined
     const isError = job.status === 'failed'
     return (
-      <div className={`border rounded-lg p-3 ${isError ? 'border-red-500/30 bg-red-500/10' : 'border-[#30363d] bg-[#0d1117]'}`}>
+      <div className={`border rounded-lg p-3 ${isError ? 'border-red-500/30 bg-red-500/10' : 'border-dark-border bg-dark-bg'}`}>
         <div className="flex items-center justify-between gap-4">
           <div className="text-sm font-medium text-gray-200">Job {job.job_id}</div>
           <div className={`text-xs ${isError ? 'text-red-400' : 'text-gray-400'}`}>{statusLabel(job.status)}</div>
@@ -353,7 +353,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
         {(job.message || progress !== undefined) && (
           <div className="mt-2 flex flex-col gap-2">
             {typeof progress === 'number' && (
-              <div className="w-full h-2 bg-[#21262d] rounded overflow-hidden border border-[#30363d]">
+              <div className="w-full h-2 bg-dark-surface rounded overflow-hidden border border-dark-border">
                 <div className="h-full bg-blue-500/60" style={{ width: `${progress}%` }} />
               </div>
             )}
@@ -374,19 +374,19 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
       isValid,
       content: (
         <div className="flex flex-col gap-4 h-full">
-          <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+          <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
             <div className="text-sm font-medium text-gray-200">恢复 Job</div>
             <div className="mt-2 flex items-center gap-2">
               <input
                 value={resumeJobId}
                 onChange={e => setResumeJobId(e.target.value)}
                 placeholder="输入 job_id"
-                className="flex-1 px-3 py-2 rounded bg-[#0d1117] border border-[#30363d] text-gray-100 text-sm"
+                className="flex-1 px-3 py-2 rounded bg-dark-bg border border-dark-border text-gray-100 text-sm"
               />
               <button
                 onClick={() => startPolling(resumeJobId)}
                 disabled={!resumeJobId.trim() || isLoading}
-                className="px-3 py-2 rounded text-sm font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d]"
+                className="px-3 py-2 rounded text-sm font-medium bg-dark-surface hover:bg-dark-border text-gray-100 border border-dark-border"
               >
                 恢复查看
               </button>
@@ -415,7 +415,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
               <button
                 onClick={handleCheck}
                 disabled={!isValid || isLoading}
-                className="px-3 py-2 rounded text-sm font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d]"
+                className="px-3 py-2 rounded text-sm font-medium bg-dark-surface hover:bg-dark-border text-gray-100 border border-dark-border"
               >
                 检测数据量
               </button>
@@ -432,7 +432,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
           </div>
 
           {checkResult && (
-            <div className="border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+            <div className="border border-dark-border bg-dark-bg rounded-lg p-3">
               <div className="text-sm font-medium text-gray-200">检测结果（tier {checkResult.tier}）</div>
               <div className="mt-2 grid grid-cols-1 gap-2 text-xs">
                 {Object.entries(checkResult.expected_rows || {}).map(([k, expected]) => {
@@ -511,7 +511,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
                 <button
                   onClick={() => setConfirmFill(null)}
                   disabled={isLoading}
-                  className="px-3 py-2 rounded text-sm font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d]"
+                  className="px-3 py-2 rounded text-sm font-medium bg-dark-surface hover:bg-dark-border text-gray-100 border border-dark-border"
                 >
                   取消
                 </button>
@@ -534,7 +534,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
               <select
                 value={sourceDbId}
                 onChange={e => setSourceDbId(e.target.value)}
-                className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                className="bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
               >
                 <option value="" disabled>请选择</option>
                 {dbConnections.map(c => (
@@ -550,7 +550,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
               <select
                 value={targetDbId}
                 onChange={e => setTargetDbId(e.target.value)}
-                className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                className="bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
               >
                 <option value="" disabled>请选择</option>
                 {dbConnections.map(c => (
@@ -566,7 +566,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
               <select
                 value={tier}
                 onChange={e => setTier(e.target.value)}
-                className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                className="bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
               >
                 {tierOptions.map(t => (
                   <option key={String(t?.id)} value={String(t?.id)}>
@@ -621,7 +621,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
                 value={chunkSize}
                 min={1}
                 onChange={e => setChunkSize(Number(e.target.value))}
-                className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                className="bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
               />
             </div>
 
@@ -632,7 +632,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
                 value={maxRows}
                 min={1}
                 onChange={e => setMaxRows(Number(e.target.value))}
-                className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                className="bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
               />
             </div>
           </div>
@@ -652,14 +652,14 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
                 <div className="text-sm font-medium text-gray-200">最终报告摘要</div>
                 <button
                   onClick={() => copyJson(finalPayload)}
-                  className="px-3 py-1.5 rounded bg-[#21262d] border border-[#30363d] hover:bg-[#30363d] text-xs text-gray-200 transition-colors"
+                  className="px-3 py-1.5 rounded bg-dark-surface border border-dark-border hover:bg-dark-border text-xs text-gray-200 transition-colors"
                 >
                   复制 JSON
                 </button>
               </div>
 
               {reportSummary.length > 0 && (
-                <div className="grid grid-cols-2 gap-2 border border-[#30363d] bg-[#0d1117] rounded-lg p-3">
+                <div className="grid grid-cols-2 gap-2 border border-dark-border bg-dark-bg rounded-lg p-3">
                   {reportSummary.map(item => (
                     <div key={item.key} className="flex items-center justify-between gap-3">
                       <div className="text-xs text-gray-400 truncate">{item.key}</div>
@@ -672,7 +672,7 @@ export function PerfSync({ onCancel }: PerfSyncProps) {
               <textarea
                 readOnly
                 value={JSON.stringify(finalPayload, null, 2)}
-                className="w-full min-h-[220px] bg-[#0d1117] border border-[#30363d] rounded p-4 font-mono text-xs text-gray-300 outline-none"
+                className="w-full min-h-[220px] bg-dark-bg border border-dark-border rounded p-4 font-mono text-xs text-gray-300 outline-none"
               />
             </div>
           )}

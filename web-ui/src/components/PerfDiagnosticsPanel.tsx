@@ -1491,9 +1491,9 @@ export function PerfDiagnosticsPanel({
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-[#0a0c10] p-6">
+    <div className="h-full overflow-y-auto bg-dark-canvas p-6">
       <div className="max-w-6xl mx-auto flex flex-col gap-6">
-        <div className="border border-[#30363d] bg-[#161b22] rounded-xl p-5">
+        <div className="border border-dark-border bg-dark-panel rounded-xl p-5">
           <div className="flex items-start justify-between gap-4">
             <div>
               <div className="flex items-center gap-2 text-lg font-bold text-gray-100">
@@ -1504,14 +1504,14 @@ export function PerfDiagnosticsPanel({
                 Run repeatable probes against the current desktop / web runtime path and inspect p50 / p95 latency directly.
               </div>
             </div>
-            <div className="text-xs text-gray-500 border border-[#30363d] rounded-lg px-3 py-2 bg-[#0d1117]">
+            <div className="text-xs text-gray-500 border border-dark-border rounded-lg px-3 py-2 bg-dark-bg">
               Active connection: {selectedConnection?.name || selectedDbId || 'None'}
             </div>
           </div>
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-4">
-          <div className="border border-[#30363d] bg-[#161b22] rounded-xl p-4 flex flex-col gap-4">
+          <div className="border border-dark-border bg-dark-panel rounded-xl p-4 flex flex-col gap-4">
             <div className="text-sm font-semibold text-gray-100">Probe Setup</div>
 
             <label className="flex flex-col gap-1">
@@ -1522,7 +1522,7 @@ export function PerfDiagnosticsPanel({
                   setSelectedDbId(e.target.value)
                   setError('')
                 }}
-                className="bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100"
+                className="bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100"
               >
                 {connections.length === 0 && <option value="">No connection</option>}
                 {connections.map((conn) => (
@@ -1541,7 +1541,7 @@ export function PerfDiagnosticsPanel({
                   setOperation(e.target.value as PerfProbeOperation)
                   setError('')
                 }}
-                className="bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100"
+                className="bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100"
               >
                 {OPERATION_OPTIONS.map((item) => (
                   <option key={item.value} value={item.value}>
@@ -1551,7 +1551,7 @@ export function PerfDiagnosticsPanel({
               </select>
             </label>
 
-            <div className="text-xs text-gray-400 rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-2">
+            <div className="text-xs text-gray-400 rounded-lg border border-dark-border bg-dark-bg px-3 py-2">
               {currentOperation.description}
             </div>
 
@@ -1563,11 +1563,11 @@ export function PerfDiagnosticsPanel({
                 max={30}
                 value={iterations}
                 onChange={(e) => setIterations(Math.max(1, Math.min(30, Number(e.target.value || 1))))}
-                className="bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100"
+                className="bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100"
               />
             </label>
 
-            <div className="rounded-lg border border-[#30363d] bg-[#0d1117] px-3 py-3 flex flex-col gap-3">
+            <div className="rounded-lg border border-dark-border bg-dark-bg px-3 py-3 flex flex-col gap-3">
               <div className="text-xs font-medium text-gray-300">Full Suite Metadata</div>
               <label className="flex flex-col gap-1">
                 <span className="text-[11px] text-gray-500">Run Label</span>
@@ -1575,7 +1575,7 @@ export function PerfDiagnosticsPanel({
                   value={suiteLabel}
                   onChange={(e) => setSuiteLabel(e.target.value)}
                   placeholder="before-index-tuning / rc1 / nightly"
-                  className="bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100"
+                  className="bg-dark-panel border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100"
                 />
               </label>
               <div className="flex flex-wrap gap-2">
@@ -1584,7 +1584,7 @@ export function PerfDiagnosticsPanel({
                     key={preset.value}
                     type="button"
                     onClick={() => setSuiteLabel(preset.value)}
-                    className="px-2.5 py-1 rounded-md border border-[#30363d] bg-[#161b22] text-[11px] text-gray-300 hover:bg-[#21262d]"
+                    className="px-2.5 py-1 rounded-md border border-dark-border bg-dark-panel text-[11px] text-gray-300 hover:bg-dark-surface"
                   >
                     {preset.label}
                   </button>
@@ -1597,7 +1597,7 @@ export function PerfDiagnosticsPanel({
                     value={suiteBuildVersion}
                     onChange={(e) => setSuiteBuildVersion(e.target.value)}
                     placeholder="v0.9.3 / 2026.05.08-rc1"
-                    className="bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100"
+                    className="bg-dark-panel border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100"
                   />
                 </label>
                 <label className="flex flex-col gap-1">
@@ -1606,7 +1606,7 @@ export function PerfDiagnosticsPanel({
                     value={suiteBranchName}
                     onChange={(e) => setSuiteBranchName(e.target.value)}
                     placeholder="codex/perf-pass / a1b2c3d"
-                    className="bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100"
+                    className="bg-dark-panel border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100"
                   />
                 </label>
               </div>
@@ -1616,7 +1616,7 @@ export function PerfDiagnosticsPanel({
                   value={suiteEnvironment}
                   onChange={(e) => setSuiteEnvironment(e.target.value)}
                   placeholder="desktop-tauri / web-local / mysql8-local / win11"
-                  className="bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100"
+                  className="bg-dark-panel border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -1626,7 +1626,7 @@ export function PerfDiagnosticsPanel({
                   onChange={(e) => setSuiteNotes(e.target.value)}
                   rows={3}
                   placeholder="Capture what changed in this run, such as pool reuse, schema cache, or release candidate checks."
-                  className="bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100 resize-y"
+                  className="bg-dark-panel border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100 resize-y"
                 />
               </label>
               <div className="text-[11px] text-gray-500">
@@ -1641,7 +1641,7 @@ export function PerfDiagnosticsPanel({
                   value={sql}
                   onChange={(e) => setSql(e.target.value)}
                   rows={5}
-                  className="bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100 font-mono resize-y"
+                  className="bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100 font-mono resize-y"
                 />
               </label>
             )}
@@ -1654,7 +1654,7 @@ export function PerfDiagnosticsPanel({
                   value={tableName}
                   onChange={(e) => setTableName(e.target.value)}
                   placeholder={isLoadingTables ? 'Loading tables...' : 'Enter table name'}
-                  className="bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100"
+                  className="bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100"
                 />
                 <datalist id="perf-diagnostics-table-list">
                   {tables.map((table) => (
@@ -1705,7 +1705,7 @@ export function PerfDiagnosticsPanel({
               </div>
             )}
 
-            <div className="pt-2 border-t border-[#30363d] flex flex-col gap-3">
+            <div className="pt-2 border-t border-dark-border flex flex-col gap-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-sm font-semibold text-gray-100">Full Suite History</div>
                 <div className="text-[11px] text-gray-500">
@@ -1714,7 +1714,7 @@ export function PerfDiagnosticsPanel({
               </div>
 
               {suiteHistory.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-[#30363d] px-3 py-4 text-xs text-gray-500">
+                <div className="rounded-lg border border-dashed border-dark-border px-3 py-4 text-xs text-gray-500">
                   Run a full suite to keep complete baseline snapshots for version-to-version comparison.
                 </div>
               ) : (
@@ -1731,7 +1731,7 @@ export function PerfDiagnosticsPanel({
                         className={`text-left rounded-xl border px-3 py-3 transition ${
                           report.id === suiteReport?.id
                             ? 'border-emerald-500/40 bg-emerald-500/10'
-                            : 'border-[#30363d] bg-[#0d1117] hover:bg-[#21262d]'
+                            : 'border-dark-border bg-dark-bg hover:bg-dark-surface'
                         }`}
                       >
                         <div className="flex items-start justify-between gap-3">
@@ -1777,7 +1777,7 @@ export function PerfDiagnosticsPanel({
               </div>
 
               {historyRuns.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-[#30363d] px-3 py-4 text-xs text-gray-500">
+                <div className="rounded-lg border border-dashed border-dark-border px-3 py-4 text-xs text-gray-500">
                   Run a probe to start building local perf history for before/after comparisons.
                 </div>
               ) : (
@@ -1790,7 +1790,7 @@ export function PerfDiagnosticsPanel({
                       className={`text-left rounded-xl border px-3 py-3 transition ${
                         entry.id === selectedHistoryId
                           ? 'border-blue-500/40 bg-blue-500/10'
-                          : 'border-[#30363d] bg-[#0d1117] hover:bg-[#21262d]'
+                          : 'border-dark-border bg-dark-bg hover:bg-dark-surface'
                       }`}
                     >
                       <div className="flex items-start justify-between gap-3">
@@ -1815,7 +1815,7 @@ export function PerfDiagnosticsPanel({
             </div>
           </div>
 
-          <div className="border border-[#30363d] bg-[#161b22] rounded-xl p-4 flex flex-col gap-4">
+          <div className="border border-dark-border bg-dark-panel rounded-xl p-4 flex flex-col gap-4">
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-sm font-semibold text-gray-100">
                 <Database className="w-4 h-4 text-blue-400" />
@@ -1827,7 +1827,7 @@ export function PerfDiagnosticsPanel({
                     void handleArchiveSuiteDiffReport()
                   }}
                   disabled={!suiteDiffPayload || isArchivingSuiteDiff}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#30363d] bg-[#0d1117] text-xs text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-dark-border bg-dark-bg text-xs text-gray-200 hover:bg-dark-surface disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
                   {isArchivingSuiteDiff ? 'Archiving Diff...' : 'Archive Diff'}
@@ -1835,7 +1835,7 @@ export function PerfDiagnosticsPanel({
                 <button
                   onClick={handleExportSuiteDiffJson}
                   disabled={!suiteDiffPayload}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#30363d] bg-[#0d1117] text-xs text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-dark-border bg-dark-bg text-xs text-gray-200 hover:bg-dark-surface disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Export Diff JSON
@@ -1843,7 +1843,7 @@ export function PerfDiagnosticsPanel({
                 <button
                   onClick={handleExportSuiteJson}
                   disabled={!suiteReport}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#30363d] bg-[#0d1117] text-xs text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-dark-border bg-dark-bg text-xs text-gray-200 hover:bg-dark-surface disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Export Suite JSON
@@ -1851,7 +1851,7 @@ export function PerfDiagnosticsPanel({
                 <button
                   onClick={handleExportJson}
                   disabled={!result}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#30363d] bg-[#0d1117] text-xs text-gray-200 hover:bg-[#21262d] disabled:opacity-50"
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-dark-border bg-dark-bg text-xs text-gray-200 hover:bg-dark-surface disabled:opacity-50"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Export JSON
@@ -1860,11 +1860,11 @@ export function PerfDiagnosticsPanel({
             </div>
 
             {suiteReport && (
-              <div className="rounded-xl border border-[#30363d] overflow-hidden">
-                <div className="px-4 py-3 bg-[#0d1117] border-b border-[#30363d] text-sm font-semibold text-gray-100">
+              <div className="rounded-xl border border-dark-border overflow-hidden">
+                <div className="px-4 py-3 bg-dark-bg border-b border-dark-border text-sm font-semibold text-gray-100">
                   Selected Full Suite
                 </div>
-                <div className="p-4 bg-[#161b22] flex flex-col gap-4">
+                <div className="p-4 bg-dark-panel flex flex-col gap-4">
                   <div className="text-xs text-gray-400">
                     Status:{' '}
                     <span className={suiteReport.status === 'success' ? 'text-green-300' : 'text-red-300'}>
@@ -1893,7 +1893,7 @@ export function PerfDiagnosticsPanel({
                   </div>
 
                   <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-3">
-                    <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-4 py-3">
+                    <div className="rounded-xl border border-dark-border bg-dark-bg px-4 py-3">
                       <div className="text-xs text-gray-400">
                         Selected suite: <span className="text-gray-200">{formatRecordedAt(suiteReport.recorded_at)}</span>
                       </div>
@@ -1935,7 +1935,7 @@ export function PerfDiagnosticsPanel({
                       )}
                     </div>
 
-                    <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-4 py-3">
+                    <div className="rounded-xl border border-dark-border bg-dark-bg px-4 py-3">
                       <div className="flex items-center justify-between gap-3 mb-2">
                         <div className="text-xs text-gray-400">Compare suite baseline</div>
                         <button
@@ -1953,7 +1953,7 @@ export function PerfDiagnosticsPanel({
                         value={compareSuiteId}
                         onChange={(e) => setCompareSuiteId(e.target.value)}
                         disabled={suiteCompareCandidates.length === 0}
-                        className="w-full bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100 disabled:opacity-50"
+                        className="w-full bg-dark-panel border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100 disabled:opacity-50"
                       >
                         {suiteCompareCandidates.length === 0 && <option value="">No comparable suite</option>}
                         {suiteCompareCandidates.map((report) => (
@@ -1970,7 +1970,7 @@ export function PerfDiagnosticsPanel({
                             type="checkbox"
                             checked={sameConnectionOnly}
                             onChange={(e) => setSameConnectionOnly(e.target.checked)}
-                            className="rounded border-[#30363d] bg-[#161b22]"
+                            className="rounded border-dark-border bg-dark-panel"
                           />
                           Same connection only
                         </label>
@@ -1979,7 +1979,7 @@ export function PerfDiagnosticsPanel({
                             type="checkbox"
                             checked={sameBuildVersionOnly}
                             onChange={(e) => setSameBuildVersionOnly(e.target.checked)}
-                            className="rounded border-[#30363d] bg-[#161b22]"
+                            className="rounded border-dark-border bg-dark-panel"
                           />
                           Same build version only
                         </label>
@@ -2014,31 +2014,31 @@ export function PerfDiagnosticsPanel({
                                 key={filter.value}
                                 type="button"
                                 onClick={() => setSuiteDiffStatusFilter(filter.value)}
-                                className={`px-2 py-1 rounded-md border text-[10px] transition ${
+                                className={`px-2 py-1 rounded-md border text-[11px] transition ${
                                   suiteDiffStatusFilter === filter.value
                                     ? 'border-blue-500/40 bg-blue-500/10 text-blue-200'
-                                    : 'border-[#30363d] bg-[#161b22] text-gray-400 hover:bg-[#21262d]'
+                                    : 'border-dark-border bg-dark-panel text-gray-400 hover:bg-dark-surface'
                                 }`}
                               >
                                 {filter.label}
                               </button>
                             ))}
-                            <label className="flex items-center gap-2 px-2 py-1 rounded-md border border-[#30363d] bg-[#161b22] text-[10px] text-gray-400">
+                            <label className="flex items-center gap-2 px-2 py-1 rounded-md border border-dark-border bg-dark-panel text-[11px] text-gray-400">
                               <input
                                 type="checkbox"
                                 checked={suiteDiffPinnedOnly}
                                 onChange={(e) => setSuiteDiffPinnedOnly(e.target.checked)}
-                                className="rounded border-[#30363d] bg-[#161b22]"
+                                className="rounded border-dark-border bg-dark-panel"
                               />
                               Pinned only
                             </label>
-                            <label className="flex items-center gap-2 px-2 py-1 rounded-md border border-[#30363d] bg-[#161b22] text-[10px] text-gray-400">
+                            <label className="flex items-center gap-2 px-2 py-1 rounded-md border border-dark-border bg-dark-panel text-[11px] text-gray-400">
                               <input
                                 type="checkbox"
                                 checked={suiteDiffCurrentBaselineOnly}
                                 onChange={(e) => setSuiteDiffCurrentBaselineOnly(e.target.checked)}
                                 disabled={!compareSuiteReport}
-                                className="rounded border-[#30363d] bg-[#161b22]"
+                                className="rounded border-dark-border bg-dark-panel"
                               />
                               Current baseline only
                             </label>
@@ -2046,7 +2046,7 @@ export function PerfDiagnosticsPanel({
                               type="button"
                               onClick={handleResetSuiteDiffFilters}
                               disabled={!hasActiveSuiteDiffFilters}
-                              className="px-2 py-1 rounded-md border border-[#30363d] bg-[#161b22] text-[10px] text-gray-400 hover:bg-[#21262d] disabled:opacity-50"
+                              className="px-2 py-1 rounded-md border border-dark-border bg-dark-panel text-[11px] text-gray-400 hover:bg-dark-surface disabled:opacity-50"
                             >
                               Reset filters
                             </button>
@@ -2054,7 +2054,7 @@ export function PerfDiagnosticsPanel({
                               type="button"
                               onClick={handleExportFilteredSuiteDiffHistoryJson}
                               disabled={filteredSuiteDiffHistory.length === 0}
-                              className="px-2 py-1 rounded-md border border-[#30363d] bg-[#161b22] text-[10px] text-gray-400 hover:bg-[#21262d] disabled:opacity-50"
+                              className="px-2 py-1 rounded-md border border-dark-border bg-dark-panel text-[11px] text-gray-400 hover:bg-dark-surface disabled:opacity-50"
                             >
                               Export filtered JSON
                             </button>
@@ -2063,14 +2063,14 @@ export function PerfDiagnosticsPanel({
                             value={suiteDiffSearchQuery}
                             onChange={(e) => setSuiteDiffSearchQuery(e.target.value)}
                             placeholder="Search baseline label / suite id / archive path"
-                            className="w-full mb-2 bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-[11px] text-gray-100"
+                            className="w-full mb-2 bg-dark-panel border border-dark-border rounded-lg px-3 py-2 text-[11px] text-gray-100"
                           />
                           {activeSuiteDiffFilterTags.length > 0 && (
                             <div className="flex flex-wrap gap-2 mb-2">
                               {activeSuiteDiffFilterTags.map((tag) => (
                                 <div
                                   key={tag}
-                                  className="px-2 py-1 rounded-md border border-[#30363d] bg-[#0d1117] text-[10px] text-gray-400"
+                                  className="px-2 py-1 rounded-md border border-dark-border bg-dark-bg text-[11px] text-gray-400"
                                 >
                                   {tag}
                                 </div>
@@ -2091,7 +2091,7 @@ export function PerfDiagnosticsPanel({
                                   className={`rounded-lg border px-2.5 py-2 transition ${
                                     item.id === archivedSuiteDiff?.id
                                       ? 'border-blue-500/40 bg-blue-500/10'
-                                      : 'border-[#30363d] bg-[#161b22]'
+                                      : 'border-dark-border bg-dark-panel'
                                   }`}
                                 >
                                   <button
@@ -2106,7 +2106,7 @@ export function PerfDiagnosticsPanel({
                                         {item.baseline_suite_label || item.baseline_suite_id}
                                       </div>
                                       <div
-                                        className={`text-[10px] uppercase ${
+                                        className={`text-[11px] uppercase ${
                                           item.gate_status === 'pass'
                                             ? 'text-green-300'
                                             : item.gate_status === 'fail'
@@ -2117,7 +2117,7 @@ export function PerfDiagnosticsPanel({
                                         {(item.gate_status || 'unknown').toUpperCase()}
                                       </div>
                                     </div>
-                                    <div className="text-[10px] text-gray-500 mt-1">
+                                    <div className="text-[11px] text-gray-500 mt-1">
                                       {formatRecordedAt(item.recorded_at)}
                                       {item.baseline_scope ? ` | ${item.baseline_scope}` : ''}
                                     </div>
@@ -2128,7 +2128,7 @@ export function PerfDiagnosticsPanel({
                                       onClick={() =>
                                         setExpandedSuiteDiffId((prev) => (prev === item.id ? '' : item.id))
                                       }
-                                      className="px-2 py-1 rounded-md border border-[#30363d] bg-[#0d1117] text-[10px] text-gray-400 hover:bg-[#21262d]"
+                                      className="px-2 py-1 rounded-md border border-dark-border bg-dark-bg text-[11px] text-gray-400 hover:bg-dark-surface"
                                     >
                                       {expandedSuiteDiffId === item.id ? 'Hide details' : 'Details'}
                                     </button>
@@ -2140,7 +2140,7 @@ export function PerfDiagnosticsPanel({
                                           'suite ids'
                                         )
                                       }}
-                                      className="px-2 py-1 rounded-md border border-[#30363d] bg-[#0d1117] text-[10px] text-gray-400 hover:bg-[#21262d]"
+                                      className="px-2 py-1 rounded-md border border-dark-border bg-dark-bg text-[11px] text-gray-400 hover:bg-dark-surface"
                                     >
                                       Copy IDs
                                     </button>
@@ -2150,20 +2150,20 @@ export function PerfDiagnosticsPanel({
                                         void handleCopySuiteDiffField(item.archive_path || '', 'archive path')
                                       }}
                                       disabled={!item.archive_path}
-                                      className="px-2 py-1 rounded-md border border-[#30363d] bg-[#0d1117] text-[10px] text-gray-400 hover:bg-[#21262d] disabled:opacity-50"
+                                      className="px-2 py-1 rounded-md border border-dark-border bg-dark-bg text-[11px] text-gray-400 hover:bg-dark-surface disabled:opacity-50"
                                     >
                                       Copy path
                                     </button>
                                     <button
                                       type="button"
                                       onClick={() => handleExportSuiteDiffItemJson(item)}
-                                      className="px-2 py-1 rounded-md border border-[#30363d] bg-[#0d1117] text-[10px] text-gray-400 hover:bg-[#21262d]"
+                                      className="px-2 py-1 rounded-md border border-dark-border bg-dark-bg text-[11px] text-gray-400 hover:bg-dark-surface"
                                     >
                                       Export item
                                     </button>
                                   </div>
                                   {expandedSuiteDiffId === item.id && (
-                                    <div className="mt-2 rounded-md border border-[#30363d] bg-[#0d1117] px-2.5 py-2 text-[10px] text-gray-400 break-all">
+                                    <div className="mt-2 rounded-md border border-dark-border bg-dark-bg px-2.5 py-2 text-[11px] text-gray-400 break-all">
                                       <div>
                                         Current suite:
                                         <span className="text-gray-300">
@@ -2205,7 +2205,7 @@ export function PerfDiagnosticsPanel({
                                           onClick={() => {
                                             void handleCopySuiteDiffField(item.current_suite_id, 'current suite id')
                                           }}
-                                          className="px-2 py-1 rounded-md border border-[#30363d] bg-[#161b22] text-[10px] text-gray-400 hover:bg-[#21262d]"
+                                          className="px-2 py-1 rounded-md border border-dark-border bg-dark-panel text-[11px] text-gray-400 hover:bg-dark-surface"
                                         >
                                           Copy current id
                                         </button>
@@ -2214,7 +2214,7 @@ export function PerfDiagnosticsPanel({
                                           onClick={() => {
                                             void handleCopySuiteDiffField(item.baseline_suite_id, 'baseline suite id')
                                           }}
-                                          className="px-2 py-1 rounded-md border border-[#30363d] bg-[#161b22] text-[10px] text-gray-400 hover:bg-[#21262d]"
+                                          className="px-2 py-1 rounded-md border border-dark-border bg-dark-panel text-[11px] text-gray-400 hover:bg-dark-surface"
                                         >
                                           Copy baseline id
                                         </button>
@@ -2232,7 +2232,7 @@ export function PerfDiagnosticsPanel({
 
                   {suiteBudgetSummary && (
                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                      <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-3 py-3">
+                      <div className="rounded-xl border border-dark-border bg-dark-bg px-3 py-3">
                         <div className="text-[11px] uppercase tracking-wide text-gray-500">Operations</div>
                         <div className="text-sm font-semibold text-gray-100 mt-1">{suiteReport.results.length}</div>
                       </div>
@@ -2244,7 +2244,7 @@ export function PerfDiagnosticsPanel({
                         <div className="text-[11px] uppercase tracking-wide text-gray-500">Budget Fail</div>
                         <div className="text-sm font-semibold text-gray-100 mt-1">{suiteBudgetSummary.failCount}</div>
                       </div>
-                      <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-3 py-3">
+                      <div className="rounded-xl border border-dark-border bg-dark-bg px-3 py-3">
                         <div className="text-[11px] uppercase tracking-wide text-gray-500">Budgeted Ops</div>
                         <div className="text-sm font-semibold text-gray-100 mt-1">{suiteBudgetSummary.totalCount}</div>
                       </div>
@@ -2268,15 +2268,15 @@ export function PerfDiagnosticsPanel({
                         </div>
                         <div className="text-[11px] text-gray-400 mt-1">{suiteGateSummary.message}</div>
                       </div>
-                      <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-3 py-3">
+                      <div className="rounded-xl border border-dark-border bg-dark-bg px-3 py-3">
                         <div className="text-[11px] uppercase tracking-wide text-gray-500">Budget Fails</div>
                         <div className="text-sm font-semibold text-gray-100 mt-1">{suiteGateSummary.budgetFailCount}</div>
                       </div>
-                      <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-3 py-3">
+                      <div className="rounded-xl border border-dark-border bg-dark-bg px-3 py-3">
                         <div className="text-[11px] uppercase tracking-wide text-gray-500">Baseline Regressions</div>
                         <div className="text-sm font-semibold text-gray-100 mt-1">{suiteGateSummary.regressionCount}</div>
                       </div>
-                      <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-3 py-3">
+                      <div className="rounded-xl border border-dark-border bg-dark-bg px-3 py-3">
                         <div className="text-[11px] uppercase tracking-wide text-gray-500">Baseline Scope</div>
                         <div className="text-sm font-semibold text-gray-100 mt-1">
                           {suiteGateSummary.baselineScope === 'pinned'
@@ -2301,11 +2301,11 @@ export function PerfDiagnosticsPanel({
                   )}
 
                   {compareSuiteReport && (
-                    <div className="rounded-xl border border-[#30363d] overflow-hidden">
-                      <div className="px-4 py-3 bg-[#0d1117] border-b border-[#30363d] text-sm font-semibold text-gray-100">
+                    <div className="rounded-xl border border-dark-border overflow-hidden">
+                      <div className="px-4 py-3 bg-dark-bg border-b border-dark-border text-sm font-semibold text-gray-100">
                         Suite Comparison
                       </div>
-                      <div className="p-4 bg-[#161b22] flex flex-col gap-4">
+                      <div className="p-4 bg-dark-panel flex flex-col gap-4">
                         <div className="grid grid-cols-3 gap-3">
                           <div className="rounded-xl border border-green-500/40 bg-green-500/10 px-3 py-3">
                             <div className="text-[11px] uppercase tracking-wide text-gray-500">Faster p50</div>
@@ -2315,15 +2315,15 @@ export function PerfDiagnosticsPanel({
                             <div className="text-[11px] uppercase tracking-wide text-gray-500">Slower p50</div>
                             <div className="text-sm font-semibold text-gray-100 mt-1">{suiteComparisonSummary.slowerCount}</div>
                           </div>
-                          <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-3 py-3">
+                          <div className="rounded-xl border border-dark-border bg-dark-bg px-3 py-3">
                             <div className="text-[11px] uppercase tracking-wide text-gray-500">Comparable Ops</div>
                             <div className="text-sm font-semibold text-gray-100 mt-1">{suiteComparisonSummary.comparableCount}</div>
                           </div>
                         </div>
 
-                        <div className="rounded-xl border border-[#30363d] overflow-hidden">
+                        <div className="rounded-xl border border-dark-border overflow-hidden">
                           <table className="w-full text-sm">
-                            <thead className="bg-[#0d1117]">
+                            <thead className="bg-dark-bg">
                               <tr className="text-left text-gray-400">
                                 <th className="px-4 py-2 font-medium">Operation</th>
                                 <th className="px-4 py-2 font-medium">p50 Δ</th>
@@ -2333,7 +2333,7 @@ export function PerfDiagnosticsPanel({
                             </thead>
                             <tbody>
                               {suiteComparisonRows.map((row) => (
-                                <tr key={row.operation} className="border-t border-[#30363d]">
+                                <tr key={row.operation} className="border-t border-dark-border">
                                   <td className="px-4 py-2 text-gray-100">{row.operation}</td>
                                   <td className={`px-4 py-2 ${row.p50.status === 'pass' ? 'text-green-300' : row.p50.status === 'fail' ? 'text-red-300' : 'text-gray-300'}`}>
                                     {row.p50.value}
@@ -2393,9 +2393,9 @@ export function PerfDiagnosticsPanel({
                     </div>
                   )}
 
-                  <div className="rounded-xl border border-[#30363d] overflow-hidden">
+                  <div className="rounded-xl border border-dark-border overflow-hidden">
                     <table className="w-full text-sm">
-                      <thead className="bg-[#0d1117]">
+                      <thead className="bg-dark-bg">
                         <tr className="text-left text-gray-400">
                           <th className="px-4 py-2 font-medium">Operation</th>
                           <th className="px-4 py-2 font-medium">p50</th>
@@ -2405,7 +2405,7 @@ export function PerfDiagnosticsPanel({
                       </thead>
                       <tbody>
                         {suiteReport.results.map((entry) => (
-                          <tr key={entry.id} className="border-t border-[#30363d]">
+                          <tr key={entry.id} className="border-t border-dark-border">
                             <td className="px-4 py-2 text-gray-100">{entry.operation}</td>
                             <td className="px-4 py-2 text-gray-300">{metricValue(entry.result.p50_ms)}</td>
                             <td className="px-4 py-2 text-gray-300">{metricValue(entry.result.p95_ms)}</td>
@@ -2422,7 +2422,7 @@ export function PerfDiagnosticsPanel({
             )}
 
             {!result && !isRunning && !suiteReport && (
-              <div className="flex-1 flex items-center justify-center rounded-xl border border-dashed border-[#30363d] text-sm text-gray-500 min-h-[320px]">
+              <div className="flex-1 flex items-center justify-center rounded-xl border border-dashed border-dark-border text-sm text-gray-500 min-h-[320px]">
                 Run a probe to capture p50 / p95 and raw sample timings.
               </div>
             )}
@@ -2430,7 +2430,7 @@ export function PerfDiagnosticsPanel({
             {result && (
               <>
                 <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-3">
-                  <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-4 py-3">
+                  <div className="rounded-xl border border-dark-border bg-dark-bg px-4 py-3">
                     <div className="text-xs text-gray-400">
                       Operation: <span className="text-gray-200">{result.operation || operation}</span>
                       {activeHistoryEntry?.connection_name && (
@@ -2469,13 +2469,13 @@ export function PerfDiagnosticsPanel({
                     )}
                   </div>
 
-                  <div className="rounded-xl border border-[#30363d] bg-[#0d1117] px-4 py-3">
+                  <div className="rounded-xl border border-dark-border bg-dark-bg px-4 py-3">
                     <div className="text-xs text-gray-400 mb-2">Compare to baseline</div>
                     <select
                       value={compareBaselineId}
                       onChange={(e) => setCompareBaselineId(e.target.value)}
                       disabled={compareCandidates.length === 0}
-                      className="w-full bg-[#161b22] border border-[#30363d] rounded-lg px-3 py-2 text-sm text-gray-100 disabled:opacity-50"
+                      className="w-full bg-dark-panel border border-dark-border rounded-lg px-3 py-2 text-sm text-gray-100 disabled:opacity-50"
                     >
                       {compareCandidates.length === 0 && <option value="">No baseline for this operation</option>}
                       {compareCandidates.map((entry) => (
@@ -2522,7 +2522,7 @@ export function PerfDiagnosticsPanel({
                           ? 'border-green-500/40 bg-green-500/10'
                           : item.status === 'fail'
                             ? 'border-red-500/40 bg-red-500/10'
-                            : 'border-[#30363d] bg-[#0d1117]'
+                            : 'border-dark-border bg-dark-bg'
                       }`}
                     >
                       <div className="text-[11px] uppercase tracking-wide text-gray-500">{item.label}</div>
@@ -2542,11 +2542,11 @@ export function PerfDiagnosticsPanel({
                 </div>
 
                 {compareBaseline && (
-                  <div className="rounded-xl border border-[#30363d] overflow-hidden">
-                    <div className="px-4 py-3 bg-[#0d1117] border-b border-[#30363d] text-sm font-semibold text-gray-100">
+                  <div className="rounded-xl border border-dark-border overflow-hidden">
+                    <div className="px-4 py-3 bg-dark-bg border-b border-dark-border text-sm font-semibold text-gray-100">
                       Baseline Comparison
                     </div>
-                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 p-4 bg-[#161b22]">
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 p-4 bg-dark-panel">
                       {[
                         {
                           label: 'p50 Δ',
@@ -2572,7 +2572,7 @@ export function PerfDiagnosticsPanel({
                               ? 'border-green-500/40 bg-green-500/10'
                               : item.status === 'fail'
                                 ? 'border-red-500/40 bg-red-500/10'
-                                : 'border-[#30363d] bg-[#0d1117]'
+                                : 'border-dark-border bg-dark-bg'
                           }`}
                         >
                           <div className="text-[11px] uppercase tracking-wide text-gray-500">{item.label}</div>
@@ -2581,7 +2581,7 @@ export function PerfDiagnosticsPanel({
                         </div>
                       ))}
                     </div>
-                    <div className="px-4 py-3 border-t border-[#30363d] bg-[#0d1117] text-xs text-gray-500">
+                    <div className="px-4 py-3 border-t border-dark-border bg-dark-bg text-xs text-gray-500">
                       Baseline: {formatRecordedAt(compareBaseline.recorded_at)}
                       {compareBaseline.connection_name && (
                         <>
@@ -2593,13 +2593,13 @@ export function PerfDiagnosticsPanel({
                   </div>
                 )}
 
-                <div className="rounded-xl border border-[#30363d] overflow-hidden">
-                  <div className="px-4 py-3 bg-[#0d1117] border-b border-[#30363d] text-sm font-semibold text-gray-100">
+                <div className="rounded-xl border border-dark-border overflow-hidden">
+                  <div className="px-4 py-3 bg-dark-bg border-b border-dark-border text-sm font-semibold text-gray-100">
                     Raw Samples
                   </div>
                   <div className="max-h-[360px] overflow-auto">
                     <table className="w-full text-sm">
-                      <thead className="bg-[#161b22] sticky top-0">
+                      <thead className="bg-dark-panel sticky top-0">
                         <tr className="text-left text-gray-400">
                           <th className="px-4 py-2 font-medium">#</th>
                           <th className="px-4 py-2 font-medium">Duration</th>
@@ -2608,7 +2608,7 @@ export function PerfDiagnosticsPanel({
                       </thead>
                       <tbody>
                         {(result.samples || []).map((sample) => (
-                          <tr key={`${sample.iteration}-${sample.duration_ms}`} className="border-t border-[#30363d]">
+                          <tr key={`${sample.iteration}-${sample.duration_ms}`} className="border-t border-dark-border">
                             <td className="px-4 py-2 text-gray-300">{sample.iteration || '-'}</td>
                             <td className="px-4 py-2 text-gray-100">{metricValue(sample.duration_ms)}</td>
                             <td className="px-4 py-2 text-gray-300">

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Play } from 'lucide-react';
+import { ModalShell } from './ui';
 import { api, JOB_POLL_INTERVAL_MS } from '../api';
 import { useToast } from './Toast';
 import { MockDataConfig } from './MockDataConfig';
@@ -198,154 +199,73 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
 
   if (type === 'schema-sync') {
     return (
-      <AnimatePresence>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            className="w-full max-w-4xl h-[85vh]"
-          >
-            <StructureSync onCancel={onClose} />
-          </motion.div>
-        </div>
-      </AnimatePresence>
+      <ModalShell isOpen={true} onClose={onClose} maxWidth="max-w-4xl" padding={false}>
+        <StructureSync onCancel={onClose} />
+      </ModalShell>
     );
   }
 
   if (type === 'data-sync') {
     return (
-      <AnimatePresence>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            className="w-full max-w-4xl h-[85vh]"
-          >
-            <DataSync onCancel={onClose} />
-          </motion.div>
-        </div>
-      </AnimatePresence>
+      <ModalShell isOpen={true} onClose={onClose} maxWidth="max-w-4xl" padding={false}>
+        <DataSync onCancel={onClose} />
+      </ModalShell>
     );
   }
 
   if (type === 'data-transfer') {
     return (
-      <AnimatePresence>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            className="w-full max-w-4xl h-[85vh]"
-          >
-            <DataTransfer onCancel={onClose} />
-          </motion.div>
-        </div>
-      </AnimatePresence>
+      <ModalShell isOpen={true} onClose={onClose} maxWidth="max-w-4xl" padding={false}>
+        <DataTransfer onCancel={onClose} />
+      </ModalShell>
     );
   }
 
   if (type === 'perf-sync') {
     return (
-      <AnimatePresence>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            className="w-full max-w-4xl h-[85vh]"
-          >
-            <PerfSync onCancel={onClose} />
-          </motion.div>
-        </div>
-      </AnimatePresence>
+      <ModalShell isOpen={true} onClose={onClose} maxWidth="max-w-4xl" padding={false}>
+        <PerfSync onCancel={onClose} />
+      </ModalShell>
     );
   }
 
   if (type === 'go-live') {
     return (
-      <AnimatePresence>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            className="w-full max-w-4xl h-[85vh]"
-          >
-            <GoLive onCancel={onClose} />
-          </motion.div>
-        </div>
-      </AnimatePresence>
+      <ModalShell isOpen={true} onClose={onClose} maxWidth="max-w-4xl" padding={false}>
+        <GoLive onCancel={onClose} />
+      </ModalShell>
     );
   }
 
   if (type === 'db-security') {
     return (
-      <AnimatePresence>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            className="w-full max-w-5xl h-[85vh]"
-          >
-            <DbSecurityManager onCancel={onClose} />
-          </motion.div>
-        </div>
-      </AnimatePresence>
+      <ModalShell isOpen={true} onClose={onClose} maxWidth="max-w-5xl" padding={false}>
+        <DbSecurityManager onCancel={onClose} />
+      </ModalShell>
     );
   }
 
   if (type === 'db-events') {
     return (
-      <AnimatePresence>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            className="w-full max-w-6xl h-[85vh]"
-          >
-            <DbEventsTriggers onCancel={onClose} />
-          </motion.div>
-        </div>
-      </AnimatePresence>
+      <ModalShell isOpen={true} onClose={onClose} maxWidth="max-w-6xl" padding={false}>
+        <DbEventsTriggers onCancel={onClose} />
+      </ModalShell>
     );
   }
 
   if (type === 'model-compare') {
     return (
-      <AnimatePresence>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            className="w-full max-w-6xl h-[85vh]"
-          >
-            <ModelCompare onCancel={onClose} />
-          </motion.div>
-        </div>
-      </AnimatePresence>
+      <ModalShell isOpen={true} onClose={onClose} maxWidth="max-w-6xl" padding={false}>
+        <ModelCompare onCancel={onClose} />
+      </ModalShell>
     );
   }
 
   if (type === 'visual-sync') {
     return (
-      <AnimatePresence>
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            className="w-full max-w-6xl h-[85vh]"
-          >
-            <VisualSyncWizard onCancel={onClose} />
-          </motion.div>
-        </div>
-      </AnimatePresence>
+      <ModalShell isOpen={true} onClose={onClose} maxWidth="max-w-6xl" padding={false}>
+        <VisualSyncWizard onCancel={onClose} />
+      </ModalShell>
     );
   }
 
@@ -356,9 +276,9 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
           initial={{ scale: 0.95, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.95, opacity: 0 }}
-          className="bg-[#161b22] border border-[#30363d] rounded-xl shadow-2xl max-w-2xl w-full mx-4 flex flex-col max-h-[80vh]"
+          className="bg-dark-panel border border-dark-border rounded-xl shadow-2xl max-w-2xl w-full mx-4 flex flex-col max-h-[80vh]"
         >
-          <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117] shrink-0">
+          <div className="px-6 py-4 border-b border-dark-border flex items-center justify-between bg-dark-bg shrink-0">
             <h3 className="text-gray-200 font-bold text-lg">{title}</h3>
             <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors">
               <X className="w-5 h-5" />
@@ -374,7 +294,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                     type="number" 
                     value={rowCount} 
                     onChange={(e) => setRowCount(Number(e.target.value))}
-                    className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1 text-sm text-white focus:outline-none focus:border-blue-500 w-24"
+                    className="bg-dark-bg border border-dark-border rounded px-3 py-1 text-sm text-white focus:outline-none focus:border-blue-500 w-24"
                     min="1"
                     max="1000"
                   />
@@ -388,18 +308,18 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
             )}
             {type === 'export' && (
               <div className="flex flex-col gap-4">
-                <div className="bg-[#0d1117] border border-[#30363d] rounded p-3">
+                <div className="bg-dark-bg border border-dark-border rounded p-3">
                   <div className="text-xs text-gray-400">恢复 Export Job</div>
                   <div className="mt-2 flex items-center gap-2">
                     <input
                       value={exportResumeJobId}
                       onChange={e => setExportResumeJobId(e.target.value)}
                       placeholder="输入 job_id"
-                      className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+                      className="flex-1 bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                       disabled={exportJob?.status === 'running' || loading}
                     />
                     <button
-                      className="px-3 py-2 rounded border border-[#30363d] hover:bg-[#30363d] text-sm text-gray-200"
+                      className="px-3 py-2 rounded border border-dark-border hover:bg-dark-border text-sm text-gray-200"
                       onClick={resumeExportJob}
                       disabled={!exportResumeJobId.trim() || exportJob?.status === 'running' || loading}
                     >
@@ -429,7 +349,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                   <select 
                     value={exportType} 
                     onChange={(e) => setExportType(e.target.value)}
-                    className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1 text-sm text-white focus:outline-none focus:border-blue-500"
+                    className="bg-dark-bg border border-dark-border rounded px-3 py-1 text-sm text-white focus:outline-none focus:border-blue-500"
                     disabled={!!exportJobId && exportJob?.status === 'running'}
                   >
                     <option value="txt">TXT</option>
@@ -448,7 +368,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                     <input
                       value={exportPrimaryKey}
                       onChange={(e) => setExportPrimaryKey(e.target.value)}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+                      className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                       placeholder="id"
                       disabled={!!exportJobId && exportJob?.status === 'running'}
                     />
@@ -459,7 +379,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                       <input
                         value={exportPkStart}
                         onChange={(e) => setExportPkStart(e.target.value)}
-                        className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+                        className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                         placeholder="1"
                         disabled={!!exportJobId && exportJob?.status === 'running'}
                       />
@@ -469,7 +389,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                       <input
                         value={exportPkEnd}
                         onChange={(e) => setExportPkEnd(e.target.value)}
-                        className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+                        className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                         placeholder="1000"
                         disabled={!!exportJobId && exportJob?.status === 'running'}
                       />
@@ -482,7 +402,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                   <textarea
                     value={exportWhere}
                     onChange={(e) => setExportWhere(e.target.value)}
-                    className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500 min-h-[70px]"
+                    className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500 min-h-[70px]"
                     placeholder="status = 1"
                     disabled={!!exportJobId && exportJob?.status === 'running'}
                   />
@@ -494,7 +414,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                     <input
                       value={exportWindowLimit}
                       onChange={(e) => setExportWindowLimit(e.target.value)}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+                      className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                       placeholder="10000"
                       disabled={!!exportJobId && exportJob?.status === 'running'}
                     />
@@ -504,7 +424,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                     <input
                       value={exportWindowOffset}
                       onChange={(e) => setExportWindowOffset(e.target.value)}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+                      className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
                       placeholder="0"
                       disabled={!!exportJobId && exportJob?.status === 'running'}
                     />
@@ -512,7 +432,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                 </div>
 
                 {exportJobId && (
-                  <div className="bg-[#0d1117] border border-[#30363d] rounded p-3 text-xs text-gray-300">
+                  <div className="bg-dark-bg border border-dark-border rounded p-3 text-xs text-gray-300">
                     <div className="flex items-center justify-between">
                       <div>Job: <span className="text-white">{exportJobId}</span></div>
                       <div className="text-gray-400">{exportJob?.status}</div>
@@ -522,21 +442,21 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                     </div>
                     <div className="mt-3 flex gap-2 justify-end">
                       <button
-                        className="px-3 py-1 rounded border border-[#30363d] hover:bg-[#30363d]"
+                        className="px-3 py-1 rounded border border-dark-border hover:bg-dark-border"
                         onClick={() => downloadExportArtifact('data')}
                         disabled={exportJob?.status !== 'completed'}
                       >
                         {tr('下载数据', 'Download Data')}
                       </button>
                       <button
-                        className="px-3 py-1 rounded border border-[#30363d] hover:bg-[#30363d]"
+                        className="px-3 py-1 rounded border border-dark-border hover:bg-dark-border"
                         onClick={() => downloadExportArtifact('manifest')}
                         disabled={exportJob?.status !== 'completed'}
                       >
                         {tr('下载清单', 'Download Manifest')}
                       </button>
                       <button
-                        className="px-3 py-1 rounded border border-[#30363d] hover:bg-[#30363d] text-red-300"
+                        className="px-3 py-1 rounded border border-dark-border hover:bg-dark-border text-red-300"
                         onClick={cancelExportJob}
                         disabled={exportJob?.status !== 'running'}
                       >
@@ -569,7 +489,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                       type="text" 
                       value={paramValues[param] || ''} 
                       onChange={(e) => setParamValues({ ...paramValues, [param]: e.target.value })}
-                      className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 w-full"
+                      className="bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 w-full"
                       placeholder={`Value for :${param}`}
                     />
                   </div>
@@ -586,11 +506,11 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
                       <textarea 
                         readOnly 
                         value={result} 
-                        className="w-full flex-1 min-h-[200px] bg-[#0d1117] border border-[#30363d] rounded p-4 font-mono text-sm text-gray-300 outline-none"
+                        className="w-full flex-1 min-h-[200px] bg-dark-bg border border-dark-border rounded p-4 font-mono text-sm text-gray-300 outline-none"
                       />
                       <button 
                         onClick={handleDownload}
-                        className="self-end px-4 py-2 mt-2 rounded bg-[#21262d] border border-[#30363d] hover:bg-[#30363d] text-sm text-gray-300 transition-colors"
+                        className="self-end px-4 py-2 mt-2 rounded bg-dark-surface border border-dark-border hover:bg-dark-border text-sm text-gray-300 transition-colors"
                       >
                         Download Result
                       </button>
@@ -606,7 +526,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
           </div>
 
           {type !== 'import' && (
-            <div className="bg-[#0d1117] px-6 py-4 flex justify-end border-t border-[#30363d] shrink-0">
+            <div className="bg-dark-bg px-6 py-4 flex justify-end border-t border-dark-border shrink-0">
               <button
                 onClick={handleAction}
                 disabled={loading || (type === 'export' && exportJob?.status === 'running')}

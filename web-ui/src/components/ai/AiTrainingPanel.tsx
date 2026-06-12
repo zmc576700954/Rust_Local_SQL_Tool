@@ -119,30 +119,30 @@ export function AiTrainingPanel({ onInsertSql }: AiTrainingPanelProps) {
   const filteredItems = items.filter(i => i.knowledge_type === activeTab);
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0c10] text-gray-300">
-      <div className="p-4 border-b border-[#30363d] bg-[#0d1117] flex items-center gap-2">
+    <div className="flex flex-col h-full bg-dark-canvas text-gray-300">
+      <div className="p-4 border-b border-dark-border bg-dark-bg flex items-center gap-2">
         <Sparkles className="w-5 h-5 text-purple-400" />
         <h2 className="font-semibold text-gray-200">{tr('AI 知识库', 'AI Knowledge Base')}</h2>
       </div>
       
-      <div className="flex border-b border-[#30363d] bg-[#0d1117] flex-wrap">
+      <div className="flex border-b border-dark-border bg-dark-bg flex-wrap">
         <button
           onClick={() => setActiveTab('documentation')}
-          className={`flex-1 py-2 px-1 text-xs font-medium flex items-center justify-center gap-1 ${activeTab === 'documentation' ? 'text-purple-400 border-b-2 border-purple-500 bg-[#161b22]' : 'text-gray-400 hover:text-gray-200 hover:bg-[#161b22]'}`}
+          className={`flex-1 py-2 px-1 text-xs font-medium flex items-center justify-center gap-1 ${activeTab === 'documentation' ? 'text-purple-400 border-b-2 border-purple-500 bg-dark-panel' : 'text-gray-400 hover:text-gray-200 hover:bg-dark-panel'}`}
         >
           <FileText className="w-3.5 h-3.5" />
           {tr('文档', 'Doc')}
         </button>
         <button
           onClick={() => setActiveTab('sql')}
-          className={`flex-1 py-2 px-1 text-xs font-medium flex items-center justify-center gap-1 ${activeTab === 'sql' ? 'text-blue-400 border-b-2 border-blue-500 bg-[#161b22]' : 'text-gray-400 hover:text-gray-200 hover:bg-[#161b22]'}`}
+          className={`flex-1 py-2 px-1 text-xs font-medium flex items-center justify-center gap-1 ${activeTab === 'sql' ? 'text-blue-400 border-b-2 border-blue-500 bg-dark-panel' : 'text-gray-400 hover:text-gray-200 hover:bg-dark-panel'}`}
         >
           <Code className="w-3.5 h-3.5" />
           {tr('片段', 'Snippets')}
         </button>
         <button
           onClick={() => setActiveTab('ddl')}
-          className={`flex-1 py-2 px-1 text-xs font-medium flex items-center justify-center gap-1 ${activeTab === 'ddl' ? 'text-green-400 border-b-2 border-green-500 bg-[#161b22]' : 'text-gray-400 hover:text-gray-200 hover:bg-[#161b22]'}`}
+          className={`flex-1 py-2 px-1 text-xs font-medium flex items-center justify-center gap-1 ${activeTab === 'ddl' ? 'text-green-400 border-b-2 border-green-500 bg-dark-panel' : 'text-gray-400 hover:text-gray-200 hover:bg-dark-panel'}`}
         >
           <Database className="w-3.5 h-3.5" />
           DDL
@@ -168,7 +168,7 @@ export function AiTrainingPanel({ onInsertSql }: AiTrainingPanelProps) {
         </div>
 
         {isEditing && (
-          <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 shadow-lg mb-6">
+          <div className="bg-dark-panel border border-dark-border rounded-lg p-4 shadow-lg mb-6">
             <h3 className="text-sm font-medium text-gray-200 mb-3 flex items-center gap-2">
               {isEditing === 'new' ? <Plus className="w-4 h-4 text-purple-400"/> : <Edit2 className="w-4 h-4 text-purple-400"/>}
               {isEditing === 'new' ? tr('新增', 'Add') : tr('编辑', 'Edit')} {activeTab.toUpperCase()}
@@ -180,7 +180,7 @@ export function AiTrainingPanel({ onInsertSql }: AiTrainingPanelProps) {
                   type="text" 
                   value={formData.title}
                   onChange={e => setFormData({...formData, title: e.target.value})}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-gray-200 focus:border-purple-500 outline-none"
+                  className="w-full bg-dark-bg border border-dark-border rounded px-3 py-1.5 text-sm text-gray-200 focus:border-purple-500 outline-none"
                   placeholder={activeTab === 'sql' ? tr("例如：如何计算日活用户？", "e.g., How to calculate daily active users?") : tr("例如：活跃用户定义", "e.g., Active User Definition")}
                 />
               </div>
@@ -192,7 +192,7 @@ export function AiTrainingPanel({ onInsertSql }: AiTrainingPanelProps) {
                     <textarea 
                       value={formData.description}
                       onChange={e => setFormData({...formData, description: e.target.value})}
-                      className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-gray-200 focus:border-purple-500 outline-none"
+                      className="w-full bg-dark-bg border border-dark-border rounded px-3 py-1.5 text-sm text-gray-200 focus:border-purple-500 outline-none"
                       rows={2}
                       placeholder={tr('该 SQL 对应的自然语言问题。', 'The exact natural language question this SQL answers.')}
                     />
@@ -203,7 +203,7 @@ export function AiTrainingPanel({ onInsertSql }: AiTrainingPanelProps) {
                       id="isGolden"
                       checked={formData.is_golden}
                       onChange={e => setFormData({...formData, is_golden: e.target.checked})}
-                      className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 bg-[#0d1117]"
+                      className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 bg-dark-bg"
                     />
                     <label htmlFor="isGolden" className="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
                       <Sparkles className="w-3.5 h-3.5 text-yellow-400" />
@@ -218,7 +218,7 @@ export function AiTrainingPanel({ onInsertSql }: AiTrainingPanelProps) {
                 <textarea 
                   value={formData.content}
                   onChange={e => setFormData({...formData, content: e.target.value})}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-gray-200 focus:border-purple-500 outline-none font-mono"
+                  className="w-full bg-dark-bg border border-dark-border rounded px-3 py-1.5 text-sm text-gray-200 focus:border-purple-500 outline-none font-mono"
                   rows={6}
                   placeholder={activeTab === 'sql' ? "SELECT ... FROM ..." : tr("内容...", "Content...")}
                 />
@@ -256,7 +256,7 @@ export function AiTrainingPanel({ onInsertSql }: AiTrainingPanelProps) {
             {filteredItems.map(item => (
               <div 
                 key={item.id} 
-                className="bg-[#161b22] border border-[#30363d] rounded-lg p-4 group hover:border-[#8b5cf6]/50 transition-colors cursor-pointer"
+                className="bg-dark-panel border border-dark-border rounded-lg p-4 group hover:border-[#8b5cf6]/50 transition-colors cursor-pointer"
                 onDoubleClick={() => {
                   if (activeTab === 'sql' && onInsertSql) {
                     onInsertSql(item.content);
@@ -299,7 +299,7 @@ export function AiTrainingPanel({ onInsertSql }: AiTrainingPanelProps) {
                   <p className="text-xs text-gray-400 mb-2 italic">"{item.description}"</p>
                 )}
                 
-                <div className="bg-[#0d1117] rounded p-3 overflow-x-auto">
+                <div className="bg-dark-bg rounded p-3 overflow-x-auto">
                   <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap break-all">
                     {item.content}
                   </pre>
@@ -324,7 +324,7 @@ export function AiTrainingPanel({ onInsertSql }: AiTrainingPanelProps) {
                       </label>
                     )}
                   </div>
-                  <span className="text-[10px] text-gray-500">
+                  <span className="text-[11px] text-gray-500">
                     {tr('更新时间', 'Updated')}: {item.updated_at ? new Date(item.updated_at * 1000).toLocaleString() : tr('无', 'N/A')}
                   </span>
                 </div>

@@ -213,7 +213,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
                 setMode('schema');
                 resetResult();
               }}
-              className={`px-3 py-2 rounded border text-sm ${mode === 'schema' ? 'border-blue-500/50 bg-blue-500/10 text-blue-300' : 'border-[#30363d] text-gray-300 hover:bg-[#21262d]'}`}
+              className={`px-3 py-2 rounded border text-sm ${mode === 'schema' ? 'border-blue-500/50 bg-blue-500/10 text-blue-300' : 'border-dark-border text-gray-300 hover:bg-dark-surface'}`}
             >
               {tr('结构同步', 'Schema Sync')}
             </button>
@@ -222,7 +222,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
                 setMode('data');
                 resetResult();
               }}
-              className={`px-3 py-2 rounded border text-sm ${mode === 'data' ? 'border-blue-500/50 bg-blue-500/10 text-blue-300' : 'border-[#30363d] text-gray-300 hover:bg-[#21262d]'}`}
+              className={`px-3 py-2 rounded border text-sm ${mode === 'data' ? 'border-blue-500/50 bg-blue-500/10 text-blue-300' : 'border-dark-border text-gray-300 hover:bg-dark-surface'}`}
             >
               {tr('数据同步', 'Data Sync')}
             </button>
@@ -237,7 +237,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
                   setSourceDbId(e.target.value);
                   resetResult();
                 }}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200"
+                className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200"
               >
                 <option value="">{tr('-- 选择源连接 --', '-- Select Source --')}</option>
                 {dbConnections.map((c) => (
@@ -255,7 +255,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
                   setTargetDbId(e.target.value);
                   resetResult();
                 }}
-                className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200"
+                className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200"
               >
                 <option value="">{tr('-- 选择目标连接 --', '-- Select Target --')}</option>
                 {dbConnections.map((c) => (
@@ -278,7 +278,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
                     resetResult();
                   }}
                   placeholder={tr('例如 users', 'e.g. users')}
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200"
+                  className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200"
                 />
               </div>
               <div>
@@ -290,7 +290,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
                     resetResult();
                   }}
                   placeholder="id"
-                  className="w-full bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200"
+                  className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200"
                 />
               </div>
             </div>
@@ -307,7 +307,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
           <button
             onClick={handleCompare}
             disabled={!canCompare || isLoading}
-            className="self-start px-4 py-2 rounded border border-[#30363d] bg-[#21262d] hover:bg-[#30363d] text-sm text-gray-100 disabled:opacity-50"
+            className="self-start px-4 py-2 rounded border border-dark-border bg-dark-surface hover:bg-dark-border text-sm text-gray-100 disabled:opacity-50"
           >
             {tr('开始对比', 'Compare')}
           </button>
@@ -325,7 +325,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
           </div>
 
           {mode === 'schema' && schemaDiff && (
-            <div className="border border-[#30363d] rounded p-3 bg-[#0d1117] max-h-[360px] overflow-y-auto">
+            <div className="border border-dark-border rounded p-3 bg-dark-bg max-h-[360px] overflow-y-auto">
               {(schemaDiff.tables || []).filter((t: any) => t.status !== 'unchanged').length === 0 && (
                 <div className="text-xs text-gray-500">{tr('未发现差异。', 'No differences found.')}</div>
               )}
@@ -349,7 +349,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
           )}
 
           {mode === 'data' && dataDiff && (
-            <div className="border border-[#30363d] rounded p-3 bg-[#0d1117]">
+            <div className="border border-dark-border rounded p-3 bg-dark-bg">
               <div className="text-sm text-gray-200 mb-2">{dataDiff.table_name}</div>
               <div className="flex flex-col gap-2 text-sm">
                 {(['insert', 'update', 'delete'] as const).map((op) => {
@@ -379,7 +379,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
           <button
             onClick={handlePreview}
             disabled={!compareResultReady || isLoading || (mode === 'schema' && selectedTables.length === 0)}
-            className="self-start px-4 py-2 rounded border border-[#30363d] bg-[#21262d] hover:bg-[#30363d] text-sm text-gray-100 disabled:opacity-50"
+            className="self-start px-4 py-2 rounded border border-dark-border bg-dark-surface hover:bg-dark-border text-sm text-gray-100 disabled:opacity-50"
           >
             {tr('生成预览 SQL', 'Generate Preview SQL')}
           </button>
@@ -401,7 +401,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
           <textarea
             readOnly
             value={previewSql}
-            className="flex-1 min-h-[300px] bg-[#0d1117] border border-[#30363d] rounded p-3 font-mono text-xs text-gray-300"
+            className="flex-1 min-h-[300px] bg-dark-bg border border-dark-border rounded p-3 font-mono text-xs text-gray-300"
           />
         </div>
       ),

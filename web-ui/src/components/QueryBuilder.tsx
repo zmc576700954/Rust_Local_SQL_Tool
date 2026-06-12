@@ -167,8 +167,8 @@ export function QueryBuilder({ onApplySql, schemaData }: QueryBuilderProps) {
   }, [nodes, joins, filters]);
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0c10] text-gray-300">
-      <div className="p-4 border-b border-[#30363d] flex items-center justify-between bg-[#161b22]">
+    <div className="flex flex-col h-full bg-dark-canvas text-gray-300">
+      <div className="p-4 border-b border-dark-border flex items-center justify-between bg-dark-panel">
         <div className="flex items-center gap-2">
           <Database className="w-5 h-5 text-blue-400" />
           <h2 className="text-lg font-semibold text-white">Visual Query Builder</h2>
@@ -181,7 +181,7 @@ export function QueryBuilder({ onApplySql, schemaData }: QueryBuilderProps) {
                 e.target.value = '';
               }
             }}
-            className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
+            className="bg-dark-bg border border-dark-border rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
             value=""
           >
             <option value="">+ Add Table</option>
@@ -215,22 +215,22 @@ export function QueryBuilder({ onApplySql, schemaData }: QueryBuilderProps) {
                 <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Tables & Columns</h3>
                 <div className="flex flex-wrap gap-4">
                   {nodes.map(node => (
-                    <div key={node.id} className="bg-[#161b22] border border-[#30363d] rounded-lg shadow-lg w-64 flex flex-col max-h-80">
-                      <div className="p-3 border-b border-[#30363d] bg-[#0d1117] flex justify-between items-center rounded-t-lg">
+                    <div key={node.id} className="bg-dark-panel border border-dark-border rounded-lg shadow-lg w-64 flex flex-col max-h-80">
+                      <div className="p-3 border-b border-dark-border bg-dark-bg flex justify-between items-center rounded-t-lg">
                         <span className="font-semibold text-blue-400 truncate" title={node.tableName}>{node.tableName} <span className="text-gray-500 text-xs ml-1">({node.alias})</span></span>
                         <button onClick={() => removeTable(node.id)} className="text-gray-500 hover:text-red-400"><Trash2 className="w-4 h-4" /></button>
                       </div>
                       <div className="p-2 overflow-y-auto flex-1">
                         {node.columns.map((c: any) => (
-                          <label key={c.column_name} className="flex items-center gap-2 p-1.5 hover:bg-[#21262d] rounded cursor-pointer group">
+                          <label key={c.column_name} className="flex items-center gap-2 p-1.5 hover:bg-dark-surface rounded cursor-pointer group transition-colors">
                             <input 
                               type="checkbox" 
                               checked={node.selectedColumns.includes(c.column_name)}
                               onChange={() => toggleColumn(node.id, c.column_name)}
-                              className="rounded border-gray-600 bg-[#0d1117] text-blue-500 focus:ring-blue-500 focus:ring-offset-[#161b22]"
+                              className="rounded border-gray-600 bg-dark-bg text-blue-500 focus:ring-blue-500 focus:ring-offset-dark-panel"
                             />
                             <span className="text-sm text-gray-300 group-hover:text-white flex-1 truncate" title={c.column_name}>{c.column_name}</span>
-                            <span className="text-[10px] text-gray-500">{c.data_type}</span>
+                            <span className="text-[11px] text-gray-500">{c.data_type}</span>
                           </label>
                         ))}
                       </div>
@@ -250,18 +250,18 @@ export function QueryBuilder({ onApplySql, schemaData }: QueryBuilderProps) {
                   </div>
                   <div className="flex flex-col gap-2">
                     {joins.map(join => (
-                      <div key={join.id} className="flex items-center gap-2 bg-[#161b22] border border-[#30363d] p-2 rounded">
+                      <div key={join.id} className="flex items-center gap-2 bg-dark-panel border border-dark-border p-2 rounded">
                         <select 
                           value={join.leftTableId} 
                           onChange={(e) => updateJoin(join.id, 'leftTableId', e.target.value)}
-                          className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm w-32"
+                          className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm w-32"
                         >
                           {nodes.map(n => <option key={n.id} value={n.id}>{n.tableName} ({n.alias})</option>)}
                         </select>
                         <select 
                           value={join.leftColumn} 
                           onChange={(e) => updateJoin(join.id, 'leftColumn', e.target.value)}
-                          className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm w-32"
+                          className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm w-32"
                         >
                           {nodes.find(n => n.id === join.leftTableId)?.columns.map((c: any) => <option key={c.column_name} value={c.column_name}>{c.column_name}</option>)}
                         </select>
@@ -279,14 +279,14 @@ export function QueryBuilder({ onApplySql, schemaData }: QueryBuilderProps) {
                         <select 
                           value={join.rightTableId} 
                           onChange={(e) => updateJoin(join.id, 'rightTableId', e.target.value)}
-                          className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm w-32"
+                          className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm w-32"
                         >
                           {nodes.map(n => <option key={n.id} value={n.id}>{n.tableName} ({n.alias})</option>)}
                         </select>
                         <select 
                           value={join.rightColumn} 
                           onChange={(e) => updateJoin(join.id, 'rightColumn', e.target.value)}
-                          className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm w-32"
+                          className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm w-32"
                         >
                           {nodes.find(n => n.id === join.rightTableId)?.columns.map((c: any) => <option key={c.column_name} value={c.column_name}>{c.column_name}</option>)}
                         </select>
@@ -310,25 +310,25 @@ export function QueryBuilder({ onApplySql, schemaData }: QueryBuilderProps) {
                   </div>
                   <div className="flex flex-col gap-2">
                     {filters.map(filter => (
-                      <div key={filter.id} className="flex items-center gap-2 bg-[#161b22] border border-[#30363d] p-2 rounded">
+                      <div key={filter.id} className="flex items-center gap-2 bg-dark-panel border border-dark-border p-2 rounded">
                         <select 
                           value={filter.tableId} 
                           onChange={(e) => updateFilter(filter.id, 'tableId', e.target.value)}
-                          className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm w-32"
+                          className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm w-32"
                         >
                           {nodes.map(n => <option key={n.id} value={n.id}>{n.tableName} ({n.alias})</option>)}
                         </select>
                         <select 
                           value={filter.column} 
                           onChange={(e) => updateFilter(filter.id, 'column', e.target.value)}
-                          className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm w-32"
+                          className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm w-32"
                         >
                           {nodes.find(n => n.id === filter.tableId)?.columns.map((c: any) => <option key={c.column_name} value={c.column_name}>{c.column_name}</option>)}
                         </select>
                         <select 
                           value={filter.operator} 
                           onChange={(e) => updateFilter(filter.id, 'operator', e.target.value)}
-                          className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm w-20 text-center font-mono"
+                          className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm w-20 text-center font-mono"
                         >
                           <option value="=">=</option>
                           <option value="!=">!=</option>
@@ -343,7 +343,7 @@ export function QueryBuilder({ onApplySql, schemaData }: QueryBuilderProps) {
                           value={filter.value}
                           onChange={(e) => updateFilter(filter.id, 'value', e.target.value)}
                           placeholder="Value..."
-                          className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-sm flex-1 font-mono"
+                          className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-sm flex-1 font-mono"
                         />
                         <button onClick={() => removeFilter(filter.id)} className="text-gray-500 hover:text-red-400 p-1"><Trash2 className="w-4 h-4" /></button>
                       </div>
@@ -358,8 +358,8 @@ export function QueryBuilder({ onApplySql, schemaData }: QueryBuilderProps) {
         </div>
 
         {/* SQL Preview Area */}
-        <div className="h-64 border-t border-[#30363d] bg-[#0d1117] flex flex-col shrink-0">
-          <div className="px-4 py-2 border-b border-[#30363d] flex items-center justify-between bg-[#161b22]">
+        <div className="h-64 border-t border-dark-border bg-dark-bg flex flex-col shrink-0">
+          <div className="px-4 py-2 border-b border-dark-border flex items-center justify-between bg-dark-panel">
             <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Generated SQL Preview</span>
             <CheckSquare className="w-4 h-4 text-green-500" />
           </div>

@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Copy, Eye, X } from 'lucide-react';
 import { tr } from '../i18n';
+import { Button } from '../ui';
 
 interface SimpleDataTableProps {
   data: any[];
@@ -374,7 +375,7 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
 
   return (
     <div className="flex flex-col w-full h-full overflow-hidden">
-      <div className="flex items-center justify-between gap-3 border-b border-[#30363d]/50 bg-[#0d1117] px-4 py-2 text-xs text-gray-400">
+      <div className="flex items-center justify-between gap-3 border-b border-dark-border/50 bg-dark-bg px-4 py-2 text-xs text-gray-400">
         <div>
           Showing {visibleColumns.length}/{columns.length} columns
         </div>
@@ -382,12 +383,12 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
           <div className="relative">
             <button
               onClick={() => setShowColumnMenu((prev) => !prev)}
-              className="rounded border border-[#30363d] bg-[#161b22] px-2 py-1 text-gray-300 hover:text-white transition-colors"
+              className="rounded border border-dark-border bg-dark-panel px-2 py-1 text-gray-300 hover:text-white transition-colors"
             >
               Columns
             </button>
             {showColumnMenu && (
-              <div className="absolute right-0 top-full z-30 mt-2 w-72 rounded border border-[#30363d] bg-[#161b22] p-3 shadow-2xl">
+              <div className="absolute right-0 top-full z-30 mt-2 w-72 rounded border border-dark-border bg-dark-panel p-3 shadow-2xl">
                 <div className="mb-2 flex items-center justify-between">
                   <div className="text-xs font-semibold uppercase tracking-wide text-gray-400">Column Layout</div>
                   <button
@@ -401,7 +402,7 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
                   {orderedColumns.map((column, index) => {
                     const isVisible = !columnLayout.hidden.includes(column);
                     return (
-                      <div key={column} className="flex items-center gap-2 rounded border border-[#30363d] bg-[#0d1117] px-2 py-1.5">
+                      <div key={column} className="flex items-center gap-2 rounded border border-dark-border bg-dark-bg px-2 py-1.5">
                         <input
                           type="checkbox"
                           checked={isVisible}
@@ -409,11 +410,11 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
                           className="accent-blue-500"
                         />
                         <span className="min-w-0 flex-1 truncate text-xs text-gray-200" title={column}>{column}</span>
-                        <span className="text-[10px] text-gray-500">{Math.round(getColumnWidth(column))} px</span>
+                        <span className="text-[11px] text-gray-500">{Math.round(getColumnWidth(column))} px</span>
                         <button
                           onClick={() => moveColumn(column, 'left')}
                           disabled={index === 0}
-                          className="rounded border border-[#30363d] px-1 py-0.5 text-[10px] text-gray-300 hover:text-white disabled:opacity-30"
+                          className="rounded border border-dark-border px-1 py-0.5 text-[11px] text-gray-300 hover:text-white disabled:opacity-30"
                           title="Move left"
                         >
                           <ArrowUp className="w-3 h-3 rotate-[-90deg]" />
@@ -421,7 +422,7 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
                         <button
                           onClick={() => moveColumn(column, 'right')}
                           disabled={index === orderedColumns.length - 1}
-                          className="rounded border border-[#30363d] px-1 py-0.5 text-[10px] text-gray-300 hover:text-white disabled:opacity-30"
+                          className="rounded border border-dark-border px-1 py-0.5 text-[11px] text-gray-300 hover:text-white disabled:opacity-30"
                           title="Move right"
                         >
                           <ArrowDown className="w-3 h-3 rotate-[-90deg]" />
@@ -439,7 +440,7 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
           <button
             onClick={resetColumnLayout}
             disabled={visibleColumns.length === columns.length && orderedColumns.every((column, index) => column === columns[index]) && Object.keys(columnLayout.widths).length === 0}
-            className="rounded border border-[#30363d] bg-[#161b22] px-2 py-1 text-gray-300 hover:text-white transition-colors disabled:opacity-40"
+            className="rounded border border-dark-border bg-dark-panel px-2 py-1 text-gray-300 hover:text-white transition-colors disabled:opacity-40"
           >
             Reset Layout
           </button>
@@ -447,12 +448,12 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
       </div>
       <div className="flex-1 overflow-auto">
         <table className="w-full text-left text-sm whitespace-nowrap">
-          <thead className="bg-[#0d1117] sticky top-0 shadow-sm text-gray-400 text-xs tracking-wider z-10">
+          <thead className="bg-dark-bg sticky top-0 shadow-sm text-gray-400 text-xs tracking-wider z-10">
             <tr>
               {visibleColumns.map(k => (
                 <th 
                   key={k} 
-                  className="py-2.5 px-4 font-medium border-r border-[#30363d]/50 cursor-pointer hover:bg-[#21262d] transition-colors group select-none relative"
+                  className="py-2.5 px-4 font-medium border-r border-dark-border/50 cursor-pointer hover:bg-dark-surface transition-colors group select-none relative"
                   onClick={() => requestSort(k)}
                   style={{ width: `${getColumnWidth(k)}px`, minWidth: `${getColumnWidth(k)}px`, maxWidth: `${getColumnWidth(k)}px` }}
                 >
@@ -477,9 +478,9 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-[#30363d]/50">
+          <tbody className="divide-y divide-dark-border/50">
             {paginatedData.map((row: any, i: number) => (
-              <tr key={i} className="hover:bg-[#161b22] even:bg-[#0d1117]">
+              <tr key={i} className="hover:bg-dark-panel even:bg-dark-bg">
                 {visibleColumns.map((k) => {
                   const val = row[k];
                   const inlineValue = formatInlineCellValue(val);
@@ -496,13 +497,13 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
                           val
                         });
                       }}
-                      className={`py-1.5 px-4 border-r border-[#30363d]/50 max-w-[300px] truncate ${typeof val === 'number' ? 'text-right text-blue-400 font-mono' : 'text-gray-300'}`}
+                      className={`py-1.5 px-4 border-r border-dark-border/50 max-w-[300px] truncate ${typeof val === 'number' ? 'text-right text-blue-400 font-mono' : 'text-gray-300'}`}
                       style={{ width: `${getColumnWidth(k)}px`, minWidth: `${getColumnWidth(k)}px`, maxWidth: `${getColumnWidth(k)}px` }}
                     >
                       {val === null ? (
                         <span className="text-gray-600 italic">NULL</span>
                       ) : typeof val === 'boolean' ? (
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${val ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                        <span className={`px-1.5 py-0.5 rounded text-[11px] font-bold uppercase ${val ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
                           {val ? 'TRUE' : 'FALSE'}
                         </span>
                       ) : (
@@ -520,7 +521,7 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
       </div>
       
       {totalPages > 1 && (
-        <div className="flex items-center justify-between px-4 py-2.5 bg-[#0d1117] border-t border-[#30363d]/50 text-sm text-gray-400 shrink-0">
+        <div className="flex items-center justify-between px-4 py-2.5 bg-dark-bg border-t border-dark-border/50 text-sm text-gray-400 shrink-0">
           <div>
             {tr(`第 ${currentPage} / ${totalPages} 页`, `Page ${currentPage} of ${totalPages}`)}
           </div>
@@ -528,7 +529,7 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
             <button
               onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
               disabled={currentPage === 1}
-              className="flex items-center gap-1 px-2 py-1 rounded hover:bg-[#21262d] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded hover:bg-dark-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               <ChevronLeft className="w-4 h-4" />
               <span>{tr('上一页', 'Prev')}</span>
@@ -536,7 +537,7 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
             <button
               onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
               disabled={currentPage === totalPages}
-              className="flex items-center gap-1 px-2 py-1 rounded hover:bg-[#21262d] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded hover:bg-dark-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               <span>{tr('下一页', 'Next')}</span>
               <ChevronRight className="w-4 h-4" />
@@ -547,40 +548,40 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
 
       {contextMenu && (
         <div 
-          className="fixed z-50 bg-[#161b22] border border-[#30363d] rounded-md shadow-xl py-1 text-sm text-gray-200 min-w-[160px]"
+          className="fixed z-50 bg-dark-panel border border-dark-border rounded-md shadow-xl py-1 text-sm text-gray-200 min-w-[160px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onClick={(e) => e.stopPropagation()}
         >
           <button 
-            className="w-full text-left px-4 py-2 hover:bg-[#21262d] transition-colors flex items-center gap-2"
+            className="w-full text-left px-4 py-2 hover:bg-dark-surface transition-colors flex items-center gap-2"
             onClick={handlePreviewCell}
           >
             <Eye className="w-4 h-4" />
             {tr('打开单元格查看器', 'Open Cell Viewer')}
           </button>
           <button 
-            className="w-full text-left px-4 py-2 hover:bg-[#21262d] transition-colors flex items-center gap-2"
+            className="w-full text-left px-4 py-2 hover:bg-dark-surface transition-colors flex items-center gap-2"
             onClick={handleCopyCell}
           >
             <Copy className="w-4 h-4" />
             {tr('复制单元格', 'Copy Cell')}
           </button>
           <button 
-            className="w-full text-left px-4 py-2 hover:bg-[#21262d] transition-colors flex items-center gap-2"
+            className="w-full text-left px-4 py-2 hover:bg-dark-surface transition-colors flex items-center gap-2"
             onClick={handleCopyRowTsv}
           >
             <Copy className="w-4 h-4" />
             {tr('复制行（Excel/TSV）', 'Copy Row (Excel/TSV)')}
           </button>
           <button 
-            className="w-full text-left px-4 py-2 hover:bg-[#21262d] transition-colors flex items-center gap-2"
+            className="w-full text-left px-4 py-2 hover:bg-dark-surface transition-colors flex items-center gap-2"
             onClick={handleCopyRowJson}
           >
             <Copy className="w-4 h-4" />
             {tr('复制行 JSON', 'Copy Row JSON')}
           </button>
           <button 
-            className="w-full text-left px-4 py-2 hover:bg-[#21262d] transition-colors flex items-center gap-2"
+            className="w-full text-left px-4 py-2 hover:bg-dark-surface transition-colors flex items-center gap-2"
             onClick={handleCopyRowSql}
           >
             <Copy className="w-4 h-4" />
@@ -591,8 +592,8 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
 
       {previewCell && (
         <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-4xl max-h-[80vh] bg-[#161b22] border border-[#30363d] rounded-lg shadow-2xl flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
+          <div className="w-full max-w-4xl max-h-[80vh] bg-dark-panel border border-dark-border rounded-lg shadow-2xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-dark-border">
               <div>
                 <div className="text-sm font-medium text-white">{previewCell.title}</div>
                 <div className="text-xs text-gray-400">
@@ -603,18 +604,20 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button
+                <Button
+                  variant="toolbar"
+                  size="md"
                   onClick={() => void handleCopyPreviewValue()}
-                  className="text-xs text-gray-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors"
                 >
                   {tr('复制', 'Copy')}
-                </button>
-                <button
+                </Button>
+                <Button
+                  variant="toolbar"
+                  size="md"
                   onClick={handleDownloadPreviewValue}
-                  className="text-xs text-gray-300 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-1 rounded border border-[#30363d] transition-colors"
                 >
                   {tr('下载', 'Download')}
-                </button>
+                </Button>
                 <button
                   onClick={() => setPreviewCell(null)}
                   className="text-gray-400 hover:text-white transition-colors"

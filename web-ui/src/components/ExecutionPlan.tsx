@@ -56,8 +56,8 @@ export function ExecutionPlan({ sql }: ExecutionPlanProps) {
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#0d1117] text-sm overflow-hidden">
-      <div className="p-4 border-b border-[#30363d] bg-[#161b22] shrink-0">
+    <div className="flex flex-col h-full bg-dark-bg text-sm overflow-hidden">
+      <div className="p-4 border-b border-dark-border bg-dark-panel shrink-0">
         <div className="flex items-center justify-between gap-3 mb-2">
           <div>
             <h3 className="font-semibold text-gray-200 flex items-center gap-2">
@@ -65,21 +65,21 @@ export function ExecutionPlan({ sql }: ExecutionPlanProps) {
               Visual Execution Plan
             </h3>
             <div className="mt-1 flex items-center gap-2 flex-wrap text-[11px] text-gray-400">
-              <span className="px-1.5 py-0.5 rounded bg-[#0d1117] border border-[#30363d]">{planRows.length} steps</span>
-              <span className="px-1.5 py-0.5 rounded bg-[#0d1117] border border-[#30363d]">{viewMode === 'visual' ? 'Visual view' : 'Table view'}</span>
+              <span className="px-1.5 py-0.5 rounded bg-dark-bg border border-dark-border">{planRows.length} steps</span>
+              <span className="px-1.5 py-0.5 rounded bg-dark-bg border border-dark-border">{viewMode === 'visual' ? 'Visual view' : 'Table view'}</span>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <div className="flex items-center bg-[#21262d] rounded overflow-hidden border border-[#30363d]">
+            <div className="flex items-center bg-dark-surface rounded overflow-hidden border border-dark-border">
               <button
                 onClick={() => setViewMode('visual')}
-                className={`px-2 py-1 text-xs transition-colors ${viewMode === 'visual' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-[#30363d]'}`}
+                className={`px-2 py-1 text-xs transition-colors ${viewMode === 'visual' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-dark-border'}`}
               >
                 Visual
               </button>
               <button
                 onClick={() => setViewMode('table')}
-                className={`px-2 py-1 text-xs transition-colors flex items-center gap-1 ${viewMode === 'table' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-[#30363d]'}`}
+                className={`px-2 py-1 text-xs transition-colors flex items-center gap-1 ${viewMode === 'table' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-dark-border'}`}
               >
                 <Table2 className="w-3 h-3" />
                 Table
@@ -87,21 +87,21 @@ export function ExecutionPlan({ sql }: ExecutionPlanProps) {
             </div>
             <button
               onClick={() => setRefreshToken((value) => value + 1)}
-              className="px-2 py-1 text-xs rounded border border-[#30363d] text-gray-300 hover:text-white hover:bg-[#21262d] transition-colors flex items-center gap-1"
+              className="px-2 py-1 text-xs rounded border border-dark-border text-gray-300 hover:text-white hover:bg-dark-surface transition-colors flex items-center gap-1"
             >
               <RefreshCw className="w-3 h-3" />
               Refresh
             </button>
             <button
               onClick={handleCopySql}
-              className="px-2 py-1 text-xs rounded border border-[#30363d] text-gray-300 hover:text-white hover:bg-[#21262d] transition-colors flex items-center gap-1"
+              className="px-2 py-1 text-xs rounded border border-dark-border text-gray-300 hover:text-white hover:bg-dark-surface transition-colors flex items-center gap-1"
             >
               <Copy className="w-3 h-3" />
               Copy SQL
             </button>
           </div>
         </div>
-        <pre className="text-xs text-gray-400 bg-[#0d1117] p-3 rounded-lg border border-[#30363d] overflow-x-auto">
+        <pre className="text-xs text-gray-400 bg-dark-bg p-3 rounded-lg border border-dark-border overflow-x-auto">
           {sql}
         </pre>
       </div>
@@ -114,12 +114,12 @@ export function ExecutionPlan({ sql }: ExecutionPlanProps) {
                 {i > 0 && (
                   <div className="w-0.5 h-6 bg-gradient-to-b from-blue-500/50 to-[#30363d] mb-6"></div>
                 )}
-                <div className="w-full bg-[#161b22] rounded-xl border border-[#30363d] p-5 shadow-lg hover:border-blue-500/30 transition-colors relative overflow-hidden group">
+                <div className="w-full bg-dark-panel rounded-xl border border-dark-border p-5 shadow-lg hover:border-blue-500/30 transition-colors relative overflow-hidden group">
                   <div className="absolute top-0 left-0 w-1 h-full bg-blue-500/50 group-hover:bg-blue-400 transition-colors"></div>
                   
                   <div className="flex items-start justify-between mb-4">
                     <div className="flex items-center gap-3">
-                      <div className="p-2 bg-[#0d1117] rounded-lg border border-[#30363d]">
+                      <div className="p-2 bg-dark-bg rounded-lg border border-dark-border">
                         <Database className="w-5 h-5 text-blue-400" />
                       </div>
                       <div>
@@ -137,7 +137,7 @@ export function ExecutionPlan({ sql }: ExecutionPlanProps) {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-4 mt-4 bg-[#0d1117] p-4 rounded-lg border border-[#30363d]">
+                  <div className="grid grid-cols-3 gap-4 mt-4 bg-dark-bg p-4 rounded-lg border border-dark-border">
                     <div className="flex flex-col gap-1">
                       <span className="text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1"><Search className="w-3 h-3" /> Access Type</span>
                       <span className="text-sm font-medium text-purple-400">{row.type || row.TYPE || 'ALL'}</span>
@@ -157,17 +157,17 @@ export function ExecutionPlan({ sql }: ExecutionPlanProps) {
               </div>
             ))}
             <div className="w-0.5 h-6 bg-gradient-to-b from-[#30363d] to-transparent"></div>
-            <div className="px-4 py-2 bg-[#161b22] border border-[#30363d] rounded-full text-sm text-gray-400 shadow-lg">
+            <div className="px-4 py-2 bg-dark-panel border border-dark-border rounded-full text-sm text-gray-400 shadow-lg">
               Query Result
             </div>
           </div>
         ) : (
-          <div className="overflow-auto rounded-lg border border-[#30363d] bg-[#161b22]">
+          <div className="overflow-auto rounded-lg border border-dark-border bg-dark-panel">
             <table className="w-full text-left text-xs whitespace-nowrap">
-              <thead className="bg-[#0d1117] text-gray-400">
+              <thead className="bg-dark-bg text-gray-400">
                 <tr>
                   {planColumns.map((column) => (
-                    <th key={column} className="px-3 py-2 border-b border-[#30363d] font-medium">
+                    <th key={column} className="px-3 py-2 border-b border-dark-border font-medium">
                       {column}
                     </th>
                   ))}
@@ -175,7 +175,7 @@ export function ExecutionPlan({ sql }: ExecutionPlanProps) {
               </thead>
               <tbody>
                 {planRows.map((row, rowIndex) => (
-                  <tr key={rowIndex} className="border-b border-[#30363d]/50 hover:bg-[#0d1117]">
+                  <tr key={rowIndex} className="border-b border-dark-border/50 hover:bg-dark-bg">
                     {planColumns.map((column) => (
                       <td key={`${rowIndex}-${column}`} className="px-3 py-2 text-gray-300 align-top">
                         {String(row[column] ?? '')}

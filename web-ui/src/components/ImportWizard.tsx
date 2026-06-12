@@ -253,18 +253,18 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
 
   return (
     <div className="flex flex-col gap-6 text-sm text-gray-300">
-      <div className="bg-[#0d1117] border border-[#30363d] rounded p-3">
+      <div className="bg-dark-bg border border-dark-border rounded p-3">
         <div className="text-xs text-gray-400">{tr('恢复导入任务', 'Resume Import Job')}</div>
         <div className="mt-2 flex items-center gap-2">
           <input
             value={resumeJobId}
             onChange={e => setResumeJobId(e.target.value)}
             placeholder="输入 job_id"
-            className="flex-1 bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
+            className="flex-1 bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-200 outline-none focus:border-blue-500"
             disabled={loading}
           />
           <button
-            className="px-3 py-2 rounded border border-[#30363d] hover:bg-[#30363d] text-sm text-gray-200"
+            className="px-3 py-2 rounded border border-dark-border hover:bg-dark-border text-sm text-gray-200"
             onClick={resumePolling}
             disabled={!resumeJobId.trim() || loading}
           >
@@ -287,7 +287,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
       )}
 
       {/* Step Indicators */}
-      <div className="flex items-center justify-between border-b border-[#30363d] pb-4">
+      <div className="flex items-center justify-between border-b border-dark-border pb-4">
         <div className={`flex items-center gap-2 ${step >= 1 ? 'text-blue-400' : 'text-gray-500'}`}>
           <div className="w-6 h-6 rounded-full flex items-center justify-center border border-current">1</div>
           <span>{tr('上传', 'Upload')}</span>
@@ -312,7 +312,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
       )}
 
       {step === 1 && (
-        <div className="flex flex-col items-center justify-center py-12 border-2 border-dashed border-[#30363d] rounded-lg hover:border-blue-500/50 transition-colors">
+        <div className="flex flex-col items-center justify-center py-12 border-2 border-dashed border-dark-border rounded-lg hover:border-blue-500/50 transition-colors">
           <Upload className="w-8 h-8 mb-4 text-gray-400" />
           <p className="mb-2">{tr('拖拽文件到此处或点击上传', 'Drag and drop or click to upload')}</p>
           <p className="text-xs text-gray-500 mb-6">{tr('支持 TXT / CSV / JSON / XML / SQL / XLS / XLSX（兼容模式）', 'Supports TXT / CSV / JSON / XML / SQL / XLS / XLSX (compat mode)')}</p>
@@ -342,7 +342,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
                 <select 
                   value={mapping[col.column_name] || ''}
                   onChange={e => setMapping({ ...mapping, [col.column_name]: e.target.value })}
-                  className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
+                  className="bg-dark-bg border border-dark-border rounded px-2 py-1.5 focus:outline-none focus:border-blue-500"
                 >
                   <option value="">{tr('-- 跳过 / 默认 --', '-- Skip / Default --')}</option>
                   {sourceHeaders.map(h => (
@@ -365,7 +365,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
 
       {step === 3 && (
         <div className="flex flex-col gap-6">
-          <div className="bg-[#0d1117] border border-[#30363d] rounded p-4">
+          <div className="bg-dark-bg border border-dark-border rounded p-4">
             <h3 className="font-semibold text-white mb-2">{tr('导入摘要', 'Import Summary')}</h3>
             <ul className="space-y-2">
               <li>{tr('文件', 'File')}: <span className="text-white">{file?.name}</span></li>
@@ -387,14 +387,14 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
                 type="checkbox" 
                 checked={skipErrors}
                 onChange={e => setSkipErrors(e.target.checked)}
-                className="rounded bg-[#0d1117] border-[#30363d] text-blue-500 focus:ring-blue-500 focus:ring-offset-[#161b22]"
+                className="rounded bg-dark-bg border-dark-border text-blue-500 focus:ring-blue-500 focus:ring-offset-dark-panel"
               />
               <span>{tr('跳过错误行（发生错误时继续）', 'Skip rows with errors (continue on error)')}</span>
             </label>
           )}
 
           {jobId && (
-            <div className="bg-[#0d1117] border border-[#30363d] rounded p-4 text-xs text-gray-300">
+            <div className="bg-dark-bg border border-dark-border rounded p-4 text-xs text-gray-300">
               <div className="flex items-center justify-between">
                 <div>{tr('任务', 'Job')}: <span className="text-white">{jobId}</span></div>
                 <div className="text-gray-400">{job?.status}</div>
@@ -407,7 +407,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
 
           <div className="flex justify-end gap-3 mt-2">
             <button 
-              className="px-4 py-2 rounded border border-[#30363d] hover:bg-[#30363d]"
+              className="px-4 py-2 rounded border border-dark-border hover:bg-dark-border"
               onClick={() => setStep(2)}
               disabled={loading || isSqlFile || !!jobId}
             >
@@ -415,7 +415,7 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
             </button>
             {jobId && (
               <button
-                className="px-4 py-2 rounded border border-[#30363d] hover:bg-[#30363d] text-red-300"
+                className="px-4 py-2 rounded border border-dark-border hover:bg-dark-border text-red-300"
                 onClick={handleCancelJob}
                 disabled={loading}
               >

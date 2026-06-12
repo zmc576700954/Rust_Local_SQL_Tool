@@ -20,13 +20,13 @@ function ConfirmDialog({ visible, title, message, confirmText, onCancel, onConfi
   if (!visible) return null;
   return (
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-      <div className="w-full max-w-md border border-[#30363d] bg-[#161b22] rounded-xl p-4">
+      <div className="w-full max-w-md border border-dark-border bg-dark-panel rounded-xl p-4">
         <div className="text-sm text-gray-100 font-semibold">{title}</div>
         <div className="text-xs text-gray-400 mt-2">{message}</div>
         <div className="mt-4 flex justify-end gap-2">
           <button
             onClick={onCancel}
-            className="px-3 py-1.5 text-xs rounded border border-[#30363d] text-gray-300 hover:bg-[#21262d]"
+            className="px-3 py-1.5 text-xs rounded border border-dark-border text-gray-300 hover:bg-dark-surface"
           >
             {tr('取消', 'Cancel')}
           </button>
@@ -172,9 +172,9 @@ export function AdvancedToolsHub({ onOpenTool }: AdvancedToolsHubProps) {
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-[#0a0c10] p-6">
+    <div className="h-full overflow-y-auto bg-dark-canvas p-6">
       <div className="max-w-6xl mx-auto flex flex-col gap-6">
-        <div className="border border-[#30363d] bg-[#161b22] rounded-xl p-5">
+        <div className="border border-dark-border bg-dark-panel rounded-xl p-5">
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="text-lg font-bold text-gray-100">{tr('高级工具中心', 'Advanced Tools Hub')}</div>
@@ -192,12 +192,12 @@ export function AdvancedToolsHub({ onOpenTool }: AdvancedToolsHubProps) {
         </div>
 
         {recentTools.length > 0 && (
-          <div className="border border-[#30363d] bg-[#161b22] rounded-xl p-5">
+          <div className="border border-dark-border bg-dark-panel rounded-xl p-5">
             <div className="flex items-center justify-between mb-3">
               <div className="text-sm font-semibold text-gray-200">{tr('最近使用', 'Recently Used')}</div>
               <button
                 onClick={() => setShowClearRecentConfirm(true)}
-                className="px-2 py-1 text-xs rounded border border-[#30363d] text-gray-300 hover:bg-[#21262d]"
+                className="px-2 py-1 text-xs rounded border border-dark-border text-gray-300 hover:bg-dark-surface"
               >
                 {tr('清空', 'Clear')}
               </button>
@@ -207,7 +207,7 @@ export function AdvancedToolsHub({ onOpenTool }: AdvancedToolsHubProps) {
                 <button
                   key={tool.id}
                   onClick={() => openTool(tool.id)}
-                  className="px-3 py-1.5 text-xs rounded border border-[#30363d] bg-[#0d1117] text-gray-200 hover:bg-[#21262d]"
+                  className="px-3 py-1.5 text-xs rounded border border-dark-border bg-dark-bg text-gray-200 hover:bg-dark-surface"
                 >
                   {tool.name}
                 </button>
@@ -225,7 +225,7 @@ export function AdvancedToolsHub({ onOpenTool }: AdvancedToolsHubProps) {
                 className={`text-left border rounded-xl p-4 transition-colors ${
                   selectedTool.id === tool.id
                     ? 'border-blue-500/40 bg-blue-500/10'
-                    : 'border-[#30363d] bg-[#161b22] hover:bg-[#1b212b]'
+                    : 'border-dark-border bg-dark-panel hover:bg-[#1b212b]'
                 }`}
               >
                 <div className="flex items-center gap-3">
@@ -237,14 +237,14 @@ export function AdvancedToolsHub({ onOpenTool }: AdvancedToolsHubProps) {
             ))}
           </div>
 
-          <div className="border border-[#30363d] bg-[#161b22] rounded-xl p-4 flex flex-col gap-3">
+          <div className="border border-dark-border bg-dark-panel rounded-xl p-4 flex flex-col gap-3">
             <div className="text-sm font-semibold text-gray-100">{tr('工具预览', 'Tool Preview')}</div>
             <div className="flex items-center gap-2">
               <selectedTool.icon className="w-4 h-4 text-blue-400" />
               <div className="text-sm text-gray-200">{selectedTool.name}</div>
             </div>
             <div className="text-xs text-gray-400">{selectedTool.desc}</div>
-            <div className="border-t border-[#30363d] pt-3">
+            <div className="border-t border-dark-border pt-3">
               <div className="text-xs text-gray-500 mb-2">{tr('最近状态', 'Last State')}</div>
               {statePreviewLines.length === 0 && (
                 <div className="text-xs text-gray-500">{tr('暂无状态记录。', 'No state saved yet.')}</div>
@@ -263,7 +263,7 @@ export function AdvancedToolsHub({ onOpenTool }: AdvancedToolsHubProps) {
             </button>
             <button
               onClick={() => setShowClearToolConfirm(true)}
-              className="px-3 py-2 text-sm rounded border border-[#30363d] text-gray-300 hover:bg-[#21262d]"
+              className="px-3 py-2 text-sm rounded border border-dark-border text-gray-300 hover:bg-dark-surface"
             >
               {tr('清空此工具状态', 'Clear Tool State')}
             </button>

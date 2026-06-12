@@ -69,7 +69,7 @@ export function GoLiveAuditTab({ isActive }: { isActive: boolean }) {
           <button
             onClick={load}
             disabled={loading}
-            className="px-2 py-1 rounded text-xs font-medium bg-[#21262d] hover:bg-[#30363d] text-gray-100 border border-[#30363d] disabled:opacity-50"
+            className="px-2 py-1 rounded text-xs font-medium bg-dark-surface hover:bg-dark-border text-gray-100 border border-dark-border disabled:opacity-50"
           >
             {tr('刷新', 'Refresh')}
           </button>
@@ -87,7 +87,7 @@ export function GoLiveAuditTab({ isActive }: { isActive: boolean }) {
               <button
                 key={key}
                 onClick={() => setSelected(r)}
-                className={`w-full text-left px-4 py-3 border-b border-dark-border hover:bg-[#161b22] transition-colors ${active ? 'bg-[#0a0c10]' : ''}`}
+                className={`w-full text-left px-4 py-3 border-b border-dark-border hover:bg-dark-panel transition-colors ${active ? 'bg-dark-canvas' : ''}`}
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm text-gray-200 truncate">{String(r?.action || '-') || '-'}</div>
@@ -119,7 +119,7 @@ export function GoLiveAuditTab({ isActive }: { isActive: boolean }) {
             <textarea
               readOnly
               value={selectedJson}
-              className="w-full h-full min-h-[400px] bg-[#0d1117] border border-[#30363d] rounded p-3 font-mono text-xs text-gray-200 outline-none"
+              className="w-full h-full min-h-[400px] bg-dark-bg border border-dark-border rounded p-3 font-mono text-xs text-gray-200 outline-none"
             />
           )}
         </div>

@@ -57,10 +57,10 @@ export function StepWizard({
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#161b22] text-gray-300 rounded-xl overflow-hidden shadow-2xl border border-[#30363d]">
+    <div className="flex flex-col h-full bg-dark-panel text-gray-300 rounded-xl overflow-hidden shadow-2xl border border-dark-border">
       {/* Header */}
       {title && (
-        <div className="px-6 py-4 border-b border-[#30363d] flex items-center justify-between bg-[#0d1117] shrink-0">
+        <div className="px-6 py-4 border-b border-dark-border flex items-center justify-between bg-dark-bg shrink-0">
           <h3 className="text-gray-200 font-bold text-lg">{title}</h3>
           {onCancel && (
             <button onClick={onCancel} className="text-gray-500 hover:text-white transition-colors">
@@ -71,7 +71,7 @@ export function StepWizard({
       )}
 
       {/* Step Indicators */}
-      <div className="px-6 py-4 border-b border-[#30363d] bg-[#0d1117]">
+      <div className="px-6 py-4 border-b border-dark-border bg-dark-bg">
         <div className="flex items-center justify-between max-w-3xl mx-auto">
           {steps.map((step, index) => (
             <React.Fragment key={step.id}>
@@ -113,13 +113,13 @@ export function StepWizard({
       </div>
 
       {/* Footer / Actions */}
-      <div className="px-6 py-4 border-t border-[#30363d] bg-[#0d1117] flex items-center justify-between shrink-0">
+      <div className="px-6 py-4 border-t border-dark-border bg-dark-bg flex items-center justify-between shrink-0">
         <div>
           {!isFirstStep && (
             <button
               onClick={handlePrev}
               disabled={isFinishing || isLoading}
-              className="px-4 py-2 rounded border border-[#30363d] hover:bg-[#30363d] text-gray-300 flex items-center gap-2 transition-colors disabled:opacity-50"
+              className="px-4 py-2 rounded border border-dark-border hover:bg-dark-border text-gray-300 flex items-center gap-2 transition-colors disabled:opacity-50"
             >
               <ArrowLeft className="w-4 h-4" />
               {tr('上一步', 'Previous')}

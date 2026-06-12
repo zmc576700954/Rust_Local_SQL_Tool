@@ -58,21 +58,21 @@ const SaveSnippetForm = memo(({ sql, onCancel, onSuccess }: { sql: string, onCan
   };
 
   return (
-    <div className="mt-3 p-3 bg-[#0d1117] rounded border border-[#30363d]" onClick={e => e.stopPropagation()}>
+    <div className="mt-3 p-3 bg-dark-bg rounded border border-dark-border" onClick={e => e.stopPropagation()}>
       <h4 className="text-xs font-semibold text-purple-400 mb-2 flex items-center gap-1">
         <Sparkles className="w-3 h-3" /> {tr('保存智能片段', 'Save Smart Snippet')}
       </h4>
       <input
         type="text"
         placeholder={tr('标题 / 问题', 'Title / Question')}
-        className="w-full mb-2 p-1.5 text-xs border rounded bg-[#161b22] border-[#30363d] text-gray-200 outline-none focus:border-purple-500"
+        className="w-full mb-2 p-1.5 text-xs border rounded bg-dark-panel border-dark-border text-gray-200 outline-none focus:border-purple-500"
         value={saveTitle}
         onChange={e => setSaveTitle(e.target.value)}
       />
       <input
         type="text"
         placeholder={tr('描述 / 上下文（可选）', 'Description / Context (optional)')}
-        className="w-full mb-2 p-1.5 text-xs border rounded bg-[#161b22] border-[#30363d] text-gray-200 outline-none focus:border-purple-500"
+        className="w-full mb-2 p-1.5 text-xs border rounded bg-dark-panel border-dark-border text-gray-200 outline-none focus:border-purple-500"
         value={saveDesc}
         onChange={e => setSaveDesc(e.target.value)}
       />
@@ -82,7 +82,7 @@ const SaveSnippetForm = memo(({ sql, onCancel, onSuccess }: { sql: string, onCan
           id={`trainAI-${sql.length}`}
           checked={isTrainAI}
           onChange={e => setIsTrainAI(e.target.checked)}
-          className="w-3.5 h-3.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500 bg-[#161b22]"
+          className="w-3.5 h-3.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500 bg-dark-panel"
         />
         <label htmlFor={`trainAI-${sql.length}`} className="text-xs text-gray-300 flex items-center gap-1 cursor-pointer">
           {tr('使用该片段训练 AI', 'Train AI with this snippet')}
@@ -183,11 +183,11 @@ export function SqlHistory({ historyVersion, activeDbId, onOpenSql, onInsertSql,
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#0d1117] border-l border-[#30363d] w-full text-sm">
-      <div className="flex items-center border-b border-[#30363d] p-3 bg-[#0d1117]">
+    <div className="flex flex-col h-full bg-dark-bg border-l border-dark-border w-full text-sm">
+      <div className="flex items-center border-b border-dark-border p-3 bg-dark-bg">
         <HistoryIcon className="w-4 h-4 text-gray-400 mr-2" />
         <h2 className="font-semibold text-gray-200">{tr('执行历史', 'Execution History')}</h2>
-        <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-[#161b22] text-gray-400 border border-[#30363d]">
+        <span className="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-dark-panel text-gray-400 border border-dark-border">
           {filteredHistory.length}/{history.length}
         </span>
         <div className="flex-1"></div>
@@ -196,7 +196,7 @@ export function SqlHistory({ historyVersion, activeDbId, onOpenSql, onInsertSql,
         </button>
       </div>
 
-      <div className="border-b border-[#30363d] p-3 bg-[#11161d] space-y-3">
+      <div className="border-b border-dark-border p-3 bg-dark-canvas space-y-3">
         <div className="relative">
           <Search className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-2.5" />
           <input
@@ -204,7 +204,7 @@ export function SqlHistory({ historyVersion, activeDbId, onOpenSql, onInsertSql,
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={tr('搜索 SQL / DB / 类型 / 状态', 'Search SQL / DB / type / status')}
-            className="w-full pl-8 pr-3 py-2 text-xs border rounded bg-[#161b22] border-[#30363d] text-gray-200 outline-none focus:border-blue-500"
+            className="w-full pl-8 pr-3 py-2 text-xs border rounded bg-dark-panel border-dark-border text-gray-200 outline-none focus:border-blue-500"
           />
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -215,7 +215,7 @@ export function SqlHistory({ historyVersion, activeDbId, onOpenSql, onInsertSql,
               className={`px-2 py-1 text-xs rounded border transition-colors ${
                 statusFilter === status
                   ? 'bg-blue-500/20 text-blue-300 border-blue-500/30'
-                  : 'bg-[#161b22] text-gray-400 border-[#30363d] hover:text-gray-200'
+                  : 'bg-dark-panel text-gray-400 border-dark-border hover:text-gray-200'
               }`}
             >
               {status.toUpperCase()}
@@ -227,7 +227,7 @@ export function SqlHistory({ historyVersion, activeDbId, onOpenSql, onInsertSql,
               className={`px-2 py-1 text-xs rounded border transition-colors flex items-center gap-1 ${
                 currentDbOnly
                   ? 'bg-purple-500/20 text-purple-300 border-purple-500/30'
-                  : 'bg-[#161b22] text-gray-400 border-[#30363d] hover:text-gray-200'
+                  : 'bg-dark-panel text-gray-400 border-dark-border hover:text-gray-200'
               }`}
             >
               <Database className="w-3 h-3" />
@@ -237,7 +237,7 @@ export function SqlHistory({ historyVersion, activeDbId, onOpenSql, onInsertSql,
           <button
             onClick={resetFilters}
             disabled={!searchQuery && statusFilter === 'all' && !currentDbOnly}
-            className="px-2 py-1 text-xs rounded border bg-[#161b22] text-gray-400 border-[#30363d] hover:text-gray-200 disabled:opacity-50"
+            className="px-2 py-1 text-xs rounded border bg-dark-panel text-gray-400 border-dark-border hover:text-gray-200 disabled:opacity-50"
           >
             {tr('重置筛选', 'Reset filters')}
           </button>
@@ -255,26 +255,26 @@ export function SqlHistory({ historyVersion, activeDbId, onOpenSql, onInsertSql,
         ) : (
           <div className="space-y-3">
             {filteredHistory.map(h => (
-              <div key={h.id} className="p-3 bg-[#161b22] rounded border border-[#30363d] group cursor-pointer hover:border-blue-500/50 transition-colors" onDoubleClick={() => onOpenSql(h.sql)}>
+              <div key={h.id} className="p-3 bg-dark-panel rounded border border-dark-border group cursor-pointer hover:border-blue-500/50 transition-colors" onDoubleClick={() => onOpenSql(h.sql)}>
                 <div className="flex justify-between items-start mb-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className={`text-xs px-1.5 py-0.5 rounded ${statusClassName(h.status)}`}>
                       {h.status}
                     </span>
                     {h.statement_kind && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#0d1117] text-gray-400 border border-[#30363d]">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-dark-bg text-gray-400 border border-dark-border">
                         {h.statement_kind}
                       </span>
                     )}
                     {h.db_id && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#0d1117] text-blue-300 border border-blue-500/20">
+                      <span className="text-[11px] px-1.5 py-0.5 rounded bg-dark-bg text-blue-300 border border-blue-500/20">
                         {h.db_id}
                       </span>
                     )}
                   </div>
-                  <span className="text-[10px] text-gray-500">{new Date(h.executed_at * 1000).toLocaleString()}</span>
+                  <span className="text-[11px] text-gray-500">{new Date(h.executed_at * 1000).toLocaleString()}</span>
                 </div>
-                <pre className="text-xs bg-[#0d1117] p-2 rounded overflow-x-auto text-gray-300 mb-2">
+                <pre className="text-xs bg-dark-bg p-2 rounded overflow-x-auto text-gray-300 mb-2">
                   {h.sql}
                 </pre>
                 <div className="flex justify-between items-center mt-2 gap-3 flex-wrap">

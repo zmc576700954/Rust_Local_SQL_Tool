@@ -46,26 +46,26 @@ export function DataCharts({ data }: DataChartsProps) {
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0c10] text-gray-300">
-      <div className="flex items-center gap-4 p-4 border-b border-[#30363d] bg-[#161b22] shrink-0">
-        <div className="flex items-center gap-2 bg-[#0d1117] p-1 rounded-lg border border-[#30363d]">
+    <div className="flex flex-col h-full bg-dark-canvas text-gray-300">
+      <div className="flex items-center gap-4 p-4 border-b border-dark-border bg-dark-panel shrink-0">
+        <div className="flex items-center gap-2 bg-dark-bg p-1 rounded-lg border border-dark-border">
           <button
             onClick={() => setChartType('bar')}
-            className={`p-1.5 rounded transition-colors ${chartType === 'bar' ? 'bg-blue-500/20 text-blue-400' : 'hover:bg-[#21262d] text-gray-400'}`}
+            className={`p-1.5 rounded transition-colors ${chartType === 'bar' ? 'bg-blue-500/20 text-blue-400' : 'hover:bg-dark-surface text-gray-400'}`}
             title="Bar Chart"
           >
             <BarChart2 className="w-4 h-4" />
           </button>
           <button
             onClick={() => setChartType('line')}
-            className={`p-1.5 rounded transition-colors ${chartType === 'line' ? 'bg-blue-500/20 text-blue-400' : 'hover:bg-[#21262d] text-gray-400'}`}
+            className={`p-1.5 rounded transition-colors ${chartType === 'line' ? 'bg-blue-500/20 text-blue-400' : 'hover:bg-dark-surface text-gray-400'}`}
             title="Line Chart"
           >
             <LineChartIcon className="w-4 h-4" />
           </button>
           <button
             onClick={() => setChartType('pie')}
-            className={`p-1.5 rounded transition-colors ${chartType === 'pie' ? 'bg-blue-500/20 text-blue-400' : 'hover:bg-[#21262d] text-gray-400'}`}
+            className={`p-1.5 rounded transition-colors ${chartType === 'pie' ? 'bg-blue-500/20 text-blue-400' : 'hover:bg-dark-surface text-gray-400'}`}
             title="Pie Chart"
           >
             <PieChartIcon className="w-4 h-4" />
@@ -78,14 +78,14 @@ export function DataCharts({ data }: DataChartsProps) {
           </div>
         )}
 
-        <div className="h-6 w-px bg-[#30363d]"></div>
+        <div className="h-6 w-px bg-dark-border"></div>
 
         <div className="flex items-center gap-2">
           <label className="text-xs text-gray-400 font-medium">X-Axis:</label>
           <select
             value={xAxis}
             onChange={(e) => setXAxis(e.target.value)}
-            className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+            className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
           >
             {columns.map(col => (
               <option key={col} value={col}>{col}</option>
@@ -98,7 +98,7 @@ export function DataCharts({ data }: DataChartsProps) {
           <select
             value={yAxis}
             onChange={(e) => setYAxis(e.target.value)}
-            className="bg-[#0d1117] border border-[#30363d] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+            className="bg-dark-bg border border-dark-border rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
           >
             {columns.map(col => (
               <option key={col} value={col}>{col}</option>

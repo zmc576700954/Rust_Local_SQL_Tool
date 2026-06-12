@@ -4,6 +4,7 @@ import { DataTable } from './DataTable'
 import { Skeleton } from './Skeleton'
 import { DataCharts } from './DataCharts'
 import { tr } from '../i18n'
+import { Button } from '../ui'
 import { SortPanel } from './SortPanel'
 import type { SortRule } from './SortPanel/types'
 import { createRule, toOrdersPayload, fromOrdersPayload } from './SortPanel/helpers'
@@ -310,7 +311,7 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
               <DataCharts data={memoizedData} />
             )}
             {loading && (
-              <div className="pointer-events-none absolute right-3 top-3 rounded border border-blue-500/20 bg-[#0d1117]/90 px-3 py-1 text-xs text-blue-200 shadow-lg">
+              <div className="pointer-events-none absolute right-3 top-3 rounded border border-blue-500/20 bg-dark-bg/90 px-3 py-1 text-xs text-blue-200 shadow-lg">
                 Refreshing latest server data...
               </div>
             )}
@@ -335,7 +336,7 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
             <button
               key={`${filter.column}-${filter.operator}-${filter.value}-${index}`}
               onClick={() => handleRemoveFilterAt(index)}
-              className="max-w-[260px] truncate text-xs px-2 py-0.5 rounded-full border border-blue-500/20 bg-[#0d1117] text-blue-200 hover:border-blue-400/40 hover:text-white transition-colors"
+              className="max-w-[260px] truncate text-xs px-2 py-0.5 rounded-full border border-blue-500/20 bg-dark-bg text-blue-200 hover:border-blue-400/40 hover:text-white transition-colors"
               title={describeFilter(filter)}
             >
               {describeFilter(filter)} ×
@@ -346,23 +347,25 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
               {tr('排序', 'Sorts')} {sorts.length}
             </span>
           )}
-          <button
+          <Button
+            variant="toolbar"
+            size="sm"
             onClick={handleResetGridState}
             disabled={!hasActiveGridState}
-            className="text-xs text-gray-400 hover:text-white bg-[#21262d] hover:bg-[#30363d] px-2 py-0.5 rounded border border-[#30363d] transition-colors disabled:opacity-50 disabled:hover:bg-[#21262d] disabled:hover:text-gray-400"
+            className="text-gray-400 disabled:hover:bg-dark-surface disabled:hover:text-gray-400"
           >
             {tr('重置筛选/排序', 'Reset filters/sorts')}
-          </button>
-          <div className="flex items-center bg-[#21262d] rounded overflow-hidden border border-[#30363d]">
+          </Button>
+          <div className="flex items-center bg-dark-surface rounded overflow-hidden border border-dark-border">
             <button
               onClick={() => setViewType('table')}
-              className={`px-2 py-0.5 text-xs transition-colors ${viewType === 'table' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-[#30363d]'}`}
+              className={`px-2 py-0.5 text-xs transition-colors ${viewType === 'table' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-dark-border'}`}
             >
               {tr('表格', 'Table')}
             </button>
             <button
               onClick={() => setViewType('chart')}
-              className={`px-2 py-0.5 text-xs transition-colors ${viewType === 'chart' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-[#30363d]'}`}
+              className={`px-2 py-0.5 text-xs transition-colors ${viewType === 'chart' ? 'bg-blue-500/20 text-blue-400' : 'text-gray-400 hover:bg-dark-border'}`}
             >
               {tr('图表', 'Chart')}
             </button>
@@ -375,7 +378,7 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
               setPageNavigation('prev')
               setPage(p => p - 1)
             }}
-            className="px-2 py-1 bg-[#21262d] hover:bg-[#30363d] rounded disabled:opacity-50"
+            className="px-2 py-1 bg-dark-surface hover:bg-dark-border rounded disabled:opacity-50"
           >
             {tr('上一页', 'Prev')}
           </button>
@@ -386,7 +389,7 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
               setPageNavigation('next')
               setPage(p => p + 1)
             }}
-            className="px-2 py-1 bg-[#21262d] hover:bg-[#30363d] rounded disabled:opacity-50"
+            className="px-2 py-1 bg-dark-surface hover:bg-dark-border rounded disabled:opacity-50"
           >
             {tr('下一页', 'Next')}
           </button>
@@ -397,7 +400,7 @@ export function TableDataView({ tableName, isActive, dbId, transactionId, onTran
               setPageSize(Number(e.target.value))
               setPage(1)
             }}
-            className="ml-4 bg-[#21262d] border border-dark-border rounded px-2 py-1"
+            className="ml-4 bg-dark-surface border border-dark-border rounded px-2 py-1"
           >
             <option value={50}>{tr('50 / 页', '50 / page')}</option>
             <option value={100}>{tr('100 / 页', '100 / page')}</option>
