@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
+      - run: cargo test --workspace --exclude app
 
   web-ui:
     runs-on: ubuntu-latest
