@@ -1,0 +1,223 @@
+﻿cargo :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
+所在位置 行:1 字符: 42
++ ... cal_SQL_Tool_Plan3; cargo test --workspace --exclude app 2>&1 | Out-F ...
++                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.70s:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running unittests src\lib.rs (target\debug\deps\core_lib-8c9b764ddad14bfc.exe)
+
+running 125 tests
+test ai::extractor::tests::extract_sql_intent_accepts_command_field ... ok
+test ai::extractor::tests::extract_sql_intent_parses_empty_sql_metadata ... ok
+test ai::extractor::tests::test_extract_json_with_garbage ... ok
+test ai::extractor::tests::test_extract_no_markdown_with_prefix ... ok
+test ai::extractor::tests::test_extract_clean_sql ... ok
+test ai::extractor::tests::test_extract_conversational_sql ... ok
+test ai::extractor::tests::test_extract_generic_markdown ... ok
+test ai::extractor::tests::extract_sql_intent_handles_empty ... ok
+test ai::extractor::tests::test_extract_markdown_sql ... ok
+test ai::policy_store::tests::apply_override_works ... ok
+test ai::extractor::tests::extract_sql_intent_handles_non_json_and_provides_diagnostic ... ok
+test ai::extractor::tests::extract_sql_intent_rejects_non_sql_chatter_fallback ... ok
+test ai::prompting::tests::selects_plural_table_from_singular_request ... ok
+test ai::prompting::tests::selects_table_mentioned_in_request ... ok
+test ai::prompting::tests::table_selection_marks_ambiguity_for_close_candidates ... ok
+test ai::extractor::tests::extract_sql_intent_ignores_additional_prompt_fields ... ok
+test ai::prompting::tests::table_selection_marks_weak_signal_for_unknown_request ... ok
+test ai::provider_utils::tests::validate_ai_url_allows_public_https ... ok
+test ai::provider_utils::tests::validate_ai_url_rejects_localhost ... ok
+test ai::provider_utils::tests::validate_ai_url_rejects_non_http_scheme ... ok
+test config::tests::merge_secrets_from_restores_masked_password_and_missing_keys ... ok
+test ai::provider_utils::tests::validate_ai_url_rejects_private_ip ... ok
+test config::tests::redacted_for_client_strips_secrets_and_masks_passwords ... ok
+test ai::prompting::tests::system_prompt_contains_context_and_schema ... ok
+test crud::tests::build_delete_sql_mysql_style ... ok
+test crud::tests::build_delete_sql_postgres_style ... ok
+test crud::tests::build_insert_sql_mysql_style ... ok
+test crud::tests::build_insert_sql_postgres_style ... ok
+test crud::tests::build_update_sql_mysql_style ... ok
+test crud::tests::null_where_clauses ... ok
+test crud::tests::build_update_sql_postgres_style ... ok
+test crypto::tests::derive_key_deterministic ... ok
+test crypto::tests::decrypt_plain_value_passthrough ... ok
+test crypto::tests::double_encrypt_no_reencrypt ... ok
+test crypto::tests::encrypt_decrypt_roundtrip ... ok
+test crypto::tests::is_encrypted_check ... ok
+test crypto::tests::encrypt_decrypt_url ... ok
+test db::capability::tests::check_capability_failure ... ok
+test crypto::tests::config_json_batch_encrypt_decrypt ... ok
+test db::capability::tests::check_capability_success ... ok
+test db::capability::tests::runtime_capabilities_mssql_no_sync ... ok
+test db::capability::tests::runtime_capabilities_mysql_full ... ok
+test db::capability::tests::runtime_capabilities_pg_has_sync ... ok
+test db::client::tests::db_type_display_name ... ok
+test db::client::tests::db_type_from_url ... ok
+test db::client::tests::extract_db_name_mysql_url ... ok
+test db::client::tests::extract_db_name_pg_url ... ok
+test db::client::tests::validate_db_url_mysql_accepts_valid ... ok
+test db::client::tests::extract_db_name_with_query_params ... ok
+test db::client::tests::validate_db_url_mysql_rejects_bad_scheme ... ok
+test db::client::tests::validate_db_url_other_rejects_dangerous_schemes ... ok
+test db::client::tests::validate_db_url_pg_accepts_valid ... ok
+test db::client::tests::validate_db_url_pg_rejects_bad_scheme ... ok
+test db::client::tests::validate_db_url_sqlite_accepts_valid ... ok
+test db::client::tests::validate_db_url_sqlite_rejects_sensitive_paths ... ok
+test db::client::tests::validate_db_url_sqlite_rejects_traversal ... ok
+test error::tests::db_connection_lost_returns_503 ... ok
+test error::tests::db_query_error_preserves_code ... ok
+test error::tests::db_error_unsupported_converts_to_bad_request ... ok
+test perf_report::tests::summarize_perf_samples_calculates_percentiles ... ok
+test service::schema::build_order_clause_tests::backward_compatible_legacy_payload ... ok
+test service::schema::build_order_clause_tests::column_rule_missing_column_errors ... ok
+test service::schema::build_order_clause_tests::empty_input_returns_empty ... ok
+test service::schema::build_order_clause_tests::expression_rule_accepts_safe_expression ... ok
+test service::schema::build_order_clause_tests::expression_rule_missing_expression_errors ... ok
+test error::tests::error_response_redacts_tokens_and_passwords ... ok
+test service::schema::build_order_clause_tests::expression_rule_rejects_injection ... ok
+test service::schema::build_order_clause_tests::multiple_columns ... ok
+test service::schema::build_order_clause_tests::nulls_first_asc ... ok
+test service::schema::build_order_clause_tests::nulls_last_desc ... ok
+test service::sort_expr::tests::accepts_arithmetic ... ok
+test service::sort_expr::tests::accepts_backticked_identifier ... ok
+test service::sort_expr::tests::accepts_cast_expression ... ok
+test service::sort_expr::tests::accepts_coalesce ... ok
+test service::sort_expr::tests::accepts_collate_clause ... ok
+test service::sort_expr::tests::accepts_simple_function_call ... ok
+test service::sort_expr::tests::rejects_benchmark ... ok
+test service::sort_expr::tests::rejects_empty ... ok
+test service::sort_expr::tests::rejects_from_clause ... ok
+test service::sort_expr::tests::rejects_information_schema ... ok
+test service::sort_expr::tests::rejects_inline_subquery ... ok
+test service::sort_expr::tests::rejects_or_injection_with_comment ... ok
+test service::sort_expr::tests::rejects_statement_terminator ... ok
+test service::sort_expr::tests::rejects_semicolon_only ... ok
+test service::sort_expr::tests::rejects_too_long ... ok
+test service::sort_expr::tests::rejects_unbalanced_parentheses ... ok
+test service::sort_expr::tests::rejects_union ... ok
+test sql::template::tests::extracts_placeholders_trim_and_dedup ... ok
+test sql::template::tests::renders_null_and_number ... ok
+test sql::template::tests::renders_with_existing_quotes ... ok
+test sql::template::tests::renders_without_quotes_adds_quotes ... ok
+test sql::util::tests::escape_sql_string_escapes_single_quotes ... ok
+test sql::util::tests::format_sql_value_handles_types ... ok
+test sql::util::tests::generate_upsert_sql_mysql ... ok
+test sql::util::tests::generate_upsert_sql_pg ... ok
+test sql::util::tests::is_mutation_sql_allows_reads ... ok
+test sql::util::tests::is_mutation_sql_detects_writes ... ok
+test sql::util::tests::is_mutation_sql_blocks_comment_bypass ... ok
+test sql::util::tests::mysql_to_pg_type_maps_correctly ... ok
+test sql::util::tests::quote_ident_mysql_escapes_backticks ... ok
+test sql::util::tests::quote_ident_pg_escapes_double_quotes ... ok
+test sql::util::tests::validate_identifier_accepts_alphanumeric ... ok
+test sql::util::tests::validate_identifier_rejects_empty ... ok
+test sql::util::tests::validate_identifier_rejects_special_chars ... ok
+test sql::util::tests::validate_identifier_rejects_too_long ... ok
+test sync::mysql_engine::tests::adaptive_chunker_decreases_on_slow_throughput ... ok
+test sync::mysql_engine::tests::adaptive_chunker_increases_on_fast_throughput ... ok
+test sync::mysql_engine::tests::generate_statements_mirror_delete ... ok
+test sync::mysql_engine::tests::generate_statements_mysql_upsert ... ok
+test sync::mysql_engine::tests::generate_statements_pg_upsert ... ok
+test sync::mysql_engine::tests::generate_statements_sqlite_upsert ... ok
+test sync::mysql_engine::tests::max_rows_per_chunk_default_is_100k ... ok
+test sync::mysql_engine::tests::row_checksum_expr_mysql_uses_crc32 ... ok
+test sync::mysql_engine::tests::row_checksum_expr_pg_uses_md5 ... ok
+test tools::tests::classify_alter_algorithm_default_for_fk ... ok
+test tools::tests::classify_alter_algorithm_inplace_for_modify ... ok
+test tools::tests::classify_alter_algorithm_instant_for_add_column ... ok
+test tools::tests::generate_preview_add_column ... ok
+test tools::tests::generate_preview_create_table ... ok
+test tools::tests::generate_preview_drop_column ... ok
+test tools::tests::generate_preview_modify_column ... ok
+test tools::tests::generate_rollback_for_add_column ... ok
+test tools::tests::generate_preview_no_changes ... ok
+test tools::tests::generate_rollback_for_create_table ... ok
+test tools::tests::generate_rollback_for_drop_column ... ok
+
+     Running tests\timeout_policy_test.rs (target\debug\deps\timeout_policy_test-4c6ed0dbc1200e35.exe)
+test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 1 test
+test timeout_policy_defaults_are_positive ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\e2e_runner-892c4c6ddc69ff9e.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\mysql_sync_bench.rs (target\debug\deps\mysql_sync_bench-a579c9450c9de72b.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\mysql_sync_loadgen.rs (target\debug\deps\mysql_sync_loadgen-92d4626828cb9c28.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\mysql_sync_runner.rs (target\debug\deps\mysql_sync_runner-437a1abd5cb0ef6c.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\perf_data_transfer_ci.rs (target\debug\deps\perf_data_transfer_ci-4315f8cd17bdd5e0.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\perf_gate_ci.rs (target\debug\deps\perf_gate_ci-521c4063808a654b.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\perf_sync_ci.rs (target\debug\deps\perf_sync_ci-d20428c256655eb5.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\web_server-7de9d3fe3159ca60.exe)
+
+running 24 tests
+test tests::perf_probe_returns_error_when_db_not_connected ... ok
+test tests::mysql_sync_compare_returns_error_when_db_id_missing ... ok
+test tests::perf_probe_rejects_non_read_only_sql ... ok
+test tests::execute_sql_returns_error_when_db_not_connected ... ok
+test tests::perf_probe_table_first_page_requires_table_name ... ok
+test tests::mysql_sync_job_status_returns_404_when_missing ... ok
+test tests::execute_ddl_rejects_malformed_sql ... ok
+test tests::config_endpoint_returns_json ... ok
+test tests::execute_ddl_rejects_non_ddl_sql ... ok
+test tests::execute_ddl_rejects_insert_statements ... ok
+test tests::perf_sync_check_returns_error_when_db_id_missing ... ok
+test tests::perf_suite_archive_list_returns_empty_when_no_reports_exist ... ok
+test tests::timeout_error_includes_code_and_type ... ok
+test tests::perf_sync_start_returns_error_when_db_id_missing ... ok
+test tests::schema_sync_diff_returns_error_when_db_id_missing ... ok
+test tests::session_info_returns_error_when_db_not_connected ... ok
+test tests::transfer_execute_returns_error_when_source_db_missing ... ok
+test tests::tool_job_cancel_sets_canceled_status ... ok
+test tests::perf_suite_archive_save_and_list_round_trip ... ok
+test tests::perf_suite_diff_archive_save_and_filtered_list_round_trip ... ok
+test config_redaction_tests::get_config_does_not_leak_secrets ... ok
+test tests::perf_suite_archive_detail_and_baseline_round_trip ... ok
+test tests::go_live_job_start_creates_report_artifact_on_failure ... ok
+test tests::go_live_reports_list_and_read_only_skip_work ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests core_lib
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
