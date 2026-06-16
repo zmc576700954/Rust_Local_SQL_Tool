@@ -769,7 +769,7 @@ use core_lib::{
         agent::AgentError,
         policy_store::{Policy, PolicyStore},
     },
-    config::{AppConfig, DbType},
+    config::AppConfig,
     crud::{CrudManager, CrudRequest},
     db::DbClient,
     knowledge_base::KnowledgeBase,
