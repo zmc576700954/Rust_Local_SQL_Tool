@@ -1,0 +1,26 @@
+//! 定期巡检（阶段 1）：只读规则检查、应用内调度、快照 diff 与站内告警。
+
+pub mod alert;
+pub mod checks;
+pub mod diff;
+pub mod presets;
+pub mod runner;
+pub mod scheduler;
+pub mod sql;
+pub mod store;
+pub mod types;
+
+pub use alert::{
+    AlertEventKind, AlertNotification, ChannelError, EmailChannel, InAppChannel,
+    NotificationChannel, NotificationDispatcher, WebhookChannel,
+};
+pub use checks::collect_check;
+pub use diff::compare_snapshots;
+pub use presets::{
+    all_check_ids, check_descriptor, preset_by_id, presets, resolve_check_ids, CheckDescriptor,
+    CHECK_DESCRIPTORS,
+};
+pub use runner::run_inspection;
+pub use scheduler::{compute_next_run, validate_schedule};
+pub use store::InspectionStore;
+pub use types::*;

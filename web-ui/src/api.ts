@@ -525,4 +525,37 @@ export const api = {
     }).then(res => res.data),
   opsAudit: (limit = 100) => client.get('/ops/audit', { params: { limit } }).then(res => res.data),
   opsApprovals: () => client.get('/ops/approvals').then(res => res.data),
+  // Ops Center · 定期巡检（只读）
+  opsInspectionPresets: () => client.get('/ops/inspection/presets').then(res => res.data),
+  opsInspectionGetSchedule: () => client.get('/ops/inspection/schedule').then(res => res.data),
+  opsInspectionSaveSchedule: async (payload: {
+    enabled: boolean
+    mode: 'interval' | 'cron'
+    interval_minutes: number
+    cron_expr: string
+    preset_id: string
+    check_ids?: string[]
+    db_id?: string
+  }) =>
+    client.post('/ops/inspection/schedule', payload, { headers: await opsWriteHeaders() }).then(res => res.data),
+  opsInspectionRun: async (payload: {
+    db_id?: string
+    preset_id?: string
+    check_ids?: string[]
+    thresholds?: Record<string, number>
+  }) =>
+    client.post('/ops/inspection/run', payload, {
+      headers: await opsWriteHeaders(),
+      timeout: HTTP_TIMEOUT_MS * 2,
+    }).then(res => res.data),
+  opsInspectionLatest: (params?: { db_id?: string; limit?: number; include_resolved?: boolean }) =>
+    client.get('/ops/inspection/latest', { params }).then(res => res.data),
+  opsInspectionHistory: (params?: { db_id?: string; limit?: number }) =>
+    client.get('/ops/inspection/history', { params }).then(res => res.data),
+  opsInspectionAlerts: (params?: { db_id?: string; limit?: number; include_resolved?: boolean }) =>
+    client.get('/ops/inspection/alerts', { params }).then(res => res.data),
+  opsInspectionAckAlert: async (alertId: string) =>
+    client.post(`/ops/inspection/alerts/${encodeURIComponent(alertId)}/ack`, {}, {
+      headers: await opsWriteHeaders(),
+    }).then(res => res.data),
 }

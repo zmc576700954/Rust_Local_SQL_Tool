@@ -6,10 +6,10 @@
 use serde::{Deserialize, Serialize};
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
-use sqlx::{Column, Row};
 use std::collections::{HashMap, HashSet};
 
 use crate::ops::error::OpsError;
+use crate::ops::mysql_rows::{fetch_rows, float_value, int_value, str_value, uint_value};
 use crate::ops::registry::{
     OpsContext, OpsScenario, PlanIdentity, ScenarioDescriptor, ScenarioStatus,
 };
@@ -690,74 +690,6 @@ fn make_index_name(table: &str, columns: &[String], existing: &HashSet<String>) 
         suffix += 1;
     }
     candidate
-}
-
-/// 直接读取 MySQL 行并统一转成字符串映射。
-///
-/// 不能走 `DatabaseOps::execute_query`：其 MySQL 适配器用
-/// `try_get::<serde_json::Value>` 解码每一列，普通 VARCHAR/BIGINT 列会解码失败
-/// 并静默变成 `Null`，导致证据采集拿不到 schema/EXPLAIN 字段。
-async fn fetch_rows(
-    ctx: &OpsContext,
-    sql: &str,
-) -> Result<Vec<HashMap<String, String>>, OpsError> {
-    let pool = ctx.db_client.mysql_pool()?;
-    let rows = sqlx::query(sql).fetch_all(pool).await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows.iter() {
-        let count = row.columns().len();
-        let mut map = HashMap::with_capacity(count);
-        for index in 0..count {
-            let key = row.column(index).name().to_ascii_lowercase();
-            if let Some(value) = mysql_cell_to_text(row, index) {
-                map.insert(key, value);
-            }
-        }
-        out.push(map);
-    }
-    Ok(out)
-}
-
-fn mysql_cell_to_text(row: &sqlx::mysql::MySqlRow, index: usize) -> Option<String> {
-    match row.try_get::<Option<String>, _>(index) {
-        Ok(Some(value)) => return Some(value),
-        Ok(None) => return None,
-        Err(_) => {}
-    }
-    // information_schema 的 COLUMN_TYPE / SHOW CREATE TABLE 等列是 TEXT 族，
-    // 某些驱动元数据带 BINARY 标志，String 解码会被拒；按字节兜底。
-    if let Ok(Some(value)) = row.try_get::<Option<&[u8]>, _>(index) {
-        return Some(String::from_utf8_lossy(value).into_owned());
-    }
-    if let Ok(Some(value)) = row.try_get::<Option<i64>, _>(index) {
-        return Some(value.to_string());
-    }
-    if let Ok(Some(value)) = row.try_get::<Option<u64>, _>(index) {
-        return Some(value.to_string());
-    }
-    if let Ok(Some(value)) = row.try_get::<Option<f64>, _>(index) {
-        return Some(value.to_string());
-    }
-    None
-}
-
-fn str_value(row: &HashMap<String, String>, key: &str) -> Option<String> {
-    row.get(key)
-        .map(|v| v.trim())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-fn int_value(row: &HashMap<String, String>, key: &str) -> Option<i64> {
-    row.get(key).and_then(|v| v.trim().parse::<i64>().ok())
-}
-
-fn uint_value(row: &HashMap<String, String>, key: &str) -> Option<u64> {
-    row.get(key).and_then(|v| v.trim().parse::<u64>().ok())
-}
-
-fn float_value(row: &HashMap<String, String>, key: &str) -> Option<f64> {
-    row.get(key).and_then(|v| v.trim().parse::<f64>().ok())
 }
 
 #[cfg(test)]

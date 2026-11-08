@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 
 use crate::ops::approval::ApprovalStore;
 use crate::ops::audit::AuditLog;
+use crate::ops::inspection::InspectionStore;
 use crate::ops::local_token::LocalToken;
 use crate::ops::plan_store::PlanStore;
 use crate::ops::policy::{default_policy_path, OpsPolicy};
@@ -16,6 +17,7 @@ pub struct OpsRuntime {
     pub approvals: RwLock<ApprovalStore>,
     pub policy: RwLock<OpsPolicy>,
     pub audit: AuditLog,
+    pub inspections: RwLock<InspectionStore>,
     pub local_token: LocalToken,
     pub data_dir: PathBuf,
     pub policy_path: PathBuf,
@@ -33,6 +35,7 @@ impl OpsRuntime {
             approvals: RwLock::new(ApprovalStore::new(Some(dir.join("approvals.json")))),
             policy: RwLock::new(policy),
             audit: AuditLog::new(Some(dir.join("audit.jsonl"))),
+            inspections: RwLock::new(InspectionStore::new(Some(dir.join("inspections.json")))),
             local_token: LocalToken::init(&dir),
             data_dir: dir,
             policy_path,
@@ -46,6 +49,9 @@ impl OpsRuntime {
             approvals: RwLock::new(ApprovalStore::new(Some(data_dir.join("approvals.json")))),
             policy: RwLock::new(policy),
             audit: AuditLog::new(Some(data_dir.join("audit.jsonl"))),
+            inspections: RwLock::new(InspectionStore::new(Some(
+                data_dir.join("inspections.json"),
+            ))),
             local_token: token,
             policy_path: default_policy_path(&data_dir),
             data_dir,
@@ -60,6 +66,7 @@ impl OpsRuntime {
             approvals: RwLock::new(ApprovalStore::new(None)),
             policy: RwLock::new(OpsPolicy::default()),
             audit: AuditLog::new(None),
+            inspections: RwLock::new(InspectionStore::new(None)),
             local_token: LocalToken::for_test("test-ops-token"),
             data_dir: PathBuf::new(),
             policy_path: PathBuf::new(),

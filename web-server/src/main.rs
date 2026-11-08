@@ -3,6 +3,8 @@
 mod ai_handlers;
 mod bridge;
 mod handlers;
+mod inspection_handlers;
+mod inspection_scheduler;
 mod mysql_codec;
 mod ops_handlers;
 mod routes;
@@ -941,6 +943,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ops,
     };
 
+    // 进程内调度：跟随本进程运行，进程退出即停止。
+    inspection_scheduler::spawn(state.clone());
+
     let api = Router::new()
         .route("/config", get(get_config).post(update_config))
         .route("/db/test", post(db_test))
@@ -1022,6 +1027,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/ops/audit", get(ops_handlers::ops_audit))
         .route("/ops/approvals", get(ops_handlers::ops_approvals))
+        .route(
+            "/ops/inspection/presets",
+            get(inspection_handlers::ops_inspection_presets),
+        )
+        .route(
+            "/ops/inspection/schedule",
+            get(inspection_handlers::ops_inspection_get_schedule)
+                .post(inspection_handlers::ops_inspection_save_schedule),
+        )
+        .route(
+            "/ops/inspection/run",
+            post(inspection_handlers::ops_inspection_run),
+        )
+        .route(
+            "/ops/inspection/latest",
+            get(inspection_handlers::ops_inspection_latest),
+        )
+        .route(
+            "/ops/inspection/history",
+            get(inspection_handlers::ops_inspection_history),
+        )
+        .route(
+            "/ops/inspection/alerts",
+            get(inspection_handlers::ops_inspection_alerts),
+        )
+        .route(
+            "/ops/inspection/alerts/:alert_id/ack",
+            post(inspection_handlers::ops_inspection_ack_alert),
+        )
         .route("/tools/jobs/:job_id", get(tool_job_status))
         .route("/tools/jobs/:job_id/cancel", post(tool_job_cancel))
         .route(
@@ -3274,6 +3308,14 @@ mod tests {
     fn test_app(state: AppState) -> Router {
         let api = Router::new()
             .route("/config", get(get_config))
+            .route(
+                "/ops/inspection/presets",
+                get(inspection_handlers::ops_inspection_presets),
+            )
+            .route(
+                "/ops/inspection/schedule",
+                get(inspection_handlers::ops_inspection_get_schedule),
+            )
             .route("/diagnostics/perf/probe", post(diagnostics_perf_probe))
             .route(
                 "/diagnostics/perf/suites",
@@ -3350,6 +3392,44 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(v.get("db_connections").is_some());
         assert!(v.get("ai_profiles").is_some());
+    }
+
+    #[tokio::test]
+    async fn ops_inspection_meta_routes_are_wired() {
+        let app = test_app(test_state());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/backend/ops/inspection/presets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["presets"].as_array().unwrap().len(), 4);
+        assert_eq!(v["checks"].as_array().unwrap().len(), 9);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/backend/ops/inspection/schedule")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["schedule"]["enabled"], false);
+        assert!(v.get("scope_note").is_some());
+        assert_eq!(v["notification_channels"][0], "in_app");
     }
 
     #[tokio::test]

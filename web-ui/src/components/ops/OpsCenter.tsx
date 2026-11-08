@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { api } from '../../api'
 import { tr } from '../../i18n'
+import { InspectionCenter } from './InspectionCenter'
 
 interface OpsCenterProps {
   dbId?: string
@@ -167,6 +168,35 @@ function statusClass(status: string): string {
   return 'text-amber-400'
 }
 
+type OpsView = 'advisor' | 'inspection'
+
+function OpsViewTabs({ view, onChange }: { view: OpsView; onChange: (view: OpsView) => void }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      <button
+        onClick={() => onChange('advisor')}
+        className={`rounded border px-3 py-1.5 text-xs ${
+          view === 'advisor'
+            ? 'border-blue-500/50 bg-blue-500/10 text-blue-300'
+            : 'border-dark-border text-gray-400 hover:bg-dark-panel'
+        }`}
+      >
+        {tr('索引优化', 'Index advisor')}
+      </button>
+      <button
+        onClick={() => onChange('inspection')}
+        className={`rounded border px-3 py-1.5 text-xs ${
+          view === 'inspection'
+            ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+            : 'border-dark-border text-gray-400 hover:bg-dark-panel'
+        }`}
+      >
+        {tr('定期巡检', 'Periodic inspection')}
+      </button>
+    </div>
+  )
+}
+
 export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
   const [scenarios, setScenarios] = useState<ScenarioDescriptor[]>([])
   const [policy, setPolicy] = useState<Record<string, any> | null>(null)
@@ -183,6 +213,7 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [audit, setAudit] = useState<Array<Record<string, any>>>([])
+  const [view, setView] = useState<OpsView>('advisor')
 
   const plan = analysis?.plan || null
   const evidence = analysis?.evidence || null
@@ -382,8 +413,18 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
   const policyAllowsApply = Boolean(policy?.policy?.allow_apply)
   const policyEnv = String(policy?.policy?.environment || 'dev')
 
+  if (view === 'inspection') {
+    return (
+      <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
+        <OpsViewTabs view={view} onChange={setView} />
+        <InspectionCenter dbId={dbId} dbType={dbType} />
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
+      <OpsViewTabs view={view} onChange={setView} />
       <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>

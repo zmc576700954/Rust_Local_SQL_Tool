@@ -27,7 +27,7 @@ use crate::state::AppState;
 
 // ── 通用 ────────────────────────────────────────────────────
 
-fn authorize_write(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
+pub(crate) fn authorize_write(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
     let provided = headers
         .get(OPS_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok());
@@ -40,7 +40,7 @@ fn authorize_write(state: &AppState, headers: &HeaderMap) -> Result<(), AppError
     }
 }
 
-async fn build_ctx(
+pub(crate) async fn build_ctx(
     state: &AppState,
     db_id: Option<&str>,
 ) -> Result<core_lib::ops::OpsContext, AppError> {
@@ -70,7 +70,7 @@ async fn plan_ctx(state: &AppState, plan: &OpsPlan) -> Result<core_lib::ops::Ops
     build_ctx(state, db_id).await
 }
 
-fn audit_event(state: &AppState, event: &str, outcome: &str, detail: serde_json::Value) {
+pub(crate) fn audit_event(state: &AppState, event: &str, outcome: &str, detail: serde_json::Value) {
     let mut record = AuditRecord::new(event, outcome);
     record.actor = Some("local-user".into());
     record.detail = detail;
