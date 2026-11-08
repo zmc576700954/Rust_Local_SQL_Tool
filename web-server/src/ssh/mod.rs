@@ -1,5 +1,4 @@
 pub mod diagnostics;
-pub mod tunnel;
 
+pub use core_lib::db::ssh::*;
 pub use diagnostics::*;
-pub use tunnel::*;

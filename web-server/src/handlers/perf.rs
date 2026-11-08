@@ -5,7 +5,8 @@ use axum::{
     Json,
 };
 use core_lib::{
-    db::DbClient,
+    config::DbConnection,
+    db::{open_db_client, DbClient},
     error::AppError,
     perf_report::{PerfProbeSummary, PerfBudget, PerfSample, summarize_perf_samples},
 };
@@ -202,22 +203,22 @@ fn default_perf_probe_budget(operation: &str) -> Option<PerfBudget> {
     }
 }
 
-pub async fn resolve_perf_probe_connection_url(
+pub async fn resolve_perf_probe_connection(
     state: &AppState,
     db_id: Option<&str>,
-) -> Result<String, AppError> {
+) -> Result<DbConnection, AppError> {
     let config = state.config.read().await.clone();
     if let Some(id) = db_id {
-        let conn = config
+        return config
             .db_connections
             .iter()
             .find(|conn| conn.id == id)
-            .ok_or_else(|| AppError::BadRequest(format!("Database connection {id} not found")))?;
-        return Ok(conn.url.clone());
+            .cloned()
+            .ok_or_else(|| AppError::BadRequest(format!("Database connection {id} not found")));
     }
 
     config
-        .get_active_db_url()
+        .get_active_db_connection()
         .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))
 }
 
@@ -225,8 +226,11 @@ pub async fn open_fresh_perf_probe_client(
     state: &AppState,
     db_id: Option<&str>,
 ) -> Result<DbClient, AppError> {
-    let url = resolve_perf_probe_connection_url(state, db_id).await?;
-    DbClient::new_default(&url).await.map_err(|e| AppError::InternalError(e.to_string()))
+    let conn = resolve_perf_probe_connection(state, db_id).await?;
+    let pool_config = state.config.read().await.pool_config.clone();
+    open_db_client(&conn, &pool_config)
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))
 }
 
 pub async fn run_connect_warm_probe(

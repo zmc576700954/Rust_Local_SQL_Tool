@@ -766,6 +766,7 @@ dependencies = [
  "sha2",
  "sqlparser",
  "sqlx",
+ "ssh2",
  "strsim 0.11.1",
  "thiserror 1.0.69",
  "tokio",

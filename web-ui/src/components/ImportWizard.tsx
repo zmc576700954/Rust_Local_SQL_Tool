@@ -7,10 +7,11 @@ import { tr } from '../i18n';
 interface ImportWizardProps {
   tableName: string;
   columns: any[];
+  dbId?: string;
   onComplete: () => void;
 }
 
-export function ImportWizard({ tableName, columns, onComplete }: ImportWizardProps) {
+export function ImportWizard({ tableName, columns, dbId, onComplete }: ImportWizardProps) {
   const { toast } = useToast();
   const [file, setFile] = useState<File | null>(null);
   const [sourceHeaders, setSourceHeaders] = useState<string[]>([]);
@@ -209,8 +210,8 @@ export function ImportWizard({ tableName, columns, onComplete }: ImportWizardPro
     setPollInterrupted(null);
     try {
       const res = isSqlFile
-        ? await api.importSqlJobStart({ sql: sqlText, force: true })
-        : await api.importJobStart({ table_name: tableName, data: parsedData, mapping, skip_errors: skipErrors });
+        ? await api.importSqlJobStart({ sql: sqlText, force: true, db_id: dbId })
+        : await api.importJobStart({ table_name: tableName, data: parsedData, mapping, skip_errors: skipErrors, db_id: dbId });
       setJobId(res.job_id);
       setResumeJobId(res.job_id);
     } catch (err: unknown) {

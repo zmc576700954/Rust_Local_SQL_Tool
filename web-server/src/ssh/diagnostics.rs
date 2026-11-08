@@ -224,23 +224,5 @@ pub fn classify_ssh_setup_error(msg: &str) -> DbTestResponse {
     )
 }
 
-pub fn extract_target_host_port_from_url(db_url: &str) -> Result<(String, u16), String> {
-    let parsed = url::Url::parse(db_url).map_err(|e| format!("invalid db_url: {e}"))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "db_url missing host".to_string())?
-        .to_string();
-    let port = parsed.port().unwrap_or(3306);
-    Ok((host, port))
-}
+// URL helpers live in core_lib::db::ssh and are re-exported by this module.
 
-pub fn rewrite_db_url_with_local_tunnel(db_url: &str, local_port: u16) -> Result<String, String> {
-    let mut parsed = url::Url::parse(db_url).map_err(|e| format!("invalid db_url: {e}"))?;
-    parsed
-        .set_host(Some("127.0.0.1"))
-        .map_err(|_| "failed to set tunnel host".to_string())?;
-    parsed
-        .set_port(Some(local_port))
-        .map_err(|_| "failed to set tunnel port".to_string())?;
-    Ok(parsed.to_string())
-}

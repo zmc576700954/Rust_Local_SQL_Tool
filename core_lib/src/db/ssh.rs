@@ -1,5 +1,9 @@
-/// SSH tunnel types and logic for proxying database connections through SSH.
-
+/// SSH tunnel support shared by every connection path (active pool, cached
+/// temporary clients, diagnostics).
+///
+/// The tunnel is single-channel: the pool used by a tunneled `DbClient` is
+/// therefore capped to one connection (see `client.rs`). Sequential connections
+/// are supported by looping over `accept()`; concurrent connections are not.
 #[derive(Clone)]
 pub struct SshTunnelConfig {
     pub ssh_host: String,
@@ -14,6 +18,14 @@ pub struct SshTunnelHandle {
     pub local_port: u16,
     stop_tx: std::sync::mpsc::Sender<()>,
     worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for SshTunnelHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshTunnelHandle")
+            .field("local_port", &self.local_port)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for SshTunnelHandle {
@@ -168,6 +180,9 @@ pub fn start_ssh_tunnel(cfg: SshTunnelConfig) -> Result<SshTunnelHandle, String>
             }
             match listener.accept() {
                 Ok((local_stream, _)) => {
+                    // Keep serving subsequent (sequential) pool connections: with
+                    // the tunneled pool capped at 1, connections are reused one at
+                    // a time, but the pool may recycle them over the pool lifetime.
                     let _ = proxy_one_connection(
                         &mut session,
                         local_stream,
@@ -175,7 +190,6 @@ pub fn start_ssh_tunnel(cfg: SshTunnelConfig) -> Result<SshTunnelHandle, String>
                         cfg.remote_port,
                         &stop_rx,
                     );
-                    break;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -195,4 +209,86 @@ pub fn start_ssh_tunnel(cfg: SshTunnelConfig) -> Result<SshTunnelHandle, String>
         stop_tx,
         worker: Some(worker),
     })
+}
+
+fn default_port_for_scheme(scheme: &str) -> Option<u16> {
+    match scheme.to_ascii_lowercase().as_str() {
+        "mysql" | "mariadb" => Some(3306),
+        "postgres" | "postgresql" => Some(5432),
+        "sqlserver" | "mssql" => Some(1433),
+        "oracle" => Some(1521),
+        _ => None,
+    }
+}
+
+/// Extracts the database target (remote host/port) from a connection URL.
+/// Falls back to the engine default port when the URL omits it.
+pub fn extract_target_host_port_from_url(db_url: &str) -> Result<(String, u16), String> {
+    let parsed = url::Url::parse(db_url).map_err(|e| format!("invalid db_url: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "db_url missing host".to_string())?
+        .to_string();
+    let port = parsed
+        .port()
+        .or_else(|| default_port_for_scheme(parsed.scheme()))
+        .ok_or_else(|| format!("unsupported db_url scheme: {}", parsed.scheme()))?;
+    Ok((host, port))
+}
+
+pub fn rewrite_db_url_with_local_tunnel(db_url: &str, local_port: u16) -> Result<String, String> {
+    let mut parsed = url::Url::parse(db_url).map_err(|e| format!("invalid db_url: {e}"))?;
+    parsed
+        .set_host(Some("127.0.0.1"))
+        .map_err(|_| "failed to set tunnel host".to_string())?;
+    parsed
+        .set_port(Some(local_port))
+        .map_err(|_| "failed to set tunnel port".to_string())?;
+    Ok(parsed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_mysql_target_with_default_port() {
+        let (host, port) = extract_target_host_port_from_url("mysql://user:pass@db.internal/app").unwrap();
+        assert_eq!(host, "db.internal");
+        assert_eq!(port, 3306);
+    }
+
+    #[test]
+    fn extracts_pg_target_with_default_port() {
+        let (host, port) = extract_target_host_port_from_url("postgres://user:pass@db.internal/app").unwrap();
+        assert_eq!(host, "db.internal");
+        assert_eq!(port, 5432);
+    }
+
+    #[test]
+    fn extracts_explicit_port() {
+        let (host, port) =
+            extract_target_host_port_from_url("postgres://user:pass@db.internal:6543/app").unwrap();
+        assert_eq!(host, "db.internal");
+        assert_eq!(port, 6543);
+    }
+
+    #[test]
+    fn rewrite_preserves_credentials_and_database() {
+        let rewritten =
+            rewrite_db_url_with_local_tunnel("mysql://user:secret@db.internal:3306/app?ssl-mode=disabled", 43210)
+                .unwrap();
+        let parsed = url::Url::parse(&rewritten).unwrap();
+        assert_eq!(parsed.host_str(), Some("127.0.0.1"));
+        assert_eq!(parsed.port(), Some(43210));
+        assert_eq!(parsed.username(), "user");
+        assert_eq!(parsed.password(), Some("secret"));
+        assert_eq!(parsed.path(), "/app");
+        assert_eq!(parsed.query(), Some("ssl-mode=disabled"));
+    }
+
+    #[test]
+    fn rewrite_rejects_invalid_url() {
+        assert!(rewrite_db_url_with_local_tunnel("not a url", 1).is_err());
+    }
 }

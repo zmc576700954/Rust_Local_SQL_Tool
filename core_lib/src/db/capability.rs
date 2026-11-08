@@ -10,53 +10,23 @@ pub struct DbCapabilities {
     pub supports_data_sync: bool,
 }
 
+/// Capability level reflects what is actually wired in the current codebase:
+/// - A: full pipeline (connect / test / SQL / schema / DDL / import-export / sync)
+/// - B: experimental (connect + non-transactional CRUD only)
+/// - C/D: declared but not connectable / not implemented
 pub fn capability_level(db_type: &DbType) -> DbCapabilityLevel {
     match db_type {
-        DbType::MySQL | DbType::MariaDB | DbType::PostgreSQL | DbType::SQLite => {
-            DbCapabilityLevel::A
-        }
-        DbType::SQLServer | DbType::Oracle => DbCapabilityLevel::B,
+        DbType::MySQL | DbType::MariaDB => DbCapabilityLevel::A,
+        // sqlx pools can be created and non-transactional CRUD is dispatched,
+        // but SQL execution, schema browsing, DDL, import/export and sync are MySQL-only.
+        DbType::PostgreSQL | DbType::SQLite => DbCapabilityLevel::B,
         DbType::MongoDB => DbCapabilityLevel::C,
-        DbType::Redis => DbCapabilityLevel::D,
+        DbType::SQLServer | DbType::Oracle | DbType::Redis => DbCapabilityLevel::D,
     }
 }
 
 pub fn capabilities(db_type: &DbType) -> DbCapabilities {
-    let level = capability_level(db_type);
-    match db_type {
-        DbType::MySQL | DbType::MariaDB | DbType::PostgreSQL | DbType::SQLite => DbCapabilities {
-            level,
-            supports_sql: true,
-            supports_schema_introspection: true,
-            supports_import_export: true,
-            supports_struct_sync: true,
-            supports_data_sync: true,
-        },
-        DbType::SQLServer | DbType::Oracle => DbCapabilities {
-            level,
-            supports_sql: true,
-            supports_schema_introspection: false,
-            supports_import_export: false,
-            supports_struct_sync: false,
-            supports_data_sync: false,
-        },
-        DbType::MongoDB => DbCapabilities {
-            level,
-            supports_sql: false,
-            supports_schema_introspection: false,
-            supports_import_export: false,
-            supports_struct_sync: false,
-            supports_data_sync: false,
-        },
-        DbType::Redis => DbCapabilities {
-            level,
-            supports_sql: false,
-            supports_schema_introspection: false,
-            supports_import_export: false,
-            supports_struct_sync: false,
-            supports_data_sync: false,
-        },
-    }
+    DbCapabilities::runtime_capabilities(db_type)
 }
 
 impl DbCapabilities {
@@ -71,23 +41,9 @@ impl DbCapabilities {
                 supports_struct_sync: true,
                 supports_data_sync: true,
             },
+            // PostgreSQL / SQLite: connection + basic CRUD only. The rest of the
+            // pipeline is still MySQL-only, so nothing else is advertised.
             DbType::PostgreSQL | DbType::SQLite => DbCapabilities {
-                level,
-                supports_sql: true,
-                supports_schema_introspection: true,
-                supports_import_export: true,
-                supports_struct_sync: true,
-                supports_data_sync: true,
-            },
-            DbType::SQLServer | DbType::Oracle => DbCapabilities {
-                level,
-                supports_sql: true,
-                supports_schema_introspection: true,
-                supports_import_export: true,
-                supports_struct_sync: false,
-                supports_data_sync: false,
-            },
-            DbType::MongoDB => DbCapabilities {
                 level,
                 supports_sql: false,
                 supports_schema_introspection: false,
@@ -95,7 +51,12 @@ impl DbCapabilities {
                 supports_struct_sync: false,
                 supports_data_sync: false,
             },
-            DbType::Redis => DbCapabilities {
+            // SQL Server / Oracle / MongoDB / Redis have no working connection
+            // path (DbClient::new returns Unsupported), so no capability is claimed.
+            DbType::SQLServer
+            | DbType::Oracle
+            | DbType::MongoDB
+            | DbType::Redis => DbCapabilities {
                 level,
                 supports_sql: false,
                 supports_schema_introspection: false,
@@ -134,23 +95,57 @@ mod tests {
     #[test]
     fn runtime_capabilities_mysql_full() {
         let caps = DbCapabilities::runtime_capabilities(&DbType::MySQL);
+        assert_eq!(caps.level, DbCapabilityLevel::A);
         assert!(caps.supports_sql);
+        assert!(caps.supports_schema_introspection);
+        assert!(caps.supports_import_export);
+        assert!(caps.supports_struct_sync);
         assert!(caps.supports_data_sync);
     }
 
     #[test]
-    fn runtime_capabilities_pg_has_sync() {
+    fn runtime_capabilities_pg_is_experimental_without_sync() {
         let caps = DbCapabilities::runtime_capabilities(&DbType::PostgreSQL);
-        assert!(caps.supports_sql);
-        assert!(caps.supports_data_sync);
+        assert_eq!(caps.level, DbCapabilityLevel::B);
+        assert!(!caps.supports_sql);
+        assert!(!caps.supports_schema_introspection);
+        assert!(!caps.supports_import_export);
+        assert!(!caps.supports_struct_sync);
+        assert!(!caps.supports_data_sync);
     }
 
     #[test]
-    fn runtime_capabilities_mssql_no_sync() {
+    fn runtime_capabilities_sqlite_is_experimental_without_sync() {
+        let caps = DbCapabilities::runtime_capabilities(&DbType::SQLite);
+        assert_eq!(caps.level, DbCapabilityLevel::B);
+        assert!(!caps.supports_data_sync);
+    }
+
+    #[test]
+    fn runtime_capabilities_mssql_not_connectable() {
         let caps = DbCapabilities::runtime_capabilities(&DbType::SQLServer);
-        assert!(caps.supports_sql);
+        assert_eq!(caps.level, DbCapabilityLevel::D);
+        assert!(!caps.supports_sql);
+        assert!(!caps.supports_schema_introspection);
+        assert!(!caps.supports_import_export);
         assert!(!caps.supports_data_sync);
         assert!(!caps.supports_struct_sync);
+    }
+
+    #[test]
+    fn static_and_runtime_capabilities_agree() {
+        for db_type in [
+            DbType::MySQL,
+            DbType::MariaDB,
+            DbType::PostgreSQL,
+            DbType::SQLite,
+            DbType::SQLServer,
+            DbType::Oracle,
+            DbType::MongoDB,
+            DbType::Redis,
+        ] {
+            assert_eq!(capabilities(&db_type), DbCapabilities::runtime_capabilities(&db_type));
+        }
     }
 
     #[test]
@@ -160,8 +155,15 @@ mod tests {
     }
 
     #[test]
-    fn check_capability_failure() {
-        let caps = DbCapabilities::runtime_capabilities(&DbType::Redis);
-        assert!(caps.check_capability("data_sync").is_err());
+    fn check_capability_failure_for_experimental_and_unsupported() {
+        let pg_caps = DbCapabilities::runtime_capabilities(&DbType::PostgreSQL);
+        assert!(pg_caps.check_capability("data_sync").is_err());
+        assert!(pg_caps.check_capability("schema_introspection").is_err());
+
+        let mssql_caps = DbCapabilities::runtime_capabilities(&DbType::SQLServer);
+        assert!(mssql_caps.check_capability("sql").is_err());
+
+        let redis_caps = DbCapabilities::runtime_capabilities(&DbType::Redis);
+        assert!(redis_caps.check_capability("data_sync").is_err());
     }
 }

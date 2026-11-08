@@ -486,6 +486,30 @@ impl AppConfig {
         self.db_url.clone()
     }
 
+    /// Returns the full active connection definition (URL + transport config).
+    /// Falls back to the legacy `db_url` field when no connection is active.
+    pub fn get_active_db_connection(&self) -> Option<DbConnection> {
+        if let Some(active_id) = &self.active_db_id {
+            if let Some(conn) = self.db_connections.iter().find(|c| &c.id == active_id) {
+                return Some(conn.clone());
+            }
+        }
+        self.db_url.as_ref().map(|url| DbConnection {
+            id: "legacy".to_string(),
+            name: "Legacy connection".to_string(),
+            url: url.clone(),
+            group_name: None,
+            color: None,
+            is_favorite: false,
+            ssh: None,
+            ssl: None,
+            db_type: DbType::from_url(url),
+            capability_level: None,
+            schema: None,
+            is_read_only: false,
+        })
+    }
+
     /// Returns the active DB type based on the URL scheme
     pub fn get_active_db_type(&self) -> String {
         self.get_active_db_type_enum().display_name().to_string()
@@ -609,9 +633,9 @@ impl AppConfig {
                 .clone()
                 .unwrap_or_else(|| DbType::from_url(&c.url).unwrap_or(DbType::MySQL));
             c.db_type = Some(t.clone());
-            if c.capability_level.is_none() {
-                c.capability_level = Some(crate::db_capability::capability_level(&t));
-            }
+            // Always derive the level from the real capability table so persisted
+            // configs cannot keep advertising capabilities the code lacks.
+            c.capability_level = Some(crate::db_capability::capability_level(&t));
             if c.schema.is_none() {
                 c.schema = Some(DbConnectionSchema::from_db_type(&t, &c.url));
             }

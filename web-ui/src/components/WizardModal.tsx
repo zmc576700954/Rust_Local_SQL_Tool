@@ -110,12 +110,13 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
     let keepLoading = false;
     try {
       if (type === 'mock-data') {
-        const res = await api.generateMockData(payload.tableName, rowCount, mockRules);
+        const res = await api.generateMockData(payload.tableName, rowCount, mockRules, payload.dbId);
         setResult(res.sql);
       } else if (type === 'export') {
         const res = await api.exportJobStart({
           table_name: payload.tableName,
           export_type: exportType,
+          db_id: payload.dbId,
           where_clause: exportWhere.trim() ? exportWhere.trim() : null,
           primary_key: exportPrimaryKey.trim() ? exportPrimaryKey.trim() : null,
           pk_start: exportPkStart.trim() ? exportPkStart.trim() : null,
@@ -471,6 +472,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
               <ImportWizard 
                 tableName={payload.tableName} 
                 columns={payload.columns} 
+                dbId={payload.dbId}
                 onComplete={() => {
                   toast(tr('导入成功', 'Import completed successfully'), 'success');
                   onClose();

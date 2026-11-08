@@ -3,6 +3,7 @@ import { AlignLeft, CheckSquare, ChevronDown, ChevronRight, Database, Eye, FileU
 import type { ConfigData, DbConnection, SchemaResponse, ViewInfo } from '../types'
 import { tr } from '../i18n'
 import { api } from '../api'
+import { dbCapabilityNotice, dbTypeFromUrl } from '../utils/dbCapabilities'
 
 function redactUrl(url: string) {
   return String(url || '').replace(/:[^:@]+@/, ':***@')
@@ -1266,6 +1267,29 @@ export function DbExplorerSidebar({
                       </div>
                     </div>
                   </div>
+                  {(() => {
+                    const editDbType = dbTypeFromUrl(editUrl)
+                    const notice = dbCapabilityNotice(editDbType)
+                    const transportNotice =
+                      editDbType === 'sqlite' && editSshEnabled
+                        ? tr(
+                            'SQLite 为本地文件数据库，不支持 SSH 隧道；保存后建立连接会被拒绝。',
+                            'SQLite is a local file database and does not support SSH tunnels; the connection will be rejected.'
+                          )
+                        : editDbType === 'sqlite' && editSslEnabled
+                          ? tr(
+                              'SQLite 为本地文件数据库，不支持 SSL；保存后建立连接会被拒绝。',
+                              'SQLite is a local file database and does not support SSL; the connection will be rejected.'
+                            )
+                          : null
+                    if (!notice && !transportNotice) return null
+                    return (
+                      <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300 space-y-1">
+                        {notice ? <div>{notice}</div> : null}
+                        {transportNotice ? <div>{transportNotice}</div> : null}
+                      </div>
+                    )
+                  })()}
                 </>
               ) : (
                 <>

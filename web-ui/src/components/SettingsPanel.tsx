@@ -4,7 +4,7 @@ import { X, Save, RefreshCw, Archive, Database, Server, Cpu, HeartPulse, Plus, P
 import { api } from '../api'
 import { parseError, sanitizeForLog } from '../utils'
 import { useToast } from './Toast'
-import { dbLevelDisplayName, dbTypeDisplayName } from '../utils/dbCapabilities'
+import { dbCapabilityNotice, dbLevelDisplayName, dbTypeDisplayName } from '../utils/dbCapabilities'
 import { useI18n } from '../i18n'
 import { Button } from './ui'
 
@@ -760,6 +760,11 @@ export function SettingsPanel({ onClose, onPolicyChange, onConfigChange }: { onC
                                 <div className="text-sm text-gray-200 font-medium">{conn.name || conn.id}</div>
                                 <div className="text-xs text-gray-500 font-mono mt-0.5 break-all">{conn.url.replace(/:[^:@]+@/, ':***@')}</div>
                                 <div className="text-xs text-gray-500 mt-1">{typeText} / {levelText}</div>
+                                {dbCapabilityNotice(conn.db_type) ? (
+                                  <div className="text-xs text-amber-400 mt-1 max-w-lg">
+                                    {dbCapabilityNotice(conn.db_type)}
+                                  </div>
+                                ) : null}
                               </div>
                             </div>
                             <button

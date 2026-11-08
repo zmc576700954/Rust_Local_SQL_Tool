@@ -8,8 +8,8 @@ use axum::{
     Json,
 };
 use core_lib::{
-    config::{AppConfig, DbType},
-    db::DbClient,
+    config::{AppConfig, DbConnection, DbType},
+    db::{connection_fingerprint, open_db_client, DbClient},
     error::AppError,
     tools::DataExporter,
 };
@@ -224,12 +224,16 @@ pub async fn export_job_start(
         })?;
     let limits = state.limits.clone();
     ensure_temp_quota(&limits, limits.max_file_bytes).await?;
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let db_client = if let Some(db_id) = req.db_id.as_deref() {
+        get_temp_db_client(&state, db_id).await?.0
+    } else {
+        state
+            .db_client
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
+    };
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -380,12 +384,16 @@ pub async fn import_job_start(
                 state.limits.max_job_concurrency
             ))
         })?;
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let db_client = if let Some(db_id) = req.db_id.as_deref() {
+        get_temp_db_client(&state, db_id).await?.0
+    } else {
+        state
+            .db_client
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
+    };
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -903,6 +911,27 @@ pub(crate) struct GoLiveConnSpec {
     url: String,
     db_type: DbType,
     is_read_only: bool,
+    ssh: Option<serde_json::Value>,
+    ssl: Option<serde_json::Value>,
+}
+
+impl GoLiveConnSpec {
+    fn to_db_connection(&self) -> DbConnection {
+        DbConnection {
+            id: self.id.clone(),
+            name: self.id.clone(),
+            url: self.url.clone(),
+            group_name: None,
+            color: None,
+            is_favorite: false,
+            ssh: self.ssh.clone(),
+            ssl: self.ssl.clone(),
+            db_type: Some(self.db_type.clone()),
+            capability_level: None,
+            schema: None,
+            is_read_only: self.is_read_only,
+        }
+    }
 }
 
 pub fn resolve_go_live_connections(
@@ -927,6 +956,7 @@ pub fn resolve_go_live_connections(
 
     for id in resolved_ids {
         if id == "active" {
+            let active_conn = config.get_active_db_connection();
             let url = config.get_active_db_url().unwrap_or_default();
             let db_type = config.get_active_db_type_enum();
             if url.trim().is_empty() {
@@ -937,6 +967,8 @@ pub fn resolve_go_live_connections(
                 url,
                 db_type,
                 is_read_only: false,
+                ssh: active_conn.as_ref().and_then(|c| c.ssh.clone()),
+                ssl: active_conn.as_ref().and_then(|c| c.ssl.clone()),
             });
             continue;
         }
@@ -955,6 +987,8 @@ pub fn resolve_go_live_connections(
                 url,
                 db_type,
                 is_read_only: conn.is_read_only,
+                ssh: conn.ssh.clone(),
+                ssl: conn.ssl.clone(),
             });
         } else {
             errors.push(format!("db connection not found: {}", id));
@@ -962,11 +996,14 @@ pub fn resolve_go_live_connections(
     }
 
     if out.is_empty() {
+        let active_conn = config.get_active_db_connection();
         out.push(GoLiveConnSpec {
             id: "active".to_string(),
             url: config.get_active_db_url().unwrap_or_default(),
             db_type: config.get_active_db_type_enum(),
             is_read_only: false,
+            ssh: active_conn.as_ref().and_then(|c| c.ssh.clone()),
+            ssl: active_conn.as_ref().and_then(|c| c.ssl.clone()),
         });
     }
 
@@ -1246,7 +1283,10 @@ pub async fn run_go_live_job(
                 if let Some(c) = clients.get(&conn_id).cloned() {
                     Ok(c)
                 } else {
-                    DbClient::new_default(&conn.url).await.map_err(|e| e.to_string())
+                    let pool_config = state.config.read().await.pool_config.clone();
+                    open_db_client(&conn.to_db_connection(), &pool_config)
+                        .await
+                        .map_err(|e| e.to_string())
                 };
 
             let mut client_opt: Option<DbClient> = None;
@@ -1415,6 +1455,7 @@ pub async fn run_go_live_job(
                                 pk_end: Some("20".to_string()),
                                 window_limit: Some(7),
                                 window_offset: Some(3),
+                                db_id: None,
                             };
 
                             let _stats = run_export_job(client, &nop_state, &dummy_job_id, &export_req, &export_path, limits.max_file_bytes).await?;
@@ -1438,6 +1479,7 @@ pub async fn run_go_live_job(
                                 data: rows.clone(),
                                 mapping,
                                 skip_errors: false,
+                                db_id: None,
                             };
 
                             let import_res = run_import_job(client, &nop_state, &dummy_job_id, import_req).await?;
@@ -2311,19 +2353,20 @@ pub async fn get_temp_db_client(state: &AppState, db_id: &str) -> Result<(DbClie
     }
 
     let now = Instant::now();
+    let fingerprint = connection_fingerprint(conn);
     if let Some(entry) = state.db_client_cache.read().await.get(db_id).cloned() {
-        if entry.url == conn.url && entry.expires_at > now {
+        if entry.url == fingerprint && entry.expires_at > now {
             return Ok((entry.client, entry.db_name));
         }
     }
 
-    let client = DbClient::new_default(&conn.url)
+    let client = open_db_client(conn, &config.pool_config)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
     let entry = CachedDbClient {
         client: client.clone(),
         db_name: db_name.clone(),
-        url: conn.url.clone(),
+        url: fingerprint,
         expires_at: now + DB_CLIENT_CACHE_TTL,
     };
     state

@@ -202,6 +202,7 @@ impl From<crate::db::DbError> for ServiceError {
             crate::db::DbError::MissingData(msg) => Self::BadRequest(msg),
             crate::db::DbError::Unsupported(msg) => Self::BadRequest(msg),
             crate::db::DbError::Security(msg) => Self::BadRequest(msg),
+            crate::db::DbError::Tunnel(msg) => Self::BadRequest(format!("SSH 隧道错误: {msg}")),
         }
     }
 }

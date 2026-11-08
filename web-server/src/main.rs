@@ -252,6 +252,8 @@ struct ImportRequest {
     data: Vec<std::collections::HashMap<String, serde_json::Value>>,
     mapping: std::collections::HashMap<String, String>, // db_column -> source_field
     skip_errors: bool,
+    /// Target connection; when omitted the currently active connection is used.
+    db_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -265,12 +267,16 @@ async fn import_data(
     State(state): State<AppState>,
     Json(req): Json<ImportRequest>,
 ) -> Result<Json<ImportResponse>, AppError> {
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let db_client = if let Some(db_id) = req.db_id.as_deref() {
+        get_temp_db_client(&state, db_id).await?.0
+    } else {
+        state
+            .db_client
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
+    };
 
     let table_name = req.table_name;
     let mut inserted = 0;
@@ -483,6 +489,28 @@ async fn parse_navicat(
 }
 
 async fn db_test(Json(req): Json<DbTestRequest>) -> Result<Json<DbTestResponse>, AppError> {
+    // Runtime test connections are only implemented for MySQL/MariaDB. Report
+    // that explicitly instead of parsing other engines as MySQL and emitting a
+    // misleading "invalid url" diagnostic.
+    if let Some(db_url) = req.db_url.as_deref().filter(|s| !s.trim().is_empty()) {
+        let db_type = core_lib::config::DbType::from_url(db_url);
+        if !matches!(
+            db_type,
+            None | Some(core_lib::config::DbType::MySQL) | Some(core_lib::config::DbType::MariaDB)
+        ) {
+            let detected = db_type.map(|t| t.display_name()).unwrap_or("unknown");
+            return Ok(Json(db_test_failed(
+                "validation",
+                "DB_TEST_UNSUPPORTED_TYPE",
+                "连接测试当前仅支持 MySQL / MariaDB。",
+                Some(
+                    "PostgreSQL / SQLite 为实验性支持（仅连接与基础 CRUD），SQL Server / Oracle / MongoDB / Redis 尚未实现。",
+                ),
+                Some(format!("db_type={detected}")),
+            )));
+        }
+    }
+
     let policy = TimeoutPolicy::default();
     let mut db_url_for_connect = req.db_url.clone();
     let mut host_override: Option<String> = None;
@@ -771,7 +799,7 @@ use core_lib::{
     },
     config::AppConfig,
     crud::{CrudManager, CrudRequest},
-    db::DbClient,
+    db::{connection_fingerprint, open_db_client, DbClient},
     knowledge_base::KnowledgeBase,
     navicat::{NavicatConnection, NavicatParser},
     offline_parser::OfflineParser,
@@ -869,10 +897,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let limits = RuntimeLimits::default();
     let job_semaphore = Arc::new(Semaphore::new(limits.max_job_concurrency));
 
-    // Initialize DB Client if configured
+    // Initialize DB Client if configured (including SSH tunnel / TLS)
     let mut db_client = None;
-    if let Some(ref url) = config.get_active_db_url() {
-        match DbClient::new(url, &config.pool_config, &config.get_active_db_type_enum()).await {
+    if let Some(conn) = config.get_active_db_connection() {
+        match open_db_client(&conn, &config.pool_config).await {
             Ok(client) => {
                 tracing::info!("Connected to database");
                 db_client = Some(client);
@@ -1373,6 +1401,50 @@ async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(config_for_client(&config))
 }
 
+/// Resolves the connection referenced by an explicit `active_db_id`.
+fn active_connection_for_update(config: &AppConfig) -> Option<core_lib::config::DbConnection> {
+    let active_id = config.active_db_id.as_ref()?;
+    config
+        .db_connections
+        .iter()
+        .find(|c| &c.id == active_id)
+        .cloned()
+}
+
+fn active_connection_fingerprint(config: &AppConfig) -> Option<String> {
+    active_connection_for_update(config).map(|c| connection_fingerprint(&c))
+}
+
+/// Whether a config save must rebuild the active pool.
+///
+/// - Explicit connection selections: only a target/transport change reconnects.
+/// - Pure legacy configs (no `db_connections`, only `db_url`): a `db_url` change
+///   reconnects.
+/// - Disconnecting / deleting the last connection (`active_db_id` cleared) is a
+///   change and must close the old pool instead of falling back to `db_url`.
+fn save_requires_reconnect(prev: &AppConfig, new: &AppConfig) -> bool {
+    let prev_had_active = prev.active_db_id.is_some();
+    let new_has_active = new.active_db_id.is_some();
+    if prev_had_active || new_has_active {
+        active_connection_fingerprint(prev) != active_connection_fingerprint(new)
+    } else {
+        prev.db_url != new.db_url
+    }
+}
+
+/// The connection to dial for a save that requires a reconnect.
+fn connection_to_dial_for_save(prev: &AppConfig, new: &AppConfig) -> Option<core_lib::config::DbConnection> {
+    if new.active_db_id.is_some() {
+        return active_connection_for_update(new);
+    }
+    // Only pure legacy configs may fall back to db_url. When the previous config
+    // had an active connection, a cleared active_db_id means "disconnect".
+    if prev.active_db_id.is_none() {
+        return new.get_active_db_connection();
+    }
+    None
+}
+
 async fn update_config(
     State(state): State<AppState>,
     Json(new_config): Json<AppConfig>,
@@ -1380,33 +1452,51 @@ async fn update_config(
     let prev_config = state.config.read().await.clone();
     let mut new_config = new_config.normalize();
     new_config.merge_secrets_from(&prev_config);
-    // Save to file
+
+    // Only reconnect when the active connection's target or transport changed.
+    let connection_changed = save_requires_reconnect(&prev_config, &new_config);
+
+    // Build the replacement pool BEFORE mutating persisted or in-memory state.
+    // If dialing the new database fails, the old config and pool stay untouched,
+    // so the UI can never display the new database while still talking to the old.
+    let new_client = if connection_changed {
+        match connection_to_dial_for_save(&prev_config, &new_config) {
+            Some(conn) => Some(
+                open_db_client(&conn, &new_config.pool_config)
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("DB connection failed: {}", e)))?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    // Persist only after the new connection (if any) succeeded.
     new_config
         .save()
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
-    // Update in-memory state
+    // Swap the pool atomically when reconnecting (replace keeps Some(...) at all
+    // times, so there is no "db_client is None" gap), then close the old pool.
+    if connection_changed {
+        let old_client = {
+            let mut db_write = state.db_client.write().await;
+            std::mem::replace(&mut *db_write, new_client)
+        };
+        if let Some(old) = old_client {
+            old.pool.close().await;
+        }
+    }
+
+    // Update in-memory config after the pool is ready.
     {
         let mut config_write = state.config.write().await;
         *config_write = new_config.clone();
     }
     state.db_client_cache.write().await.clear();
     clear_metadata_caches(&state).await;
-
-    // Re-init DB if url changed
-    if let Some(ref url) = new_config.get_active_db_url() {
-        match DbClient::new(url, &new_config.pool_config, &new_config.get_active_db_type_enum()).await {
-            Ok(client) => {
-                if let Some(old) = state.db_client.write().await.take() {
-                    old.pool.close().await;
-                }
-                let mut db_write = state.db_client.write().await;
-                *db_write = Some(client);
-            }
-            Err(e) => return Err(AppError::BadRequest(format!("DB connection failed: {}", e))),
-        }
-    }
 
     // AI config is now read fresh from AppState.config on each request.
 
@@ -2287,6 +2377,8 @@ struct MockDataRequest {
     table_name: String,
     row_count: u32,
     rules: Option<std::collections::HashMap<String, String>>,
+    /// Target connection; when omitted the currently active connection is used.
+    db_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2298,19 +2390,24 @@ async fn generate_mock_data(
     State(state): State<AppState>,
     Json(req): Json<MockDataRequest>,
 ) -> Result<Json<MockDataResponse>, AppError> {
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
-    let url = state
-        .config
-        .read()
-        .await
-        .get_active_db_url()
-        .unwrap_or_default();
-    let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
+    let (db_client, db_name) = if let Some(db_id) = req.db_id.as_deref() {
+        get_temp_db_client(&state, db_id).await?
+    } else {
+        let client = state
+            .db_client
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+        let url = state
+            .config
+            .read()
+            .await
+            .get_active_db_url()
+            .unwrap_or_default();
+        let name = DbClient::extract_db_name(&url).unwrap_or_default();
+        (client, name)
+    };
 
     let columns = SchemaExtractor::get_columns(&db_client, &db_name, &req.table_name)
         .await
@@ -2343,18 +2440,24 @@ use futures::StreamExt;
 struct ExportRequest {
     table_name: String,
     export_type: String, // "csv", "sql", "json"
+    /// Target connection; when omitted the currently active connection is used.
+    db_id: Option<String>,
 }
 
 async fn export_data(
     State(state): State<AppState>,
     Json(req): Json<ExportRequest>,
 ) -> Result<Response, AppError> {
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let db_client = if let Some(db_id) = req.db_id.as_deref() {
+        get_temp_db_client(&state, db_id).await?.0
+    } else {
+        state
+            .db_client
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
+    };
 
     let table_name = req.table_name.clone();
     let export_type = req.export_type.clone();
@@ -2495,6 +2598,8 @@ pub(crate) struct ExportJobStartRequest {
     pk_end: Option<String>,
     window_limit: Option<u64>,
     window_offset: Option<u64>,
+    /// Target connection; when omitted the currently active connection is used.
+    db_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2503,6 +2608,8 @@ pub(crate) struct ImportJobStartRequest {
     data: Vec<std::collections::HashMap<String, serde_json::Value>>,
     mapping: std::collections::HashMap<String, String>,
     skip_errors: bool,
+    /// Target connection; when omitted the currently active connection is used.
+    db_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3805,7 +3912,7 @@ mod tests {
                 is_favorite: false,
                 ssh: None,
                 ssl: None,
-                db_type: Some(DbType::MySQL),
+                db_type: Some(core_lib::config::DbType::MySQL),
                 capability_level: None,
                 schema: None,
                 is_read_only: true,
@@ -4110,5 +4217,143 @@ mod tests {
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let s = String::from_utf8_lossy(&body);
         assert!(s.contains("SQL parsing failed"));
+    }
+
+    #[test]
+    fn export_job_request_accepts_db_id() {
+        let req: ExportJobStartRequest =
+            serde_json::from_str(r#"{"table_name":"t","export_type":"csv","db_id":"db-2"}"#)
+                .unwrap();
+        assert_eq!(req.db_id.as_deref(), Some("db-2"));
+    }
+
+    #[test]
+    fn export_job_request_db_id_is_optional() {
+        let req: ExportJobStartRequest =
+            serde_json::from_str(r#"{"table_name":"t","export_type":"csv"}"#).unwrap();
+        assert!(req.db_id.is_none());
+    }
+
+    #[test]
+    fn import_job_request_accepts_db_id_and_defaults_to_none() {
+        let req: ImportJobStartRequest = serde_json::from_str(
+            r#"{"table_name":"t","data":[],"mapping":{},"skip_errors":false,"db_id":"db-2"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.db_id.as_deref(), Some("db-2"));
+
+        let req: ImportJobStartRequest = serde_json::from_str(
+            r#"{"table_name":"t","data":[],"mapping":{},"skip_errors":false}"#,
+        )
+        .unwrap();
+        assert!(req.db_id.is_none());
+    }
+
+    #[test]
+    fn mock_data_request_accepts_db_id_and_defaults_to_none() {
+        let req: MockDataRequest =
+            serde_json::from_str(r#"{"table_name":"t","row_count":5,"db_id":"db-2"}"#).unwrap();
+        assert_eq!(req.db_id.as_deref(), Some("db-2"));
+
+        let req: MockDataRequest =
+            serde_json::from_str(r#"{"table_name":"t","row_count":5}"#).unwrap();
+        assert!(req.db_id.is_none());
+    }
+
+    fn lifecycle_conn(id: &str, url: &str) -> core_lib::config::DbConnection {
+        core_lib::config::DbConnection {
+            id: id.to_string(),
+            name: id.to_string(),
+            url: url.to_string(),
+            group_name: None,
+            color: None,
+            is_favorite: false,
+            ssh: None,
+            ssl: None,
+            db_type: core_lib::config::DbType::from_url(url),
+            capability_level: None,
+            schema: None,
+            is_read_only: false,
+        }
+    }
+
+    #[test]
+    fn update_config_keeps_pool_when_only_non_connection_settings_change() {
+        let mut prev = AppConfig::default();
+        prev.active_db_id = Some("db-1".to_string());
+        prev.db_connections = vec![lifecycle_conn("db-1", "mysql://u:p@h/app")];
+        let mut next = prev.clone();
+        next.ai_profiles = vec![];
+
+        assert!(!save_requires_reconnect(&prev, &next));
+    }
+
+    #[test]
+    fn update_config_reconnects_when_url_changes() {
+        let mut prev = AppConfig::default();
+        prev.active_db_id = Some("db-1".to_string());
+        prev.db_connections = vec![lifecycle_conn("db-1", "mysql://u:p@h/app")];
+
+        let mut next = prev.clone();
+        next.db_connections = vec![lifecycle_conn("db-1", "mysql://u:p@h/other")];
+
+        assert!(save_requires_reconnect(&prev, &next));
+        let dial = connection_to_dial_for_save(&prev, &next).unwrap();
+        assert_eq!(dial.url, "mysql://u:p@h/other");
+    }
+
+    #[test]
+    fn update_config_reconnects_when_transport_changes() {
+        let mut prev = AppConfig::default();
+        prev.active_db_id = Some("db-1".to_string());
+        prev.db_connections = vec![lifecycle_conn("db-1", "mysql://u:p@h/app")];
+
+        let mut next = prev.clone();
+        let mut conn = lifecycle_conn("db-1", "mysql://u:p@h/app");
+        conn.ssl = Some(serde_json::json!({"enabled": true, "mode": "required"}));
+        next.db_connections = vec![conn];
+
+        assert!(save_requires_reconnect(&prev, &next));
+    }
+
+    #[test]
+    fn update_config_disconnect_closes_pool_without_legacy_fallback() {
+        let mut prev = AppConfig::default();
+        prev.active_db_id = Some("db-1".to_string());
+        prev.db_connections = vec![lifecycle_conn("db-1", "mysql://u:p@h/app")];
+        prev.db_url = Some("mysql://u:p@h/app".to_string());
+
+        let mut next = prev.clone();
+        next.active_db_id = None;
+
+        assert!(save_requires_reconnect(&prev, &next));
+        assert!(connection_to_dial_for_save(&prev, &next).is_none());
+        assert!(active_connection_for_update(&next).is_none());
+    }
+
+    #[test]
+    fn update_config_reconnects_for_legacy_db_url_change() {
+        let mut prev = AppConfig::default();
+        prev.db_url = Some("mysql://u:p@h/app".to_string());
+
+        let mut next = prev.clone();
+        next.db_url = Some("mysql://u:p@h/other".to_string());
+
+        assert!(save_requires_reconnect(&prev, &next));
+        let dial = connection_to_dial_for_save(&prev, &next).unwrap();
+        assert_eq!(dial.url, "mysql://u:p@h/other");
+    }
+
+    #[test]
+    fn update_config_treats_empty_active_id_as_disconnected_even_with_legacy_url() {
+        let config = AppConfig {
+            active_db_id: None,
+            db_url: Some("mysql://u:p@h/app".to_string()),
+            db_connections: vec![lifecycle_conn("db-1", "mysql://u:p@h/app")],
+            ..Default::default()
+        };
+
+        assert!(active_connection_for_update(&config).is_none());
+        assert!(active_connection_fingerprint(&config).is_none());
     }
 }

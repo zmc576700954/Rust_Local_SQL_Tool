@@ -31,7 +31,7 @@ import { getStatementKind, getStatementLabel, isPotentiallyDangerousSql, splitSq
   
 import { parseError, formatErr, sanitizeForLog } from '../utils'
 import type { AppError } from '../utils'
-import { dbTypeDisplayName } from '../utils/dbCapabilities'
+import { dbCapabilityNotice, dbTypeDisplayName, dbTypeFromUrl } from '../utils/dbCapabilities'
 import { useAutoI18nDom } from '../i18n'
 import { tr } from '../i18n'
 
@@ -1840,6 +1840,17 @@ function App() {
               }
             ></div>
           </div>
+          {(() => {
+            const activeConn = (configData?.db_connections || []).find((c: DbConnection) => c.id === configData?.active_db_id)
+            const activeDbType = activeConn?.db_type || dbTypeFromUrl(activeConn?.url)
+            const notice = dbCapabilityNotice(activeDbType)
+            if (!notice) return null
+            return (
+              <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] leading-4 text-amber-300">
+                {notice}
+              </div>
+            )
+          })()}
         </div>
         
         <div className="flex border-b border-dark-border">
@@ -2553,7 +2564,7 @@ function App() {
                 isOpen: true,
                 title: `Generate Mock Data - ${table.table_name}`,
                 type: 'mock-data',
-                payload: { tableName: table.table_name, columns: table.columns }
+                payload: { tableName: table.table_name, columns: table.columns, dbId: configData?.active_db_id }
               });
             }}
             onImport={(table) => {
@@ -2561,7 +2572,7 @@ function App() {
                 isOpen: true,
                 title: `Import Wizard - ${table.table_name}`,
                 type: 'import',
-                payload: { tableName: table.table_name, columns: table.columns }
+                payload: { tableName: table.table_name, columns: table.columns, dbId: configData?.active_db_id }
               });
             }}
             onExport={(table) => {
@@ -2569,7 +2580,7 @@ function App() {
                 isOpen: true,
                 title: `Export Data - ${table.table_name}`,
                 type: 'export',
-                payload: { tableName: table.table_name }
+                payload: { tableName: table.table_name, dbId: configData?.active_db_id }
               });
             }}
           />

@@ -1,6 +1,8 @@
 use crate::config::{DbType, PoolConfig};
+use crate::db::ssh::SshTunnelHandle;
 use crate::sql_util;
 use crate::timeout_policy::TimeoutPolicy;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -31,6 +33,8 @@ pub enum DbError {
     Unsupported(String),
     #[error("Security: {0}")]
     Security(String),
+    #[error("SSH tunnel error: {0}")]
+    Tunnel(String),
 }
 
 /// Validate that a database connection URL is safe to use.
@@ -213,6 +217,44 @@ impl DbPool {
 pub struct DbClient {
     pub pool: DbPool,
     pub db_type: DbType,
+    /// Keeps the SSH tunnel alive for as long as any clone of this client exists.
+    tunnel: Option<Arc<SshTunnelHandle>>,
+}
+
+/// Effective pool limits: a tunnel is single-channel, so tunneled connections
+/// are capped to one pooled connection.
+fn effective_pool_limits(pool_config: &PoolConfig, has_tunnel: bool) -> (u32, u32) {
+    if has_tunnel {
+        (1, pool_config.min_connections.min(1))
+    } else {
+        (pool_config.max_connections, pool_config.min_connections)
+    }
+}
+
+fn parse_mysql_ssl_mode(mode: &str) -> Option<sqlx::mysql::MySqlSslMode> {
+    use sqlx::mysql::MySqlSslMode;
+    match mode.to_ascii_lowercase().as_str() {
+        "disabled" | "disable" => Some(MySqlSslMode::Disabled),
+        "preferred" | "prefer" => Some(MySqlSslMode::Preferred),
+        "required" | "require" => Some(MySqlSslMode::Required),
+        "verify_ca" | "verifyca" => Some(MySqlSslMode::VerifyCa),
+        "verify_identity" | "verify_identity_full" | "verify-full" => {
+            Some(MySqlSslMode::VerifyIdentity)
+        }
+        _ => None,
+    }
+}
+
+fn parse_pg_ssl_mode(mode: &str) -> Option<sqlx::postgres::PgSslMode> {
+    use sqlx::postgres::PgSslMode;
+    match mode.to_ascii_lowercase().as_str() {
+        "disabled" | "disable" => Some(PgSslMode::Disable),
+        "preferred" | "prefer" => Some(PgSslMode::Prefer),
+        "required" | "require" => Some(PgSslMode::Require),
+        "verify_ca" | "verifyca" => Some(PgSslMode::VerifyCa),
+        "verify_identity" | "verify-full" | "verify_full" => Some(PgSslMode::VerifyFull),
+        _ => None,
+    }
 }
 
 impl DbClient {
@@ -223,23 +265,52 @@ impl DbClient {
         pool_config: &PoolConfig,
         db_type: &DbType,
     ) -> Result<Self, DbError> {
+        Self::new_with_options(
+            url,
+            pool_config,
+            db_type,
+            crate::db::connect::DbClientConnectOptions::default(),
+            None,
+        )
+        .await
+    }
+
+    /// Creates a pool applying TLS options and owning an optional SSH tunnel.
+    pub async fn new_with_options(
+        url: &str,
+        pool_config: &PoolConfig,
+        db_type: &DbType,
+        options: crate::db::connect::DbClientConnectOptions,
+        tunnel: Option<SshTunnelHandle>,
+    ) -> Result<Self, DbError> {
         validate_db_url(url, db_type)?;
 
+        let has_tunnel = tunnel.is_some();
+        let (max_connections, min_connections) = effective_pool_limits(pool_config, has_tunnel);
         let policy = TimeoutPolicy::default();
         let pool = match db_type {
             DbType::MySQL | DbType::MariaDB => {
                 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
                 use std::str::FromStr;
 
-                let options = MySqlConnectOptions::from_str(url)?;
+                let mut connect_options = MySqlConnectOptions::from_str(url)?;
+                if let Some(mode) = options.ssl_mode.as_deref() {
+                    if let Some(ssl_mode) = parse_mysql_ssl_mode(mode) {
+                        connect_options = connect_options.ssl_mode(ssl_mode);
+                    } else {
+                        return Err(DbError::Unsupported(format!(
+                            "Unsupported MySQL SSL mode: {mode}"
+                        )));
+                    }
+                }
                 let pool_future = MySqlPoolOptions::new()
-                    .max_connections(pool_config.max_connections)
-                    .min_connections(pool_config.min_connections)
+                    .max_connections(max_connections)
+                    .min_connections(min_connections)
                     .acquire_timeout(Duration::from_millis(pool_config.acquire_timeout_ms))
                     .idle_timeout(Duration::from_millis(pool_config.idle_timeout_ms))
                     .max_lifetime(Duration::from_millis(pool_config.max_lifetime_ms))
                     .test_before_acquire(pool_config.test_before_acquire)
-                    .connect_with(options);
+                    .connect_with(connect_options);
 
                 let p = tokio::time::timeout(policy.db_connect, pool_future)
                     .await
@@ -250,15 +321,24 @@ impl DbClient {
                 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
                 use std::str::FromStr;
 
-                let options = PgConnectOptions::from_str(url)?;
+                let mut connect_options = PgConnectOptions::from_str(url)?;
+                if let Some(mode) = options.ssl_mode.as_deref() {
+                    if let Some(ssl_mode) = parse_pg_ssl_mode(mode) {
+                        connect_options = connect_options.ssl_mode(ssl_mode);
+                    } else {
+                        return Err(DbError::Unsupported(format!(
+                            "Unsupported PostgreSQL SSL mode: {mode}"
+                        )));
+                    }
+                }
                 let pool_future = PgPoolOptions::new()
-                    .max_connections(pool_config.max_connections)
-                    .min_connections(pool_config.min_connections)
+                    .max_connections(max_connections)
+                    .min_connections(min_connections)
                     .acquire_timeout(Duration::from_millis(pool_config.acquire_timeout_ms))
                     .idle_timeout(Duration::from_millis(pool_config.idle_timeout_ms))
                     .max_lifetime(Duration::from_millis(pool_config.max_lifetime_ms))
                     .test_before_acquire(pool_config.test_before_acquire)
-                    .connect_with(options);
+                    .connect_with(connect_options);
 
                 let p = tokio::time::timeout(policy.db_connect, pool_future)
                     .await
@@ -271,8 +351,8 @@ impl DbClient {
 
                 let options = SqliteConnectOptions::from_str(url)?;
                 let pool_future = SqlitePoolOptions::new()
-                    .max_connections(pool_config.max_connections)
-                    .min_connections(pool_config.min_connections)
+                    .max_connections(max_connections)
+                    .min_connections(min_connections)
                     .acquire_timeout(Duration::from_millis(pool_config.acquire_timeout_ms))
                     .idle_timeout(Duration::from_millis(pool_config.idle_timeout_ms))
                     .max_lifetime(Duration::from_millis(pool_config.max_lifetime_ms))
@@ -290,7 +370,13 @@ impl DbClient {
         Ok(Self {
             pool,
             db_type: db_type.clone(),
+            tunnel: tunnel.map(Arc::new),
         })
+    }
+
+    /// Whether this client's traffic is routed through an SSH tunnel.
+    pub fn has_tunnel(&self) -> bool {
+        self.tunnel.is_some()
     }
 
     /// Creates a new connection pool with default configuration, auto-detecting engine from URL.
@@ -431,5 +517,39 @@ mod tests {
         assert!(validate_db_url("file:///etc/passwd", &DbType::Redis).is_err());
         assert!(validate_db_url("gopher://host", &DbType::MongoDB).is_err());
         assert!(validate_db_url("dict://host", &DbType::Redis).is_err());
+    }
+
+    #[test]
+    fn tunnel_caps_pool_to_single_connection() {
+        let mut cfg = PoolConfig::default();
+        cfg.max_connections = 10;
+        cfg.min_connections = 3;
+        assert_eq!(effective_pool_limits(&cfg, true), (1, 1));
+        assert_eq!(effective_pool_limits(&cfg, false), (10, 3));
+    }
+
+    #[test]
+    fn mysql_ssl_modes_are_mapped() {
+        use sqlx::mysql::MySqlSslMode;
+        assert_eq!(format!("{:?}", parse_mysql_ssl_mode("disabled")), format!("{:?}", Some(MySqlSslMode::Disabled)));
+        assert_eq!(format!("{:?}", parse_mysql_ssl_mode("preferred")), format!("{:?}", Some(MySqlSslMode::Preferred)));
+        assert_eq!(format!("{:?}", parse_mysql_ssl_mode("required")), format!("{:?}", Some(MySqlSslMode::Required)));
+        assert_eq!(format!("{:?}", parse_mysql_ssl_mode("verify_ca")), format!("{:?}", Some(MySqlSslMode::VerifyCa)));
+        assert_eq!(
+            format!("{:?}", parse_mysql_ssl_mode("verify_identity")),
+            format!("{:?}", Some(MySqlSslMode::VerifyIdentity))
+        );
+        assert!(parse_mysql_ssl_mode("bogus").is_none());
+    }
+
+    #[test]
+    fn pg_ssl_modes_are_mapped() {
+        use sqlx::postgres::PgSslMode;
+        assert_eq!(format!("{:?}", parse_pg_ssl_mode("disabled")), format!("{:?}", Some(PgSslMode::Disable)));
+        assert_eq!(format!("{:?}", parse_pg_ssl_mode("preferred")), format!("{:?}", Some(PgSslMode::Prefer)));
+        assert_eq!(format!("{:?}", parse_pg_ssl_mode("required")), format!("{:?}", Some(PgSslMode::Require)));
+        assert_eq!(format!("{:?}", parse_pg_ssl_mode("verify_ca")), format!("{:?}", Some(PgSslMode::VerifyCa)));
+        assert_eq!(format!("{:?}", parse_pg_ssl_mode("verify_identity")), format!("{:?}", Some(PgSslMode::VerifyFull)));
+        assert!(parse_pg_ssl_mode("bogus").is_none());
     }
 }
