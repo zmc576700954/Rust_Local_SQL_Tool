@@ -179,6 +179,9 @@ pub struct TableStats {
     pub data_free: Option<u64>,
     pub auto_increment: Option<u64>,
     pub collation: Option<String>,
+    /// information_schema.TABLES.UPDATE_TIME；InnoDB 可能为 NULL。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_time: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -191,6 +194,15 @@ pub struct ExplainSample {
     pub rows_examined: Option<i64>,
     pub filtered: Option<f64>,
     pub extra: Option<String>,
+    /// EXPLAIN 中的物理表名（多表查询时逐行记录）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_name: Option<String>,
+    /// EXPLAIN FORMAT=JSON 的 query_cost。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<f64>,
+    /// EXPLAIN ANALYZE 的实际耗时（毫秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_time_ms: Option<f64>,
 }
 
 impl ExplainSample {
@@ -207,14 +219,21 @@ impl ExplainSample {
     }
 
     pub fn summary(&self) -> String {
-        format!(
+        let mut base = format!(
             "{}: access={} key={} rows={} extra={}",
             self.label,
             self.access_type.as_deref().unwrap_or("-"),
             self.key.as_deref().unwrap_or("-"),
             self.rows_examined.unwrap_or(-1),
             self.extra.as_deref().unwrap_or("-")
-        )
+        );
+        if let Some(cost) = self.estimated_cost {
+            base.push_str(&format!(" cost={cost:.2}"));
+        }
+        if let Some(ms) = self.actual_time_ms {
+            base.push_str(&format!(" actual_ms={ms:.3}"));
+        }
+        base
     }
 }
 
@@ -223,6 +242,119 @@ pub struct IndexUsage {
     pub index_name: String,
     pub count_star: Option<u64>,
     pub count_read: Option<u64>,
+}
+
+// ── 性能诊断证据 ───────────────────────────────────────────
+
+/// 来自 performance_schema 的 digest 指标快照。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DigestInfo {
+    pub digest: String,
+    pub digest_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_name: Option<String>,
+    pub count_star: u64,
+    /// 累计总延迟（毫秒）。
+    pub total_latency_ms: f64,
+    /// 平均延迟（毫秒）。
+    pub avg_latency_ms: f64,
+    pub rows_examined_sum: u64,
+    pub rows_examined_avg: u64,
+    pub rows_sent_avg: u64,
+    pub rows_affected_avg: u64,
+    pub created_tmp_tables: u64,
+    pub created_tmp_disk_tables: u64,
+    pub sort_rows: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
+}
+
+/// 统计信息新鲜度评估。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StatsFreshness {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_time: Option<String>,
+    /// mysql.innodb_table_stats.last_update（若无权限则为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub innodb_last_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_days: Option<i64>,
+    /// fresh / stale / unknown
+    pub status: String,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PerfTableEvidence {
+    pub table: String,
+    pub snapshot: TableSnapshot,
+    pub stats: TableStats,
+    pub freshness: StatsFreshness,
+}
+
+/// 疑似隐式类型转换。只做确定性规则判定，结论需人工确认。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImplicitCastFinding {
+    pub table: String,
+    pub column: String,
+    pub column_type: String,
+    pub operator: String,
+    /// string / number
+    pub literal_kind: String,
+    pub literal: String,
+    /// 是否可能直接导致索引失效。
+    pub index_risk: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PerfWindowInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_hours: Option<f64>,
+    /// server_uptime / digest_first_seen / unknown
+    pub source: String,
+    /// 延迟与扫描数是否为累计值。
+    pub cumulative: bool,
+    pub note: String,
+}
+
+/// 索引动作依赖的行数估算。必须记录来源与是否可信。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RowEstimateEvidence {
+    pub value: i64,
+    /// information_schema.TABLES.TABLE_ROWS / explain.rows / none
+    pub source: String,
+    pub trusted: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PerfEvidence {
+    pub target_sql: String,
+    /// user / digest_sample
+    pub sql_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<DigestInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<PerfWindowInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_estimate: Option<RowEstimateEvidence>,
+    pub explain: Vec<ExplainSample>,
+    pub tables: Vec<PerfTableEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_scan_rows: Option<i64>,
+    pub implicit_casts: Vec<ImplicitCastFinding>,
+    pub sort_or_temp: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_latency_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain_analyze_raw: Option<String>,
+    pub notes: Vec<String>,
+    pub degraded_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -236,6 +368,8 @@ pub struct EvidencePack {
     pub workload_sql: Vec<String>,
     pub collected_at: i64,
     pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perf: Option<PerfEvidence>,
 }
 
 impl EvidencePack {
@@ -248,6 +382,7 @@ impl EvidencePack {
             explain: &self.explain,
             index_usage: &self.index_usage,
             workload_sql: &self.workload_sql,
+            perf: &self.perf,
         })
     }
 }
@@ -261,6 +396,8 @@ struct EvidenceHashView<'a> {
     explain: &'a [ExplainSample],
     index_usage: &'a [IndexUsage],
     workload_sql: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    perf: &'a Option<PerfEvidence>,
 }
 
 // ── 计划模型 ───────────────────────────────────────────────
@@ -325,6 +462,18 @@ pub struct EvidenceSummary {
     pub explain_findings: Vec<String>,
 }
 
+/// SQL 改写建议：纯文本产物，永不进入 ActionSpec。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RewriteSuggestion {
+    pub id: String,
+    pub title: String,
+    pub suggestion: String,
+    pub rationale: String,
+    pub expected_gain: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStatus {
@@ -354,6 +503,12 @@ pub struct OpsPlan {
     pub validation_checks: Vec<ValidationCheck>,
     pub rollback: RollbackPlan,
     pub code_advice: Vec<String>,
+    /// 结构化 SQL 改写建议。只有文本，不是可执行动作。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewrite_suggestions: Vec<RewriteSuggestion>,
+    /// 复测时是否使用 EXPLAIN ANALYZE（仅性能诊断）。
+    #[serde(default)]
+    pub verification_explain_analyze: bool,
     pub confidence: f32,
     pub requires_approval: bool,
     pub created_at: i64,
@@ -488,6 +643,33 @@ pub struct ActionExecution {
     pub rollback_sql: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QueryComparison {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_access: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_access: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_rows: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_rows: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_actual_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_actual_ms: Option<f64>,
+    pub improved: bool,
+    pub verdict: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationReport {
     pub before: Vec<ExplainSample>,
@@ -495,6 +677,10 @@ pub struct VerificationReport {
     pub improved_queries: usize,
     pub total_queries: usize,
     pub summary: String,
+    #[serde(default)]
+    pub comparisons: Vec<QueryComparison>,
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

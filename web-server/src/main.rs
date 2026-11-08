@@ -1008,6 +1008,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/ops/analyze", post(ops_handlers::ops_analyze))
         .route(
+            "/ops/slow-queries",
+            get(ops_handlers::ops_slow_queries),
+        )
+        .route(
             "/ops/analyze/stream",
             post(ops_handlers::ops_analyze_stream),
         )

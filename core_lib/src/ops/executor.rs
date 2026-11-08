@@ -15,7 +15,8 @@ use crate::ops::policy::OpsPolicy;
 use crate::ops::registry::OpsContext;
 use crate::ops::types::{
     ActionExecution, ActionSpec, ActionState, AuditRecord, CompiledAction, ExecutionReport,
-    ExplainSample, ImpactAssessment, OpsPlan, TableSnapshot, TableStats, VerificationReport,
+    ExplainSample, ImpactAssessment, OpsPlan, QueryComparison, TableSnapshot, TableStats,
+    VerificationReport,
 };
 
 /// 执行前刷新 schema，防止计划审批后表结构已变化。
@@ -138,7 +139,7 @@ pub async fn execute(
         }),
     ))?;
 
-    let before_explain = explain_queries(ctx, &plan.verification_sql).await;
+    let before_verification = explain_for_plan(ctx, plan).await;
     let started_at = crate::ops::types::now();
     let mut action_reports = Vec::new();
     let mut failure: Option<String> = None;
@@ -264,8 +265,24 @@ pub async fn execute(
     let verification = if failure.is_some() {
         None
     } else {
-        let after_explain = explain_queries(ctx, &plan.verification_sql).await;
-        Some(compare_explain(&before_explain, &after_explain))
+        let (before_explain, mut verify_notes) = match before_verification {
+            Ok((samples, notes)) => (samples, notes),
+            Err(err) => (Vec::new(), vec![format!("执行前 EXPLAIN 失败: {err}")]),
+        };
+        match explain_for_plan(ctx, plan).await {
+            Ok((after_explain, after_notes)) => {
+                verify_notes.extend(after_notes);
+                Some(compare_explain(&before_explain, &after_explain, verify_notes))
+            }
+            Err(err) => {
+                verify_notes.push(format!("执行后 EXPLAIN 失败: {err}"));
+                Some(compare_explain(
+                    &before_explain,
+                    &Vec::new(),
+                    verify_notes,
+                ))
+            }
+        }
     };
     let finished_at = crate::ops::types::now();
 
@@ -593,24 +610,134 @@ async fn explain_queries(ctx: &OpsContext, sqls: &[String]) -> Vec<ExplainSample
     out
 }
 
-fn compare_explain(before: &[ExplainSample], after: &[ExplainSample]) -> VerificationReport {
+async fn explain_for_plan(
+    ctx: &OpsContext,
+    plan: &OpsPlan,
+) -> Result<(Vec<ExplainSample>, Vec<String>), OpsError> {
+    if plan.scenario_id == "perf-diagnostics" {
+        crate::ops::perf_diagnostics::explain_for_verification(
+            ctx,
+            &plan.verification_sql,
+            plan.verification_explain_analyze,
+        )
+        .await
+    } else {
+        Ok((explain_queries(ctx, &plan.verification_sql).await, vec![]))
+    }
+}
+
+fn compare_explain(
+    before: &[ExplainSample],
+    after: &[ExplainSample],
+    notes: Vec<String>,
+) -> VerificationReport {
     let total = before.len().max(after.len());
+    let mut comparisons = Vec::new();
     let mut improved = 0usize;
-    for (b, a) in before.iter().zip(after.iter()) {
-        let before_rows = b.rows_examined.unwrap_or(i64::MAX);
-        let after_rows = a.rows_examined.unwrap_or(i64::MAX);
-        let before_key = b.key.as_deref().unwrap_or("");
-        let after_key = a.key.as_deref().unwrap_or("");
-        if (before_key.is_empty() && !after_key.is_empty())
-            || (after_rows < before_rows && before_rows != i64::MAX)
-        {
+    for index in 0..total {
+        let b = before.get(index);
+        let a = after.get(index);
+        let label = b
+            .or(a)
+            .map(|s| s.label.clone())
+            .unwrap_or_else(|| format!("verify-{}", index + 1));
+        let before_access = b.and_then(|s| s.access_type.clone());
+        let after_access = a.and_then(|s| s.access_type.clone());
+        let before_key = b.and_then(|s| s.key.clone()).filter(|k| !k.is_empty());
+        let after_key = a.and_then(|s| s.key.clone()).filter(|k| !k.is_empty());
+        let before_rows = b.and_then(|s| s.rows_examined);
+        let after_rows = a.and_then(|s| s.rows_examined);
+        let before_cost = b.and_then(|s| s.estimated_cost);
+        let after_cost = a.and_then(|s| s.estimated_cost);
+        let before_actual = b.and_then(|s| s.actual_time_ms);
+        let after_actual = a.and_then(|s| s.actual_time_ms);
+
+        if b.is_none() || a.is_none() {
+            comparisons.push(QueryComparison {
+                label,
+                before_access,
+                after_access,
+                before_key,
+                after_key,
+                before_rows,
+                after_rows,
+                before_cost,
+                after_cost,
+                before_actual_ms: before_actual,
+                after_actual_ms: after_actual,
+                improved: false,
+                verdict: "缺少执行前或执行后的 EXPLAIN 证据，无法对比".into(),
+            });
+            continue;
+        }
+
+        let key_gained = before_key.is_none() && after_key.is_some();
+        let key_lost = before_key.is_some() && after_key.is_none();
+        let rows_dropped = matches!((before_rows, after_rows), (Some(b), Some(a)) if a < b);
+        let cost_dropped = matches!((before_cost, after_cost), (Some(b), Some(a)) if a < b);
+        let actual_dropped = matches!((before_actual, after_actual), (Some(b), Some(a)) if a < b * 0.95);
+        let is_improved = key_gained || rows_dropped || cost_dropped || actual_dropped;
+        if is_improved {
             improved += 1;
         }
+
+        let verdict = if key_lost {
+            "索引命中退化：执行后 key 从有变无".to_string()
+        } else if is_improved {
+            let mut parts = Vec::new();
+            if key_gained {
+                parts.push(format!(
+                    "key {} -> {}",
+                    before_key.as_deref().unwrap_or("-"),
+                    after_key.as_deref().unwrap_or("-")
+                ));
+            }
+            if rows_dropped {
+                parts.push(format!(
+                    "扫描行 {} -> {}",
+                    before_rows.unwrap_or(0),
+                    after_rows.unwrap_or(0)
+                ));
+            }
+            if cost_dropped {
+                parts.push(format!(
+                    "成本 {:.2} -> {:.2}",
+                    before_cost.unwrap_or(0.0),
+                    after_cost.unwrap_or(0.0)
+                ));
+            }
+            if actual_dropped {
+                parts.push(format!(
+                    "实际耗时 {:.3}ms -> {:.3}ms",
+                    before_actual.unwrap_or(0.0),
+                    after_actual.unwrap_or(0.0)
+                ));
+            }
+            format!("改善：{}", parts.join("；"))
+        } else {
+            "未改善：访问方式、扫描行数、成本与实际耗时均无明显变化".to_string()
+        };
+
+        comparisons.push(QueryComparison {
+            label,
+            before_access,
+            after_access,
+            before_key,
+            after_key,
+            before_rows,
+            after_rows,
+            before_cost,
+            after_cost,
+            before_actual_ms: before_actual,
+            after_actual_ms: after_actual,
+            improved: is_improved,
+            verdict,
+        });
     }
     let summary = if total == 0 {
         "没有可用于复测的工作负载 SQL".to_string()
     } else {
-        format!("{improved}/{total} 条查询的索引命中或扫描行数得到改善")
+        format!("{improved}/{total} 条查询的索引命中、扫描行数、成本或实际耗时得到改善")
     };
     VerificationReport {
         before: before.to_vec(),
@@ -618,6 +745,8 @@ fn compare_explain(before: &[ExplainSample], after: &[ExplainSample]) -> Verific
         improved_queries: improved,
         total_queries: total,
         summary,
+        comparisons,
+        notes,
     }
 }
 

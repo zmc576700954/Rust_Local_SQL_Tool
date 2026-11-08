@@ -170,9 +170,7 @@ impl ApprovalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::types::{
-        ActionSpec, EvidenceSummary, PlanStatus, RollbackPlan, ValidationCheck,
-    };
+    use crate::ops::types::{ActionSpec, EvidenceSummary, PlanStatus, RollbackPlan};
 
     fn plan() -> OpsPlan {
         OpsPlan {
@@ -200,6 +198,8 @@ mod tests {
                 automatic: true,
             },
             code_advice: vec![],
+            rewrite_suggestions: vec![],
+            verification_explain_analyze: false,
             confidence: 0.8,
             requires_approval: true,
             created_at: 0,

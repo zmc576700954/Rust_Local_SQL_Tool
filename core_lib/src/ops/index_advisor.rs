@@ -167,6 +167,7 @@ pub async fn collect_evidence(
         workload_sql: input.workload_sql,
         collected_at: crate::ops::types::now(),
         notes,
+        perf: None,
     })
 }
 
@@ -291,7 +292,7 @@ async fn load_table_stats(ctx: &OpsContext, table: &str) -> Result<TableStats, O
     let db = escape_sql_string(&ctx.db_name);
     let tbl = escape_sql_string(table);
     let sql = format!(
-        "SELECT ENGINE, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, DATA_FREE, AUTO_INCREMENT, TABLE_COLLATION \
+        "SELECT ENGINE, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, DATA_FREE, AUTO_INCREMENT, TABLE_COLLATION, UPDATE_TIME \
          FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{db}' AND TABLE_NAME = '{tbl}'"
     );
     let rows = fetch_rows(ctx, &sql).await?;
@@ -306,6 +307,7 @@ async fn load_table_stats(ctx: &OpsContext, table: &str) -> Result<TableStats, O
         data_free: uint_value(row, "data_free"),
         auto_increment: uint_value(row, "auto_increment"),
         collation: str_value(row, "table_collation"),
+        update_time: str_value(row, "update_time"),
     })
 }
 
@@ -328,6 +330,7 @@ async fn explain_sql(
         rows_examined: int_value(row, "rows"),
         filtered: float_value(row, "filtered"),
         extra: str_value(row, "extra"),
+        ..Default::default()
     }))
 }
 
@@ -611,6 +614,8 @@ pub fn build_plan(
             "确认查询条件顺序与索引列顺序一致；范围条件后的列通常不应继续放入索引".to_string(),
             "上线后观察 1-2 个业务周期，再决定是否保留该索引".to_string(),
         ],
+        rewrite_suggestions: vec![],
+        verification_explain_analyze: false,
         confidence,
         requires_approval: !actions.is_empty(),
         created_at: crate::ops::types::now(),
@@ -628,7 +633,7 @@ pub fn build_plan(
     Ok(plan.seal())
 }
 
-fn extract_candidate_columns(sql: &str, snapshot: &TableSnapshot) -> Vec<String> {
+pub(crate) fn extract_candidate_columns(sql: &str, snapshot: &TableSnapshot) -> Vec<String> {
     let padded = format!(" {} ", sql.to_ascii_lowercase());
     let mut columns: Vec<String> = Vec::new();
 
@@ -767,6 +772,7 @@ mod tests {
                     rows_examined: Some(1000),
                     filtered: None,
                     extra: Some("Using where; Using filesort".into()),
+                    ..Default::default()
                 },
                 ExplainSample {
                     label: "workload-2".into(),
@@ -777,6 +783,7 @@ mod tests {
                     rows_examined: Some(1000),
                     filtered: None,
                     extra: Some("Using where".into()),
+                    ..Default::default()
                 },
                 ExplainSample {
                     label: "workload-3".into(),
@@ -787,6 +794,7 @@ mod tests {
                     rows_examined: Some(1000),
                     filtered: None,
                     extra: Some("Using where".into()),
+                    ..Default::default()
                 },
             ],
             workload_sql: vec![
@@ -853,6 +861,7 @@ mod tests {
                 rows_examined: Some(1000),
                 filtered: None,
                 extra: Some("Using where".into()),
+                ..Default::default()
             }],
             ..Default::default()
         };

@@ -16,6 +16,7 @@ use core_lib::ops::ddl_compiler;
 use core_lib::ops::executor;
 use core_lib::ops::index_advisor::IndexAdvisorInput;
 use core_lib::ops::local_token::HEADER as OPS_TOKEN_HEADER;
+use core_lib::ops::perf_diagnostics::{self, SlowQueryScan};
 use core_lib::ops::policy::OpsPolicy;
 use core_lib::ops::types::{
     ActionSpec, AuditRecord, EvidencePack, ExecutionReport, OpsPlan, PlanStatus, PlanSummary,
@@ -43,6 +44,7 @@ pub(crate) fn authorize_write(state: &AppState, headers: &HeaderMap) -> Result<(
 pub(crate) async fn build_ctx(
     state: &AppState,
     db_id: Option<&str>,
+    session_id: Option<String>,
 ) -> Result<core_lib::ops::OpsContext, AppError> {
     let (db_client, db_name) = resolve_db_client_for_request(state, db_id).await?;
     let resolved_id = match db_id {
@@ -58,7 +60,22 @@ pub(crate) async fn build_ctx(
     let read_only = is_read_only_connection(state, db_id).await;
     Ok(core_lib::ops::OpsContext::new(
         db_client, resolved_id, db_name, read_only,
+    )
+    .with_audit(
+        Some(std::sync::Arc::new(state.ops.audit.clone())),
+        session_id,
     ))
+}
+
+/// 请求级会话标识：优先使用调用方提供的 x-request-id，否则生成一次请求 ID。
+fn session_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("web-{}", uuid::Uuid::new_v4()))
 }
 
 async fn plan_ctx(state: &AppState, plan: &OpsPlan) -> Result<core_lib::ops::OpsContext, AppError> {
@@ -67,7 +84,7 @@ async fn plan_ctx(state: &AppState, plan: &OpsPlan) -> Result<core_lib::ops::Ops
     } else {
         Some(plan.db_id.as_str())
     };
-    build_ctx(state, db_id).await
+    build_ctx(state, db_id, None).await
 }
 
 pub(crate) fn audit_event(state: &AppState, event: &str, outcome: &str, detail: serde_json::Value) {
@@ -142,7 +159,9 @@ pub(crate) struct OpsAnalyzeRequest {
     pub scenario_id: Option<String>,
     #[serde(default)]
     pub db_id: Option<String>,
-    pub table: String,
+    /// 索引分析场景必填；性能诊断场景不需要。
+    #[serde(default)]
+    pub table: Option<String>,
     #[serde(default)]
     pub workload_sql: Option<Vec<String>>,
     #[serde(default)]
@@ -151,20 +170,48 @@ pub(crate) struct OpsAnalyzeRequest {
     pub notes: Option<String>,
     #[serde(default)]
     pub use_llm: Option<bool>,
+    /// 性能诊断：performance_schema digest（64 位 hex）。
+    #[serde(default)]
+    pub digest: Option<String>,
+    /// 性能诊断：从 digest 关联到的可执行 SQL 样本。
+    #[serde(default)]
+    pub sample_sql: Option<String>,
+    /// 性能诊断：是否真实执行 EXPLAIN ANALYZE。
+    #[serde(default)]
+    pub explain_analyze: Option<bool>,
+    /// 性能诊断：EXPLAIN ANALYZE 会话超时，默认 5000ms。
+    #[serde(default)]
+    pub explain_analyze_timeout_ms: Option<u64>,
 }
 
 impl OpsAnalyzeRequest {
-    fn into_input(self) -> IndexAdvisorInput {
+    fn into_input(self, scenario_id: &str) -> Result<serde_json::Value, AppError> {
+        if scenario_id == "perf-diagnostics" {
+            return Ok(serde_json::json!({
+                "sql": self.sql,
+                "digest": self.digest,
+                "sample_sql": self.sample_sql,
+                "notes": self.notes,
+                "explain_analyze": self.explain_analyze.unwrap_or(false),
+                "explain_analyze_timeout_ms": self.explain_analyze_timeout_ms,
+                "use_llm": self.use_llm.unwrap_or(false),
+            }));
+        }
+        let table = self
+            .table
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| AppError::BadRequest("索引分析缺少 table".into()))?;
         let mut workload = self.workload_sql.unwrap_or_default();
         if let Some(sql) = self.sql {
             workload.insert(0, sql);
         }
-        IndexAdvisorInput {
-            table: self.table,
+        serde_json::to_value(IndexAdvisorInput {
+            table,
             workload_sql: workload,
             notes: self.notes,
             use_llm: self.use_llm.unwrap_or(false),
-        }
+        })
+        .map_err(|e| AppError::BadRequest(format!("输入序列化失败: {e}")))
     }
 }
 
@@ -196,7 +243,7 @@ async fn run_analyze(
         core_lib::ops::registry::ScenarioStatus::Enabled
     ) {
         return Err(AppError::BadRequest(format!(
-            "场景 {} 当前为 {:?}，阶段 0 仅开放 MySQL 索引优化",
+            "场景 {} 当前为 {:?}，尚未开放",
             descriptor.id, descriptor.status
         )));
     }
@@ -206,15 +253,15 @@ async fn run_analyze(
         .find(&scenario_id)
         .ok_or_else(|| AppError::NotFound(format!("场景 {scenario_id} 未注册")))?;
 
-    let ctx = build_ctx(state, req.db_id.as_deref()).await?;
-    let input = req.into_input();
-    let input_value = serde_json::to_value(&input)
-        .map_err(|e| AppError::BadRequest(format!("输入序列化失败: {e}")))?;
+    let use_llm = req.use_llm.unwrap_or(false);
+    let db_id = req.db_id.clone();
+    let ctx = build_ctx(state, db_id.as_deref(), Some(session_id(headers))).await?;
+    let input_value = req.into_input(&scenario_id)?;
 
     let evidence = scenario.collect_evidence(&ctx, &input_value).await?;
     let policy = state.ops.policy.read().await.clone();
     let mut plan = scenario.build_plan(&ctx.identity(), &evidence, &input_value, &policy)?;
-    if input.use_llm {
+    if use_llm {
         // 复用 ai/ 下已有模型调用栈；模型输出仍要过服务端编译校验。
         let config = state.config.read().await.clone();
         plan = core_lib::ops::ai_planner::enhance_plan(&config, &evidence, plan).await;
@@ -277,6 +324,37 @@ pub(crate) async fn ops_analyze_stream(
     })
     .flatten();
     Ok(Sse::new(Box::pin(stream)))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SlowQueryListQuery {
+    #[serde(default)]
+    pub db_id: Option<String>,
+    /// total_latency / avg_latency / rows_examined
+    #[serde(default)]
+    pub sort: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+pub(crate) async fn ops_slow_queries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SlowQueryListQuery>,
+) -> Result<Json<SlowQueryScan>, AppError> {
+    authorize_write(&state, &headers)?;
+    let ctx = build_ctx(
+        &state,
+        query.db_id.as_deref(),
+        Some(session_id(&headers)),
+    )
+    .await?;
+    let sort = query
+        .sort
+        .unwrap_or_else(|| "total_latency".to_string());
+    Ok(Json(
+        perf_diagnostics::list_slow_queries(&ctx, &sort, query.limit.unwrap_or(20)).await?,
+    ))
 }
 
 #[derive(Deserialize)]

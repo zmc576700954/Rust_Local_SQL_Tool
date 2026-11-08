@@ -12,6 +12,7 @@ import {
 import { api } from '../../api'
 import { tr } from '../../i18n'
 import { InspectionCenter } from './InspectionCenter'
+import { PerfDiagnostics } from './PerfDiagnostics'
 
 interface OpsCenterProps {
   dbId?: string
@@ -168,7 +169,7 @@ function statusClass(status: string): string {
   return 'text-amber-400'
 }
 
-type OpsView = 'advisor' | 'inspection'
+type OpsView = 'advisor' | 'perf' | 'inspection'
 
 function OpsViewTabs({ view, onChange }: { view: OpsView; onChange: (view: OpsView) => void }) {
   return (
@@ -182,6 +183,16 @@ function OpsViewTabs({ view, onChange }: { view: OpsView; onChange: (view: OpsVi
         }`}
       >
         {tr('索引优化', 'Index advisor')}
+      </button>
+      <button
+        onClick={() => onChange('perf')}
+        className={`rounded border px-3 py-1.5 text-xs ${
+          view === 'perf'
+            ? 'border-purple-500/50 bg-purple-500/10 text-purple-300'
+            : 'border-dark-border text-gray-400 hover:bg-dark-panel'
+        }`}
+      >
+        {tr('性能诊断', 'Performance diagnostics')}
       </button>
       <button
         onClick={() => onChange('inspection')}
@@ -412,6 +423,15 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
   const canRollback = Boolean(plan && ['executed', 'failed'].includes(plan.status))
   const policyAllowsApply = Boolean(policy?.policy?.allow_apply)
   const policyEnv = String(policy?.policy?.environment || 'dev')
+
+  if (view === 'perf') {
+    return (
+      <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
+        <OpsViewTabs view={view} onChange={setView} />
+        <PerfDiagnostics dbId={dbId} />
+      </div>
+    )
+  }
 
   if (view === 'inspection') {
     return (

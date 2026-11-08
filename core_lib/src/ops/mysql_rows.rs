@@ -14,8 +14,13 @@ pub(crate) type RowMap = HashMap<String, String>;
 pub(crate) async fn fetch_rows(ctx: &OpsContext, sql: &str) -> Result<Vec<RowMap>, OpsError> {
     let pool = ctx.db_client.mysql_pool()?;
     let rows = sqlx::query(sql).fetch_all(pool).await?;
+    Ok(convert_mysql_rows(&rows))
+}
+
+/// 把 sqlx MySQL 行转换为小写键的字符串映射；供需要固定连接（如 SET SESSION）的调用方复用。
+pub(crate) fn convert_mysql_rows(rows: &[sqlx::mysql::MySqlRow]) -> Vec<RowMap> {
     let mut out = Vec::with_capacity(rows.len());
-    for row in rows.iter() {
+    for row in rows {
         let count = row.columns().len();
         let mut map = HashMap::with_capacity(count);
         for index in 0..count {
@@ -26,7 +31,7 @@ pub(crate) async fn fetch_rows(ctx: &OpsContext, sql: &str) -> Result<Vec<RowMap
         }
         out.push(map);
     }
-    Ok(out)
+    out
 }
 
 fn mysql_cell_to_text(row: &sqlx::mysql::MySqlRow, index: usize) -> Option<String> {

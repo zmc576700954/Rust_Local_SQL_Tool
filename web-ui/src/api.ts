@@ -504,11 +504,18 @@ export const api = {
   opsAnalyze: async (payload: {
     scenario_id?: string
     db_id?: string
-    table: string
+    table?: string
     workload_sql?: string[]
+    sql?: string
     notes?: string
     use_llm?: boolean
+    digest?: string
+    sample_sql?: string
+    explain_analyze?: boolean
+    explain_analyze_timeout_ms?: number
   }) => client.post('/ops/analyze', payload, { headers: await opsWriteHeaders() }).then(res => res.data),
+  opsSlowQueries: async (params: { db_id?: string; sort?: string; limit?: number }) =>
+    client.get('/ops/slow-queries', { params, headers: await opsWriteHeaders() }).then(res => res.data),
   opsListPlans: (limit = 20) => client.get('/ops/plans', { params: { limit } }).then(res => res.data),
   opsGetPlan: (planId: string) => client.get(`/ops/plans/${encodeURIComponent(planId)}`).then(res => res.data),
   opsApprove: async (planId: string, payload: { plan_hash: string; action_ids: string[] }) =>

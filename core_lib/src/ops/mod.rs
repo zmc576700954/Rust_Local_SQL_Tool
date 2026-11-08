@@ -16,6 +16,7 @@ pub mod index_advisor;
 pub mod inspection;
 pub mod local_token;
 mod mysql_rows;
+pub mod perf_diagnostics;
 pub mod plan_store;
 pub mod policy;
 pub mod registry;

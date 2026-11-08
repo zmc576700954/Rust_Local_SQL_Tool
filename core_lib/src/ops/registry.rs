@@ -1,10 +1,13 @@
 //! 运维场景注册表与统一上下文。
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::db::client::DbClient;
 use crate::db::database_ops::DatabaseOps;
 use crate::db::protocol::BoxFuture;
+use crate::ops::audit::AuditLog;
 use crate::ops::error::OpsError;
 use crate::ops::policy::OpsPolicy;
 use crate::ops::types::{hash_json, EvidencePack, OpsPlan, RiskClass};
@@ -36,6 +39,10 @@ pub struct OpsContext {
     pub db_name: String,
     pub db_fingerprint: String,
     pub is_read_only: bool,
+    /// 审计日志；性能诊断的 EXPLAIN ANALYZE 真实执行会写入这里。
+    pub audit: Option<Arc<AuditLog>>,
+    /// 调用方会话标识，写入审计。
+    pub session_id: Option<String>,
 }
 
 impl OpsContext {
@@ -51,7 +58,15 @@ impl OpsContext {
             db_name,
             db_fingerprint: fingerprint,
             is_read_only,
+            audit: None,
+            session_id: None,
         }
+    }
+
+    pub fn with_audit(mut self, audit: Option<Arc<AuditLog>>, session_id: Option<String>) -> Self {
+        self.audit = audit;
+        self.session_id = session_id;
+        self
     }
 
     pub fn is_mysql_family(&self) -> bool {
@@ -107,8 +122,10 @@ pub struct ScenarioRegistry {
 impl ScenarioRegistry {
     pub fn builtin() -> Self {
         let index_advisor = super::index_advisor::IndexAdvisorScenario::new();
+        let perf_diagnostics = super::perf_diagnostics::PerfDiagnosticsScenario::new();
         let descriptors = vec![
             index_advisor.descriptor().clone(),
+            perf_diagnostics.descriptor().clone(),
             // 首期仅开放 MySQL。PG/SQLite 标为实验性，继续只读，不出计划。
             ScenarioDescriptor {
                 id: "pg-index-advisor".into(),
@@ -125,15 +142,6 @@ impl ScenarioRegistry {
                 description: "首期仅支持 MySQL/MariaDB；SQLite 仅保留只读实验入口。".into(),
                 engines: vec!["sqlite".into()],
                 status: ScenarioStatus::ExperimentalReadOnly,
-                risk_ceiling: RiskClass::L0,
-                allowed_actions: vec![],
-            },
-            ScenarioDescriptor {
-                id: "perf-diagnostics".into(),
-                title: "性能诊断（阶段 1 规划）".into(),
-                description: "阶段 0 不实现性能诊断。".into(),
-                engines: vec![],
-                status: ScenarioStatus::Disabled,
                 risk_ceiling: RiskClass::L0,
                 allowed_actions: vec![],
             },
@@ -157,7 +165,7 @@ impl ScenarioRegistry {
             },
         ];
         Self {
-            scenarios: vec![Box::new(index_advisor)],
+            scenarios: vec![Box::new(index_advisor), Box::new(perf_diagnostics)],
             descriptors,
         }
     }

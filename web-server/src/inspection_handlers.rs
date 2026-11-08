@@ -322,7 +322,7 @@ pub(crate) async fn execute_inspection(
         ))
     })?;
     let target = resolve_target(state, db_id).await?;
-    let ctx = build_ctx(state, target.id.as_deref()).await?;
+    let ctx = build_ctx(state, target.id.as_deref(), None).await?;
     let (history, active_unused_alert_keys) = {
         let store = state.ops.inspections.read().await;
         (
