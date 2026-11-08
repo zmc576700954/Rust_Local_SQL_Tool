@@ -2526,6 +2526,47 @@ pub async fn run_export_job(
     })
 }
 
+/// 查询目标表哪些列是数组类型（PostgreSQL）。
+async fn pg_array_columns(
+    db_client: &DbClient,
+    table_name: &str,
+) -> std::collections::HashMap<String, bool> {
+    use sqlx::Row;
+    let mut flags = std::collections::HashMap::new();
+    let pool = match db_client.pool.pg() {
+        Ok(p) => p,
+        Err(_) => return flags,
+    };
+    let table_ident =
+        match core_lib::sql_util::quote_table_ref_checked(table_name, &DbType::PostgreSQL) {
+            Ok(t) => t,
+            Err(_) => return flags,
+        };
+    let rows = sqlx::query(
+        r#"
+        SELECT a.attname::text AS column_name,
+               format_type(a.atttypid, NULL) AS data_type
+        FROM pg_attribute a
+        WHERE a.attrelid = to_regclass($1)
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+        "#,
+    )
+    .bind(&table_ident)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    for row in rows {
+        let name: String = match row.try_get("column_name") {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let data_type: String = row.try_get("data_type").unwrap_or_default();
+        flags.insert(name, data_type.ends_with("[]"));
+    }
+    flags
+}
+
 /// PostgreSQL / SQLite 导入：把 JSON 行内联成 SQL 字面量，分批 INSERT。
 ///
 /// 与 MySQL 路径的差异：不使用占位符绑定（统一查询层只接受完整 SQL），
@@ -2559,11 +2600,24 @@ async fn run_import_job_text_protocol(
     let mut errors: u64 = 0;
     let mut details: Vec<String> = Vec::new();
     let mut batch_values: Vec<String> = Vec::new();
+    // 数组列需要把 JSON 数组转成 PG 数组字面量；jsonb 列里的数组保持 JSON 文本。
+    let array_cols = if matches!(db_type, DbType::PostgreSQL) {
+        pg_array_columns(db_client, &req.table_name).await
+    } else {
+        std::collections::HashMap::new()
+    };
 
     for (idx, row) in req.data.iter().enumerate() {
         let values: Vec<String> = mapped_cols
             .iter()
-            .map(|(_, src)| match row.get(src) {
+            .map(|(db, src)| match row.get(src) {
+                Some(serde_json::Value::Array(_))
+                    if array_cols.get(db.as_str()).copied().unwrap_or(false) =>
+                {
+                    let v = row.get(src).unwrap();
+                    core_lib::sql_util::pg_array_literal(v)
+                        .unwrap_or_else(|| core_lib::sql_util::format_sql_value(v))
+                }
                 Some(v) => core_lib::sql_util::format_sql_value(v),
                 None => "NULL".to_string(),
             })

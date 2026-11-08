@@ -244,6 +244,29 @@ pub fn mysql_text(row: &sqlx::mysql::MySqlRow, name: &str) -> Option<String> {
     None
 }
 
+/// 把 JSON 数组转成 PostgreSQL 数组字面量（用于导入到 array 类型列）。
+///
+/// 只处理标量元素（字符串/数字/布尔/NULL）；嵌套数组或对象返回 `None`，
+/// 由调用方退回 JSON 文本（如 jsonb 列里的数组）。
+pub fn pg_array_literal(value: &Value) -> Option<String> {
+    let arr = value.as_array()?;
+    if arr.is_empty() {
+        // 空数组必须带类型才能使用，`'{}'` 是唯一不需要元素类型的写法。
+        return Some("'{}'".to_string());
+    }
+    let mut parts = Vec::with_capacity(arr.len());
+    for item in arr {
+        match item {
+            Value::Null => parts.push("NULL".to_string()),
+            Value::Bool(b) => parts.push(if *b { "TRUE" } else { "FALSE" }.to_string()),
+            Value::Number(n) => parts.push(n.to_string()),
+            Value::String(s) => parts.push(format!("'{}'", escape_sql_string(s))),
+            Value::Array(_) | Value::Object(_) => return None,
+        }
+    }
+    Some(format!("ARRAY[{}]", parts.join(", ")))
+}
+
 /// 「类型未映射」标记的键名。
 ///
 /// 真 NULL 用 JSON `null` 表示；某个非空值无法被字段级映射时，返回
@@ -1000,6 +1023,16 @@ mod tests {
         assert!(!pg_type_is_unresolved(&int4));
         let text = <String as Type<sqlx::Postgres>>::type_info();
         assert!(!pg_type_is_unresolved(&text));
+    }
+
+    #[test]
+    fn pg_array_literal_handles_scalars_and_empty() {
+        assert_eq!(
+            pg_array_literal(&serde_json::json!(["a", "值😀", 1, true])).unwrap(),
+            "ARRAY['a', '值😀', 1, TRUE]"
+        );
+        assert_eq!(pg_array_literal(&serde_json::json!([])).unwrap(), "'{}'");
+        assert_eq!(pg_array_literal(&serde_json::json!([{"k": 1}])), None);
     }
 
     #[test]
