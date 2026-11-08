@@ -7,6 +7,7 @@ pub mod error;
 pub mod knowledge_base;
 pub mod loadgen;
 pub mod navicat;
+pub mod ops;
 pub mod perf_report;
 pub mod rule_engine;
 pub mod rule_matcher;

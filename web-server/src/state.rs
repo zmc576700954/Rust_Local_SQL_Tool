@@ -324,6 +324,7 @@ pub struct AppState {
     pub timeouts: TimeoutPolicy,
     pub limits: RuntimeLimits,
     pub job_semaphore: Arc<Semaphore>,
+    pub ops: Arc<core_lib::ops::OpsRuntime>,
 }
 
 // ----------------- Active Query Helpers -----------------
@@ -392,5 +393,6 @@ pub fn test_state_with_config(config: AppConfig) -> AppState {
         timeouts: TimeoutPolicy::default(),
         limits: RuntimeLimits::default(),
         job_semaphore: Arc::new(Semaphore::new(1)),
+        ops: Arc::new(core_lib::ops::OpsRuntime::for_test()),
     }
 }

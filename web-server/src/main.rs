@@ -4,6 +4,7 @@ mod ai_handlers;
 mod bridge;
 mod handlers;
 mod mysql_codec;
+mod ops_handlers;
 mod routes;
 mod service_handlers;
 mod ssh;
@@ -915,6 +916,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| Policy::default());
     let sql_history = SqlHistoryStore::load().await.unwrap_or_default();
     let knowledge_base = KnowledgeBase::load().await.unwrap_or_default();
+    let ops = Arc::new(core_lib::ops::OpsRuntime::init_default());
 
     let state = AppState {
         config: Arc::new(RwLock::new(config)),
@@ -936,6 +938,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeouts,
         limits: limits.clone(),
         job_semaphore,
+        ops,
     };
 
     let api = Router::new()
@@ -989,6 +992,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/tools/jobs/go-live/start", post(go_live_job_start))
         .route("/tools/go-live/reports", get(go_live_reports_list))
         .route("/tools/go-live/audit", get(go_live_audit_list))
+        .route(
+            "/ops/session-token",
+            get(ops_handlers::ops_session_token),
+        )
+        .route("/ops/scenarios", get(ops_handlers::ops_scenarios))
+        .route(
+            "/ops/policy",
+            get(ops_handlers::ops_get_policy).post(ops_handlers::ops_update_policy),
+        )
+        .route("/ops/analyze", post(ops_handlers::ops_analyze))
+        .route(
+            "/ops/analyze/stream",
+            post(ops_handlers::ops_analyze_stream),
+        )
+        .route("/ops/plans", get(ops_handlers::ops_list_plans))
+        .route("/ops/plans/:plan_id", get(ops_handlers::ops_get_plan))
+        .route(
+            "/ops/plans/:plan_id/approve",
+            post(ops_handlers::ops_approve),
+        )
+        .route(
+            "/ops/plans/:plan_id/execute",
+            post(ops_handlers::ops_execute),
+        )
+        .route(
+            "/ops/plans/:plan_id/rollback",
+            post(ops_handlers::ops_rollback),
+        )
+        .route("/ops/audit", get(ops_handlers::ops_audit))
+        .route("/ops/approvals", get(ops_handlers::ops_approvals))
         .route("/tools/jobs/:job_id", get(tool_job_status))
         .route("/tools/jobs/:job_id/cancel", post(tool_job_cancel))
         .route(
@@ -3234,6 +3267,7 @@ mod tests {
             timeouts: TimeoutPolicy::default(),
             limits: limits.clone(),
             job_semaphore: Arc::new(Semaphore::new(limits.max_job_concurrency)),
+            ops: Arc::new(core_lib::ops::OpsRuntime::for_test()),
         }
     }
 
@@ -3274,6 +3308,18 @@ mod tests {
             .route("/tools/jobs/go-live/start", post(go_live_job_start))
             .route("/tools/go-live/reports", get(go_live_reports_list))
             .route("/tools/go-live/audit", get(go_live_audit_list))
+            .route("/ops/session-token", get(ops_handlers::ops_session_token))
+            .route("/ops/analyze", post(ops_handlers::ops_analyze))
+            .route(
+                "/ops/plans/:plan_id/approve",
+                post(ops_handlers::ops_approve),
+            )
+            .route(
+                "/ops/plans/:plan_id/execute",
+                post(ops_handlers::ops_execute),
+            )
+            .route("/ops/plans/:plan_id/rollback", post(ops_handlers::ops_rollback))
+            .route("/ops/policy", post(ops_handlers::ops_update_policy))
             .route("/tools/jobs/:job_id", get(tool_job_status))
             .route("/tools/jobs/:job_id/cancel", post(tool_job_cancel))
             .route(
@@ -3304,6 +3350,64 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(v.get("db_connections").is_some());
         assert!(v.get("ai_profiles").is_some());
+    }
+
+    #[tokio::test]
+    async fn ops_write_endpoints_require_local_token() {
+        let app = test_app(test_state());
+        for (uri, body) in [
+            ("/backend/ops/analyze", r#"{"table":"orders","workload_sql":[]}"#),
+            (
+                "/backend/ops/plans/nope/approve",
+                r#"{"plan_hash":"h","action_ids":["create_index:idx"]}"#,
+            ),
+            (
+                "/backend/ops/plans/nope/execute",
+                r#"{"action_ids":["create_index:idx"],"approval_token":"t"}"#,
+            ),
+            (
+                "/backend/ops/plans/nope/rollback",
+                r#"{"reason":"test"}"#,
+            ),
+            (
+                "/backend/ops/policy",
+                r#"{"environment":"prod","allow_apply":true,"allow_prod_apply":false,"approval_ttl_secs":300,"max_affected_rows":10000000,"allow_large_table":false,"ddl_timeout_secs":600,"lock_wait_timeout_secs":5}"#,
+            ),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "uri={uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ops_session_token_is_available_for_frontend_handshake() {
+        let app = test_app(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/backend/ops/session-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v.get("header").and_then(|x| x.as_str()), Some("x-ops-token"));
+        assert_eq!(v.get("token").and_then(|x| x.as_str()), Some("test-ops-token"));
     }
 
     #[tokio::test]

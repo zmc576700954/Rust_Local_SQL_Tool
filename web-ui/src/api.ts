@@ -102,6 +102,26 @@ type AiQueryPayload = {
   chat_history?: ChatMessage[]
 }
 
+let opsTokenPromise: Promise<string> | null = null
+
+async function getOpsToken(force = false): Promise<string> {
+  if (!opsTokenPromise || force) {
+    opsTokenPromise = client
+      .get('/ops/session-token', { headers: { 'x-silent-error': '1' } })
+      .then((res) => String(res.data?.token || ''))
+      .catch((error) => {
+        opsTokenPromise = null
+        throw error
+      })
+  }
+  return opsTokenPromise
+}
+
+async function opsWriteHeaders(): Promise<Record<string, string>> {
+  const token = await getOpsToken()
+  return { 'x-ops-token': token }
+}
+
 client.interceptors.request.use(async (config) => {
   config.baseURL = await resolveBackendBaseUrl()
   const locale = getLocale()
@@ -475,4 +495,34 @@ export const api = {
   addKnowledge: (knowledge: Partial<KnowledgeItem>) => client.post('/api/ai/knowledge', knowledge).then(res => res.data),
   updateKnowledge: (knowledge: Partial<KnowledgeItem>) => client.put('/api/ai/knowledge', knowledge).then(res => res.data),
   deleteKnowledge: (id: string | number) => client.post('/api/ai/knowledge/delete', { id }).then(res => res.data),
+  // Ops Center (阶段 0：MySQL 单表索引优化)
+  opsScenarios: () => client.get('/ops/scenarios').then(res => res.data),
+  opsSessionToken: () => getOpsToken(true),
+  opsGetPolicy: () => client.get('/ops/policy').then(res => res.data),
+  opsUpdatePolicy: async (policy: Record<string, unknown>) =>
+    client.post('/ops/policy', policy, { headers: await opsWriteHeaders() }).then(res => res.data),
+  opsAnalyze: async (payload: {
+    scenario_id?: string
+    db_id?: string
+    table: string
+    workload_sql?: string[]
+    notes?: string
+    use_llm?: boolean
+  }) => client.post('/ops/analyze', payload, { headers: await opsWriteHeaders() }).then(res => res.data),
+  opsListPlans: (limit = 20) => client.get('/ops/plans', { params: { limit } }).then(res => res.data),
+  opsGetPlan: (planId: string) => client.get(`/ops/plans/${encodeURIComponent(planId)}`).then(res => res.data),
+  opsApprove: async (planId: string, payload: { plan_hash: string; action_ids: string[] }) =>
+    client.post(`/ops/plans/${encodeURIComponent(planId)}/approve`, payload, { headers: await opsWriteHeaders() }).then(res => res.data),
+  opsExecute: async (planId: string, payload: { action_ids?: string[]; approval_token?: string; dry_run?: boolean }) =>
+    client.post(`/ops/plans/${encodeURIComponent(planId)}/execute`, payload, {
+      headers: await opsWriteHeaders(),
+      timeout: HTTP_TIMEOUT_MS * 2,
+    }).then(res => res.data),
+  opsRollback: async (planId: string, reason: string) =>
+    client.post(`/ops/plans/${encodeURIComponent(planId)}/rollback`, { reason }, {
+      headers: await opsWriteHeaders(),
+      timeout: HTTP_TIMEOUT_MS * 2,
+    }).then(res => res.data),
+  opsAudit: (limit = 100) => client.get('/ops/audit', { params: { limit } }).then(res => res.data),
+  opsApprovals: () => client.get('/ops/approvals').then(res => res.data),
 }

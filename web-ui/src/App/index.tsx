@@ -43,6 +43,7 @@ const ExecutionPlan = React.lazy(() => import('../components/ExecutionPlan').the
 const SessionInfoPanel = React.lazy(() => import('../components/SessionInfoPanel').then(m => ({ default: m.SessionInfoPanel })));
 const QueryBuilder = React.lazy(() => import('../components/QueryBuilder').then(m => ({ default: m.QueryBuilder })));
 const TableWorkspace = React.lazy(() => import('../components/TableWorkspace').then(m => ({ default: m.TableWorkspace })));
+const OpsCenter = React.lazy(() => import('../components/ops/OpsCenter').then(m => ({ default: m.OpsCenter })));
 
 /** Replace :variable placeholders in SQL with user-supplied values. */
 function substituteSqlVariables(
@@ -1991,6 +1992,12 @@ function App() {
             if (toolId === 'visual-sync') title = tr('可视化同步向导', 'Visual Sync Wizard');
             if (toolId === 'data-transfer') title = tr('数据传输', 'Data Transfer');
             if (toolId === 'data-analytics') title = tr('数据分析图表', 'Data Analytics');
+            if (toolId === 'ops-center') {
+              const newTabId = `ops-center-${Date.now()}`
+              setTabs([...tabs, { id: newTabId, type: 'ops-center', title: tr('运维中心', 'Ops Center') }])
+              setActiveTabId(newTabId)
+              return
+            }
             if (toolId === 'advanced-center') {
               const newTabId = `advanced-center-${Date.now()}`
               setTabs([...tabs, { id: newTabId, type: 'advanced-center', title: tr('高级工具中心', 'Advanced Tools Hub') }])
@@ -2207,6 +2214,14 @@ function App() {
                     schemaData={schemaData}
                     isActive={isActive}
                   />
+                ) : tab.type === 'ops-center' ? (
+                  <Suspense fallback={<SkeletonLoader />}>
+                    <OpsCenter
+                      dbId={configData?.active_db_id ? String(configData.active_db_id) : undefined}
+                      dbType={dbType}
+                      isActive={isActive}
+                    />
+                  </Suspense>
                 ) : tab.type === 'advanced-center' ? (
                   <AdvancedToolsHub
                     onOpenTool={(toolId) => {
