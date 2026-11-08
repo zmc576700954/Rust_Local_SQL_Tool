@@ -635,6 +635,18 @@ pub async fn diagnostics_perf_probe(
         .to_lowercase();
     let iterations = normalize_perf_probe_iterations(req.iterations);
 
+    // 先做与引擎无关的参数校验，保证错误原因最具体（read-only / table_name），
+    // 再判断引擎是否支持性能探针。
+    match operation.as_str() {
+        "query_select_small" | "explain_plan" => {
+            normalize_perf_probe_sql(req.sql.as_deref())?;
+        }
+        "table_first_page" => {
+            normalize_perf_probe_table_name(req.table_name.as_deref())?;
+        }
+        _ => {}
+    }
+
     // 性能探针依赖 MySQL 的临时表语法、information_schema 与 performance_schema。
     // 非 MySQL 连接给出明确提示，避免底层驱动错误直接冒到界面。
     let conn = resolve_perf_probe_connection(&state, req.db_id.as_deref()).await?;

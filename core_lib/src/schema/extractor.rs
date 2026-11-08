@@ -367,3 +367,14 @@ pub fn pg_display_name(schema: &str, table: &str) -> String {
         format!("{}.{}", schema, table)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::pg_display_name;
+
+    #[test]
+    fn pg_display_name_keeps_non_public_schema_qualified() {
+        assert_eq!(pg_display_name("public", "users"), "users");
+        assert_eq!(pg_display_name("app", "orders"), "app.orders");
+    }
+}

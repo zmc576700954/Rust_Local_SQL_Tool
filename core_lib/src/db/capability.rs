@@ -176,8 +176,18 @@ mod tests {
     #[test]
     fn check_capability_failure_for_experimental_and_unsupported() {
         let pg_caps = DbCapabilities::runtime_capabilities(&DbType::PostgreSQL);
+        // PostgreSQL 已接通查询、结构内省与导入导出，但仍不提供同步能力
+        assert!(pg_caps.check_capability("sql").is_ok());
+        assert!(pg_caps.check_capability("schema_introspection").is_ok());
+        assert!(pg_caps.check_capability("import_export").is_ok());
         assert!(pg_caps.check_capability("data_sync").is_err());
-        assert!(pg_caps.check_capability("schema_introspection").is_err());
+        assert!(pg_caps.check_capability("struct_sync").is_err());
+
+        // SQLite 仅接通连接与查询执行
+        let sqlite_caps = DbCapabilities::runtime_capabilities(&DbType::SQLite);
+        assert!(sqlite_caps.check_capability("sql").is_ok());
+        assert!(sqlite_caps.check_capability("schema_introspection").is_err());
+        assert!(sqlite_caps.check_capability("import_export").is_err());
 
         let mssql_caps = DbCapabilities::runtime_capabilities(&DbType::SQLServer);
         assert!(mssql_caps.check_capability("sql").is_err());

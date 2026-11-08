@@ -833,4 +833,37 @@ mod tests {
             "BOOLEAN"
         );
     }
+
+    #[test]
+    fn placeholder_for_matches_engine_style() {
+        use crate::db::client::PlaceholderStyle;
+        assert_eq!(placeholder_for(PlaceholderStyle::QuestionMark, 1), "?");
+        assert_eq!(placeholder_for(PlaceholderStyle::QuestionMark, 3), "?");
+        assert_eq!(placeholder_for(PlaceholderStyle::DollarNumber, 1), "$1");
+        assert_eq!(placeholder_for(PlaceholderStyle::DollarNumber, 4), "$4");
+    }
+
+    #[test]
+    fn quote_table_ref_handles_schema_qualified_names() {
+        use crate::config::DbType;
+        assert_eq!(
+            quote_table_ref_checked("users", &DbType::PostgreSQL).unwrap(),
+            "\"users\""
+        );
+        assert_eq!(
+            quote_table_ref_checked("public.users", &DbType::PostgreSQL).unwrap(),
+            "\"public\".\"users\""
+        );
+        assert_eq!(
+            quote_table_ref_checked("app.orders", &DbType::PostgreSQL).unwrap(),
+            "\"app\".\"orders\""
+        );
+        assert_eq!(quote_table_ref_mysql("shop.users"), "`shop`.`users`");
+        assert_eq!(quote_table_ref_mysql("users"), "`users`");
+        assert_eq!(
+            split_pg_table_ref("app.orders"),
+            (Some("app"), "orders")
+        );
+        assert_eq!(split_pg_table_ref("orders"), (None, "orders"));
+    }
 }
