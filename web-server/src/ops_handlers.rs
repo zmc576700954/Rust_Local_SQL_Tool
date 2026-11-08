@@ -405,7 +405,12 @@ impl FieldBackfillOptions {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct FieldBackfillApproveBody {
-    pub plan_id: String,
+    /// 正常启动时必须提供；按 job_id 续跑时可省略。
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    /// 仅续跑场景：直接按既有任务签发令牌，无需内存中的分析证据。
+    #[serde(default)]
+    pub job_id: Option<String>,
     #[serde(default)]
     pub plan_hash: Option<String>,
     #[serde(flatten)]
@@ -540,10 +545,71 @@ pub(crate) async fn ops_field_backfill_approve(
 ) -> Result<Json<FieldBackfillApproveResponse>, AppError> {
     authorize_write(&state, &headers)?;
     let session = session_id(&headers);
+    if let Some(job_id) = body.job_id.as_deref().filter(|id| !id.trim().is_empty()) {
+        // 续跑令牌按既有任务签发：不依赖进程内的分析证据，服务重启后仍可用；
+        // 批参数直接取 job.config，续跑与首发不会出现参数分叉。
+        let job = state.ops.migrations.get(job_id).await?;
+        if !matches!(
+            job.status,
+            MigrationStatus::Interrupted | MigrationStatus::Paused | MigrationStatus::Blocked
+        ) {
+            return Err(AppError::BadRequest(format!(
+                "任务 {} 当前状态为 {:?}，无需续跑令牌",
+                job.job_id, job.status
+            )));
+        }
+        let plan = state
+            .ops
+            .plans
+            .read()
+            .await
+            .get(&job.plan_id)
+            .ok_or_else(|| AppError::BadRequest(format!("计划 {} 不存在或已过期", job.plan_id)))?;
+        if plan.plan_hash != job.plan_hash {
+            return Err(AppError::BadRequest("任务绑定的计划哈希已变化，禁止续跑".into()));
+        }
+        let policy = state.ops.policy.read().await.clone();
+        policy.authorize_backfill(false, job.production_confirmed)?;
+        let (token, record) = state.ops.approvals.write().await.issue_field(
+            &plan,
+            &job.migration_hash,
+            "backfill",
+            policy.approval_ttl_secs,
+            Some(session.clone()),
+        )?;
+        audit_event(
+            &state,
+            "field_migration.backfill.approved",
+            "ok",
+            serde_json::json!({
+                "approval_id": record.approval_id,
+                "job_id": job.job_id,
+                "plan_id": job.plan_id,
+                "migration_hash": job.migration_hash,
+                "resume": true,
+                "batch_size": job.config.batch_size,
+                "batch_interval_ms": job.config.batch_interval_ms,
+                "max_rows_per_second": job.config.max_rows_per_second,
+            }),
+        );
+        return Ok(Json(FieldBackfillApproveResponse {
+            approval_id: record.approval_id,
+            token,
+            expires_at: record.expires_at,
+            migration_hash: job.migration_hash,
+            plan_id: job.plan_id,
+            plan_hash: job.plan_hash,
+            config: job.config,
+            high_risks: Vec::new(),
+        }));
+    }
+    let plan_id = body.plan_id.as_deref().filter(|id| !id.trim().is_empty()).ok_or_else(|| {
+        AppError::BadRequest("缺少 plan_id（或续跑时提供 job_id）".into())
+    })?;
     let (plan, prepared, ctx, policy, production_confirmed) = prepare_field_backfill(
         &state,
         &headers,
-        &body.plan_id,
+        plan_id,
         body.plan_hash.as_deref(),
         &body.options,
         true,

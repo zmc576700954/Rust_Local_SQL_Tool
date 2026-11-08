@@ -371,6 +371,7 @@ export interface FieldMigrationProgress {
   total_batches: number
   current_batch: number
   resume_after_pk?: string | null
+  resume_skipped_batches: number
   current_first_pk?: string | null
   last_pk?: string | null
   connection_id?: number | null
@@ -707,7 +708,8 @@ export const api = {
   }) => client.post('/ops/field-governance/diff-page', payload, { headers: await opsWriteHeaders() }).then(res => res.data as FieldDiffPage),
   // 字段回填执行（S2）：审批令牌 → 启动 → 进度/暂停/继续/中止
   opsFieldBackfillApprove: async (payload: {
-    plan_id: string
+    plan_id?: string
+    job_id?: string
     plan_hash?: string
   } & FieldBackfillOptionsPayload) =>
     client.post('/ops/field-governance/backfill/approve', payload, { headers: await opsWriteHeaders() })

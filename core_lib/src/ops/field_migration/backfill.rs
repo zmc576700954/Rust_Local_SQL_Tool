@@ -354,6 +354,7 @@ async fn run_inner(
             "job_id": job_id,
             "run_count": job.run_count,
             "resume_after_pk": job.progress.resume_after_pk,
+            "resume_skipped_batches": job.progress.resume_skipped_batches,
             "batch_size": job.config.batch_size,
             "batch_interval_ms": job.config.batch_interval_ms,
             "max_rows_per_second": job.config.max_rows_per_second,
@@ -497,6 +498,11 @@ async fn run_inner(
                 .as_ref()
                 .map(|checkpoint| checkpoint.written_rows)
                 .unwrap_or(0);
+            job.progress.resume_skipped_batches = job
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.completed_batches)
+                .unwrap_or(0);
             job.progress.remaining_rows = job
                 .expected_rows
                 .saturating_sub(job.progress.success_rows);
@@ -508,14 +514,91 @@ async fn run_inner(
         .as_ref()
         .map(|checkpoint| checkpoint.completed_batches)
         .unwrap_or(0);
+    let checkpoint_pk = job
+        .checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.last_pk.clone());
+    if completed_batches > 0 && checkpoint_pk.is_none() {
+        return block_message(
+            ctx,
+            hub,
+            job_id,
+            "checkpoint 缺少边界主键，拒绝从头静默重放",
+            "preflight:checkpoint_invalid",
+        )
+        .await;
+    }
+
+    // 续跑只抽检「最后一批已完成批次」：范围 (record.last_pk, record.end_pk]，
+    // 成本约 1 个批次（2 次 COUNT + 3 次差异计数 + 必要时的差异主键查询）。
+    // 抽检只读；不会覆盖已被人工修正的数据。
+    if completed_batches > 0 {
+        if let Some(record) = job
+            .recent_batches
+            .iter()
+            .find(|record| record.batch_no == completed_batches)
+            .cloned()
+        {
+            let spot_start = record
+                .last_pk
+                .as_deref()
+                .map(|pk_value| pk_literal(pk_kind, pk_value))
+                .transpose()?;
+            let spot_end = pk_literal(pk_kind, &record.end_pk)?;
+            let spot = verify_range(
+                ctx,
+                &spec,
+                &source,
+                &destination,
+                &source_column,
+                &pk,
+                spot_start.as_deref(),
+                &spot_end,
+            )
+            .await?;
+            if !spot.passed() {
+                let diffs = collect_range_diffs(
+                    ctx,
+                    &spec,
+                    &source,
+                    &destination,
+                    &source_column,
+                    &pk,
+                    spot_start.as_deref(),
+                    &spot_end,
+                    &spot,
+                    false,
+                )
+                .await?;
+                block_on_verify(
+                    ctx,
+                    hub,
+                    job_id,
+                    record.batch_no,
+                    record.last_pk.clone(),
+                    Some(record.end_pk.clone()),
+                    "resume_spot_check",
+                    spot,
+                    diffs,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
+
     let mut success_rows = job
         .checkpoint
         .as_ref()
         .map(|checkpoint| checkpoint.written_rows)
         .unwrap_or(0);
-    let mut batch_index: u64 = 0;
-    let mut last_pk: Option<String> = None;
-    let mut last_literal: Option<String> = None;
+    // 直接 seek 到 checkpoint 边界之后，不再从头重走已完成批次。
+    let mut batch_index: u64 = completed_batches;
+    let mut last_pk: Option<String> = checkpoint_pk.clone();
+    let mut last_literal: Option<String> = match checkpoint_pk.as_deref() {
+        Some(pk_value) => Some(pk_literal(pk_kind, pk_value)?),
+        None => None,
+    };
     let mut first_write_at: Option<Instant> = None;
     let mut written_for_rate: u64 = 0;
 
@@ -563,52 +646,7 @@ async fn run_inner(
             })
             .await?;
 
-        // 已完成批次：只读复检。目标被改坏时停在该批，不覆盖。
-        if batch_index < completed_batches {
-            let verify = verify_range(
-                ctx,
-                &spec,
-                &source,
-                &destination,
-                &source_column,
-                &pk,
-                last_literal.as_deref(),
-                &end_literal,
-            )
-            .await?;
-            if !verify.passed() {
-                let diffs = collect_range_diffs(
-                    ctx,
-                    &spec,
-                    &source,
-                    &destination,
-                    &source_column,
-                    &pk,
-                    last_literal.as_deref(),
-                    &end_literal,
-                    &verify,
-                    false,
-                )
-                .await?;
-                block_on_verify(
-                    ctx,
-                    hub,
-                    job_id,
-                    batch_no,
-                    last_pk.clone(),
-                    Some(end_pk.clone()),
-                    "completed_recheck",
-                    verify,
-                    diffs,
-                )
-                .await?;
-                return Ok(());
-            }
-            batch_index += 1;
-            last_pk = Some(end_pk);
-            last_literal = Some(end_literal);
-            continue;
-        }
+        // 续跑已直接 seek 到 checkpoint 之后，这里不再重走已完成批次。
 
         // 批前校验：目标里已有但不一致的数据视为外部修正/污染，禁止覆盖。
         let pre = verify_range(
@@ -795,18 +833,49 @@ async fn run_inner(
             &final_verify,
         )
         .await?;
-        block_on_verify(
+        // 全表校验只在最终阶段执行；失败时再按批定位第一个不一致批次，
+        // 以便报告具体批次与差异主键（此定位仅在失败时发生，成本 O(批数)）。
+        let located = locate_first_failed_batch(
             ctx,
-            hub,
-            job_id,
-            job.progress.total_batches.max(batch_index),
-            last_pk.clone(),
-            None,
-            "final",
-            final_verify,
-            diffs,
+            &spec,
+            &source,
+            &destination,
+            &source_column,
+            &pk,
+            pk_kind,
+            job.config.batch_size,
         )
         .await?;
+        match located {
+            Some((batch_no, start_pk, batch_end_pk, verify, batch_diffs)) => {
+                block_on_verify(
+                    ctx,
+                    hub,
+                    job_id,
+                    batch_no,
+                    start_pk,
+                    batch_end_pk,
+                    "final_recheck",
+                    verify,
+                    batch_diffs,
+                )
+                .await?;
+            }
+            None => {
+                block_on_verify(
+                    ctx,
+                    hub,
+                    job_id,
+                    job.progress.total_batches.max(batch_index),
+                    last_pk.clone(),
+                    None,
+                    "final",
+                    final_verify,
+                    diffs,
+                )
+                .await?;
+            }
+        }
         return Ok(());
     }
 
@@ -1002,6 +1071,60 @@ async fn verify_range(
         v3,
         v4,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn locate_first_failed_batch(
+    ctx: &OpsContext,
+    spec: &BackfillSpec,
+    source: &str,
+    destination: &str,
+    source_column: &str,
+    pk: &str,
+    pk_kind: PkKind,
+    batch_size: u64,
+) -> Result<Option<(u64, Option<String>, Option<String>, BatchVerify, Vec<DiffDetail>)>, OpsError> {
+    let mut last_literal: Option<String> = None;
+    let mut last_pk: Option<String> = None;
+    let mut batch_no = 0u64;
+    loop {
+        let pks = fetch_pk_page(ctx, source, pk, last_literal.as_deref(), batch_size).await?;
+        if pks.is_empty() {
+            return Ok(None);
+        }
+        batch_no += 1;
+        let end_pk = pks.last().cloned().unwrap_or_default();
+        let end_literal = pk_literal(pk_kind, &end_pk)?;
+        let verify = verify_range(
+            ctx,
+            spec,
+            source,
+            destination,
+            source_column,
+            pk,
+            last_literal.as_deref(),
+            &end_literal,
+        )
+        .await?;
+        if !verify.passed() {
+            let diffs = collect_range_diffs(
+                ctx,
+                spec,
+                source,
+                destination,
+                source_column,
+                pk,
+                last_literal.as_deref(),
+                &end_literal,
+                &verify,
+                false,
+            )
+            .await?;
+            return Ok(Some((batch_no, last_pk.clone(), Some(end_pk), verify, diffs)));
+        }
+        last_pk = Some(end_pk);
+        last_literal = Some(end_literal);
+    }
 }
 
 async fn verify_full(

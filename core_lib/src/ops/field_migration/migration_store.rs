@@ -202,6 +202,9 @@ pub struct MigrationProgress {
     /// 续跑时 checkpoint 的边界主键。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_after_pk: Option<String>,
+    /// 本次续跑直接跳过的已完成批数（直接 seek，不再重走）。
+    #[serde(default)]
+    pub resume_skipped_batches: u64,
     /// 当前批次第一个源主键（用于中断后确认从哪个主键续起）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_first_pk: Option<String>,
@@ -520,6 +523,42 @@ mod tests {
             last_error: None,
             run_count: 0,
         }
+    }
+
+    #[test]
+    fn batch_config_survives_restart_so_resume_uses_same_parameters() {
+        let dir = std::env::temp_dir().join(format!("fm-store-cfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jobs.json");
+        let config = BackfillConfig {
+            batch_size: 10_000,
+            batch_interval_ms: 40,
+            max_rows_per_second: 1_000,
+        };
+        {
+            let mut store = MigrationStore::new(Some(path.clone()));
+            let mut saved = job("j2");
+            saved.config = config.clone();
+            saved.progress.resume_skipped_batches = 2;
+            saved.checkpoint = Some(Checkpoint {
+                completed_batches: 2,
+                last_pk: Some("20000".into()),
+                written_rows: 20_000,
+                verified: true,
+                verify: None,
+                updated_at: now(),
+            });
+            store.insert(saved).unwrap();
+        }
+        let store = MigrationStore::new(Some(path));
+        let loaded = store.get("j2").unwrap();
+        assert_eq!(loaded.config, config, "重启后批参数必须与首发一致");
+        assert_eq!(loaded.progress.resume_skipped_batches, 2);
+        assert_eq!(
+            loaded.checkpoint.as_ref().and_then(|c| c.last_pk.clone()),
+            Some("20000".into())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

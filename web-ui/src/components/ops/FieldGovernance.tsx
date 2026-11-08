@@ -743,12 +743,9 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
         backfillJob.status === 'interrupted' || backfillJob.status === 'blocked'
       let token: string | undefined
       if (needsNewToken) {
-        if (!planId) throw new Error(tr('计划 ID 丢失，请重新分析', 'Plan ID missing; re-run analysis'))
-        const approval = await api.opsFieldBackfillApprove({
-          plan_id: planId,
-          plan_hash: planHash || undefined,
-          ...backfillOptions(),
-        })
+        // 按既有任务签发续跑令牌：不依赖内存中的分析证据，服务重启后也可用；
+        // 批参数直接沿用任务保存的 config。
+        const approval = await api.opsFieldBackfillApprove({ job_id: backfillJob.job_id })
         token = approval.token
       }
       const job = await api.opsFieldBackfillResume(backfillJob.job_id, token)
@@ -1814,6 +1811,11 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
                     <div className="rounded border border-dark-border bg-dark-panel p-2 text-gray-300">
                       {tr('续跑起点（checkpoint）', 'Resume point (checkpoint)')}:{' '}
                       <span className="font-mono text-white">{backfillJob.progress.resume_after_pk ?? '-'}</span>
+                      {backfillJob.progress.resume_skipped_batches > 0 && (
+                        <span className="ml-1 text-gray-500">
+                          {tr(`（直接跳过 ${backfillJob.progress.resume_skipped_batches} 批）`, `(skipped ${backfillJob.progress.resume_skipped_batches} batches)`)}
+                        </span>
+                      )}
                     </div>
                     <div className="rounded border border-dark-border bg-dark-panel p-2 text-gray-300">
                       {tr('已完成批次', 'Checkpoint batches')}:{' '}
