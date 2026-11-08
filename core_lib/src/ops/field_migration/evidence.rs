@@ -267,6 +267,9 @@ pub async fn collect(
         risk_summary: RiskSummary::default(),
         scripts: Vec::new(),
         dry_run: DryRunReport::default(),
+        retire_package: Default::default(),
+        rollback: Default::default(),
+        dual_write: Default::default(),
     };
 
     Ok(Collected {

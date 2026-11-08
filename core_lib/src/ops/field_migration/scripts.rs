@@ -589,6 +589,11 @@ fn build_retire_sql(source: &str, source_column: &str, raw_column: &str) -> Stri
     )
 }
 
+/// S3 追加下线/快照脚本后重新计算 dry-run，保证展示的校验结果覆盖全部脚本。
+pub(crate) fn refresh_dry_run(analysis: &mut FieldGovernanceAnalysis) {
+    analysis.dry_run = dry_run_report(&analysis.scripts);
+}
+
 fn dry_run_report(scripts: &[ManualScript]) -> DryRunReport {
     let mut checks = Vec::new();
     for script in scripts {
@@ -735,6 +740,9 @@ mod tests {
             risk_summary: RiskSummary::default(),
             scripts: Vec::new(),
             dry_run: Default::default(),
+            retire_package: Default::default(),
+            rollback: Default::default(),
+            dual_write: Default::default(),
         }
     }
 

@@ -3,6 +3,7 @@
 //! S1：证据采集（E01-E14）→ 三档风险报告 → dry-run 脚本包。
 //! S2：独立回填执行器（分批 / checkpoint / 限速 / 批校验 / 审计），
 //! 不接入索引 `Executor`、不复用 `DdlEngine`，且没有任何 DROP COLUMN 执行路径。
+//! S3：下线准备清单、回滚评估、双写方案；只输出清单与脚本，不执行任何写操作。
 
 pub mod backfill;
 pub mod dependency;
@@ -10,6 +11,7 @@ pub mod diff;
 pub mod evidence;
 pub mod migration_store;
 pub mod read_only;
+pub mod retire;
 pub mod risk;
 pub mod schema;
 pub mod scripts;
@@ -271,6 +273,12 @@ pub async fn analyze(
     let mut collected = evidence::collect(ctx, &input, policy).await?;
     risk::evaluate(&mut collected.analysis, &input, policy);
     scripts::generate(&collected.snapshot, &mut collected.analysis, &input);
+    retire::build(
+        &mut collected.analysis,
+        &input,
+        policy,
+        &collected.snapshot,
+    );
     Ok(collected)
 }
 
@@ -379,6 +387,9 @@ mod tests {
                 checks: Vec::new(),
                 note: "dry-run".into(),
             },
+            retire_package: RetirePackage::default(),
+            rollback: RollbackAssessment::default(),
+            dual_write: DualWritePlan::default(),
         }
     }
 

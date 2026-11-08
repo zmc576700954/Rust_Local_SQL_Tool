@@ -692,6 +692,8 @@ export const api = {
     profile_mode?: string
     sample_per_mille?: number
     empty_string_policy?: EmptyStringPolicy
+    // S3：观察期起始日期（YYYY-MM-DD），未传则清单标记为必须人工确认
+    observation_started_at?: string
   }) => client.post('/ops/analyze', payload, { headers: await opsWriteHeaders() }).then(res => res.data),
   // 字段治理 V2/V3/V4 差异主键分页（只读）
   opsFieldDiffPage: async (payload: {

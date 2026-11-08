@@ -117,6 +117,7 @@ fn input_for(source: &str, target: &str) -> FieldGovernanceInput {
         profile_mode: Some("full".into()),
         sample_per_mille: None,
         empty_string_policy: Some(EmptyStringPolicy::Preserve),
+        observation_started_at: None,
         notes: None,
     }
 }

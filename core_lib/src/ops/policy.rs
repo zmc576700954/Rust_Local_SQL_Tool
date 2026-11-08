@@ -47,6 +47,15 @@ pub struct OpsPolicy {
     /// 字段治理 S2：生产环境回填的独立开关；默认关闭。
     #[serde(default)]
     pub field_allow_prod_backfill: bool,
+    /// 字段治理 S3：下线前要求的观察期天数（默认 7 天，仅用于清单提示）。
+    #[serde(default = "default_field_observation_days")]
+    pub field_observation_days: u64,
+    /// 字段治理 S3：旧列快照最低保留天数（默认 30 天）。
+    #[serde(default = "default_field_snapshot_retention_days")]
+    pub field_snapshot_retention_days: u64,
+    /// 字段治理 S3：切换读之后允许回切的窗口（小时，默认 72）。
+    #[serde(default = "default_field_rollback_window_hours")]
+    pub field_rollback_window_hours: u64,
 }
 
 fn default_field_profile_max_rows() -> u64 {
@@ -77,6 +86,18 @@ fn default_field_allow_backfill() -> bool {
     true
 }
 
+fn default_field_observation_days() -> u64 {
+    7
+}
+
+fn default_field_snapshot_retention_days() -> u64 {
+    30
+}
+
+fn default_field_rollback_window_hours() -> u64 {
+    72
+}
+
 impl Default for OpsPolicy {
     fn default() -> Self {
         Self {
@@ -96,6 +117,9 @@ impl Default for OpsPolicy {
             field_max_json_keys: default_field_max_json_keys(),
             field_allow_backfill: default_field_allow_backfill(),
             field_allow_prod_backfill: false,
+            field_observation_days: default_field_observation_days(),
+            field_snapshot_retention_days: default_field_snapshot_retention_days(),
+            field_rollback_window_hours: default_field_rollback_window_hours(),
         }
     }
 }

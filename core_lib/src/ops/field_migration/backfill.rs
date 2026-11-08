@@ -1775,6 +1775,9 @@ mod tests {
                 notes: Vec::new(),
             }],
             dry_run: Default::default(),
+            retire_package: Default::default(),
+            rollback: Default::default(),
+            dual_write: Default::default(),
         }
     }
 

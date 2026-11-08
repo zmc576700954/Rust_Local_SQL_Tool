@@ -170,6 +170,51 @@ interface EnvironmentEvidence {
   version_supports_json: boolean
 }
 
+interface RetireChecklistItem {
+  id: string
+  category: string
+  title: string
+  detail: string
+  auto_verified: boolean
+  status: string
+  blocks_retire: boolean
+  evidence_refs?: string[]
+}
+
+interface RetirePackage {
+  generated: boolean
+  table: string
+  column?: string | null
+  target_table: string
+  snapshot_table?: string | null
+  observation_required_days: number
+  observation_elapsed_days?: number | null
+  observation_satisfied: boolean
+  observation_note: string
+  snapshot_retention_days: number
+  rollback_window_hours: number
+  blockers?: string[]
+  auto_verified_count: number
+  manual_confirmation_count: number
+  checklist: RetireChecklistItem[]
+  execution_order?: string[]
+  recommended_window: string
+  irreversible: boolean
+  note: string
+}
+
+interface RollbackAssessment {
+  shape: string
+  conclusion: string
+  summary: string
+  reasons?: string[]
+  prerequisites?: string[]
+  lossy_aspects?: string[]
+  irreversible: boolean
+  reverse_sql?: string | null
+  note: string
+}
+
 interface FieldGovernanceAnalysis {
   db_name: string
   table: string
@@ -197,6 +242,8 @@ interface FieldGovernanceAnalysis {
   risk_summary: RiskSummary
   scripts: ManualScript[]
   dry_run: DryRunReport
+  retire_package?: RetirePackage
+  rollback?: RollbackAssessment
 }
 
 interface AnalyzeResponse {
@@ -246,6 +293,48 @@ function splitCsv(value: string): string[] {
     .split(/[,，\n]/)
     .map((item) => item.trim())
     .filter(Boolean)
+}
+
+function renderChecklistGroup(title: string, items: RetireChecklistItem[]) {
+  return (
+    <div className="rounded border border-dark-border bg-dark-bg p-3 text-xs">
+      <div className="mb-2 text-gray-400">
+        {title}（{items.length}）
+      </div>
+      {items.length === 0 ? (
+        <div className="text-gray-500">—</div>
+      ) : (
+        <ul className="space-y-1">
+          {items.map((item) => (
+            <li key={item.id}>
+              <div className="flex flex-wrap items-center gap-1">
+                <span
+                  className={
+                    item.status === 'pass'
+                      ? 'text-emerald-400'
+                      : item.status === 'fail'
+                        ? 'text-red-400'
+                        : item.status === 'warn'
+                          ? 'text-amber-400'
+                          : 'text-gray-400'
+                  }
+                >
+                  [{item.status}]
+                </span>
+                <span className="font-semibold text-gray-200">{item.title}</span>
+                {item.blocks_retire && item.status !== 'pass' && (
+                  <span className="rounded border border-red-500/50 px-1 text-[10px] text-red-300">
+                    {tr('阻断下线', 'blocks retire')}
+                  </span>
+                )}
+              </div>
+              <div className="mt-0.5 text-gray-500">{item.detail}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
 }
 
 function describeError(error: unknown): string {
@@ -323,6 +412,7 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
   const [profileMode, setProfileMode] = useState<'auto' | 'full' | 'sampled'>('auto')
   const [samplePerMille, setSamplePerMille] = useState('100')
   const [emptyStringPolicy, setEmptyStringPolicy] = useState<EmptyStringPolicy>('preserve')
+  const [observationStartedAt, setObservationStartedAt] = useState('')
 
   const [targetTable, setTargetTable] = useState('')
   const [pkColumn, setPkColumn] = useState('')
@@ -480,6 +570,7 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
         profile_mode: profileMode,
         sample_per_mille: profileMode === 'sampled' ? Number(samplePerMille) || undefined : undefined,
         empty_string_policy: emptyStringPolicy,
+        observation_started_at: observationStartedAt.trim() || undefined,
       })
       const extra = resp?.evidence?.extra || null
       if (!extra) {
@@ -953,6 +1044,18 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
               {tr('空串与 SQL NULL 严格区分，不会被静默合并。', 'Empty string and SQL NULL are kept distinct; no silent conversion.')}
             </span>
           </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-400">{tr('观察期起始日期（S3 下线清单）', 'Observation start date (S3 retire checklist)')}</label>
+            <input
+              type="date"
+              value={observationStartedAt}
+              onChange={(event) => setObservationStartedAt(event.target.value)}
+              className="h-8 w-40 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none"
+            />
+            <span className="text-[11px] text-gray-500">
+              {tr('未填写时清单标记为必须人工确认；未满观察期只提示，不代替用户决定。', 'If empty, the checklist marks it as manual confirmation; a short observation period is only a warning.')}
+            </span>
+          </div>
           <label className="flex items-center gap-2 text-xs text-gray-400">
             <input type="checkbox" checked={residualJson} onChange={(event) => setResidualJson(event.target.checked)} />
             {tr('允许 residual JSON 兜底', 'Allow residual JSON column')}
@@ -1241,6 +1344,123 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
               ))}
             </div>
           </div>
+
+          {analysis.retire_package?.generated && (
+            <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
+              <h3 className="mb-3 flex flex-wrap items-center gap-2 text-sm font-semibold text-white">
+                <ShieldAlert className="h-4 w-4 text-red-400" />
+                {tr('下线准备（只出清单与脚本）', 'Retire readiness (checklist & scripts only)')}
+                <span className="flex items-center gap-1 rounded border border-red-500/60 bg-red-500/20 px-1.5 py-0.5 text-[11px] font-semibold text-red-300">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  {tr('不可逆', 'IRREVERSIBLE')}
+                </span>
+              </h3>
+              <div className="grid gap-2 text-xs md:grid-cols-4">
+                <div className="rounded border border-dark-border bg-dark-bg p-2 text-gray-300">
+                  {tr('观察期', 'Observation')}: {analysis.retire_package.observation_elapsed_days ?? '-'} / {analysis.retire_package.observation_required_days} {tr('天', 'days')}
+                </div>
+                <div className="rounded border border-dark-border bg-dark-bg p-2 text-gray-300">
+                  {tr('快照表', 'Snapshot')}: {analysis.retire_package.snapshot_table || '-'}
+                </div>
+                <div className="rounded border border-dark-border bg-dark-bg p-2 text-gray-300">
+                  {tr('快照保留', 'Retention')}: {analysis.retire_package.snapshot_retention_days} {tr('天', 'days')}
+                </div>
+                <div className="rounded border border-dark-border bg-dark-bg p-2 text-gray-300">
+                  {tr('自动核实 / 人工确认', 'Auto / manual')}: {analysis.retire_package.auto_verified_count} / {analysis.retire_package.manual_confirmation_count}
+                </div>
+              </div>
+              <div
+                className={`mt-2 rounded border p-2 text-xs ${
+                  analysis.retire_package.observation_satisfied
+                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                    : 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+                }`}
+              >
+                {analysis.retire_package.observation_note}
+              </div>
+              {(analysis.retire_package.blockers || []).length > 0 && (
+                <div className="mt-2 rounded border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-300">
+                  {tr('未满足项', 'Blockers')}: {(analysis.retire_package.blockers || []).join('；')}
+                </div>
+              )}
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                {renderChecklistGroup(tr('已自动核实', 'Auto-verified'), analysis.retire_package.checklist.filter((item) => item.auto_verified))}
+                {renderChecklistGroup(tr('必须人工确认', 'Requires manual confirmation'), analysis.retire_package.checklist.filter((item) => !item.auto_verified))}
+              </div>
+              <div className="mt-3 rounded border border-dark-border bg-dark-bg p-3 text-xs text-gray-400">
+                <div className="mb-1 font-semibold text-gray-300">{tr('建议执行顺序', 'Suggested order')}</div>
+                <ol className="space-y-1">
+                  {(analysis.retire_package.execution_order || []).map((step, index) => (
+                    <li key={index}>{step}</li>
+                  ))}
+                </ol>
+                <div className="mt-2 text-amber-300">
+                  {tr('建议时机', 'Recommended window')}: {analysis.retire_package.recommended_window}
+                </div>
+                <div className="mt-2 text-gray-500">{analysis.retire_package.note}</div>
+              </div>
+            </div>
+          )}
+
+          {analysis.retire_package?.generated && analysis.rollback && (
+            <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
+              <h3 className="mb-3 flex flex-wrap items-center gap-2 text-sm font-semibold text-white">
+                <RefreshCw className="h-4 w-4 text-amber-400" />
+                {tr('回滚评估', 'Rollback assessment')}
+                <span
+                  className={`rounded border px-1.5 py-0.5 text-[11px] font-mono ${
+                    analysis.rollback.irreversible
+                      ? 'border-red-500/60 bg-red-500/20 text-red-300'
+                      : analysis.rollback.conclusion === 'reversible'
+                        ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+                        : 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+                  }`}
+                >
+                  {analysis.rollback.conclusion}
+                </span>
+                <span className="rounded border border-dark-border px-1.5 py-0.5 font-mono text-[11px] text-gray-400">
+                  {analysis.rollback.shape}
+                </span>
+                {analysis.rollback.irreversible && (
+                  <span className="flex items-center gap-1 rounded border border-red-500/60 bg-red-500/20 px-1.5 py-0.5 text-[11px] font-semibold text-red-300">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    {tr('不可逆', 'IRREVERSIBLE')}
+                  </span>
+                )}
+              </h3>
+              <p className="text-xs text-gray-300">{analysis.rollback.summary}</p>
+              {(analysis.rollback.reasons || []).length > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-red-300">
+                  {(analysis.rollback.reasons || []).map((reason, index) => (
+                    <li key={index}>- {reason}</li>
+                  ))}
+                </ul>
+              )}
+              {(analysis.rollback.lossy_aspects || []).length > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-amber-300">
+                  {(analysis.rollback.lossy_aspects || []).map((item, index) => (
+                    <li key={index}>- {item}</li>
+                  ))}
+                </ul>
+              )}
+              {(analysis.rollback.prerequisites || []).length > 0 && (
+                <div className="mt-2 text-xs text-gray-400">
+                  <div className="mb-1 font-semibold text-gray-300">{tr('前提条件', 'Prerequisites')}</div>
+                  <ul className="space-y-1">
+                    {(analysis.rollback.prerequisites || []).map((item, index) => (
+                      <li key={index}>- {item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {analysis.rollback.reverse_sql && (
+                <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded border border-dark-border bg-dark-bg p-2 font-mono text-[11px] text-gray-300">
+                  {analysis.rollback.reverse_sql}
+                </pre>
+              )}
+              <div className="mt-2 text-[11px] text-gray-500">{analysis.rollback.note}</div>
+            </div>
+          )}
 
           <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
             <h3 className="mb-3 text-sm font-semibold text-white">{tr('证据（E01-E14）', 'Evidence (E01-E14)')}</h3>

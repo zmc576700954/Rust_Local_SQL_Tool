@@ -70,6 +70,10 @@ pub struct FieldGovernanceInput {
     /// 空串处理策略；缺省为 preserve（保留空串）。
     #[serde(default)]
     pub empty_string_policy: Option<EmptyStringPolicy>,
+    /// S3 下线准备：观察期起始日期（YYYY-MM-DD）。
+    /// 不传时无法自动判定观察期，清单会标记为「必须人工确认」。
+    #[serde(default)]
+    pub observation_started_at: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -86,6 +90,10 @@ impl FieldGovernanceInput {
             .map(|m| m.trim().to_ascii_lowercase())
             .filter(|m| !m.is_empty());
         self.sample_per_mille = self.sample_per_mille.map(|v| v.clamp(1, 1000));
+        self.observation_started_at = self
+            .observation_started_at
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         self.notes = self
             .notes
             .map(|n| n.trim().to_string())
@@ -631,9 +639,100 @@ pub struct DryRunReport {
     pub note: String,
 }
 
+// ── S3：下线准备 / 回滚评估 / 双写方案（只输出清单与脚本）──
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetireChecklistItem {
+    pub id: String,
+    /// dependency / observation / backup / gate / timing
+    pub category: String,
+    pub title: String,
+    pub detail: String,
+    /// true = 已自动核实；false = 必须人工确认。
+    pub auto_verified: bool,
+    /// pass / fail / warn / unknown / manual
+    pub status: String,
+    /// 该项未满足时是否应阻断下线（仅作为清单结论，工具不执行任何动作）。
+    pub blocks_retire: bool,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetirePackage {
+    /// 指定源列后才生成；整表盘点模式为 false。
+    pub generated: bool,
+    pub table: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    pub target_table: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_table: Option<String>,
+    pub observation_required_days: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_elapsed_days: Option<u64>,
+    pub observation_satisfied: bool,
+    pub observation_note: String,
+    pub snapshot_retention_days: u64,
+    pub rollback_window_hours: u64,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    pub auto_verified_count: usize,
+    pub manual_confirmation_count: usize,
+    #[serde(default)]
+    pub checklist: Vec<RetireChecklistItem>,
+    #[serde(default)]
+    pub execution_order: Vec<String>,
+    pub recommended_window: String,
+    pub irreversible: bool,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RollbackAssessment {
+    /// scalar_1_to_1 / json_split_1_to_1 / json_1_to_n / none
+    pub shape: String,
+    /// reversible / conditional / irreversible / not_applicable
+    pub conclusion: String,
+    pub summary: String,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    #[serde(default)]
+    pub prerequisites: Vec<String>,
+    #[serde(default)]
+    pub lossy_aspects: Vec<String>,
+    pub irreversible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse_sql: Option<String>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DualWriteMetric {
+    pub name: String,
+    pub target: String,
+    pub alert_threshold: String,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DualWritePlan {
+    /// 固定 proposal_only：只出方案，不编排应用切换、不改用户代码。
+    pub mode: String,
+    #[serde(default)]
+    pub steps: Vec<String>,
+    #[serde(default)]
+    pub switch_point: Vec<String>,
+    #[serde(default)]
+    pub metrics: Vec<DualWriteMetric>,
+    #[serde(default)]
+    pub rollback_conditions: Vec<String>,
+    pub note: String,
+}
+
 // ── 汇总 ───────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FieldGovernanceAnalysis {
     pub db_name: String,
     pub table: String,
@@ -672,6 +771,15 @@ pub struct FieldGovernanceAnalysis {
     #[serde(default)]
     pub scripts: Vec<ManualScript>,
     pub dry_run: DryRunReport,
+    /// S3：下线准备清单（只提示，不执行）。
+    #[serde(default)]
+    pub retire_package: RetirePackage,
+    /// S3：从目标表反写回源列的可回滚性评估。
+    #[serde(default)]
+    pub rollback: RollbackAssessment,
+    /// S3：应用层双写方案（只出方案）。
+    #[serde(default)]
+    pub dual_write: DualWritePlan,
 }
 
 impl FieldGovernanceAnalysis {

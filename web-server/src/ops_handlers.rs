@@ -208,6 +208,9 @@ pub(crate) struct OpsAnalyzeRequest {
     #[serde(default)]
     pub empty_string_policy:
         Option<core_lib::ops::field_migration::types::EmptyStringPolicy>,
+    /// 字段治理 S3：观察期起始日期（YYYY-MM-DD），用于下线准备清单提示。
+    #[serde(default)]
+    pub observation_started_at: Option<String>,
 }
 
 impl OpsAnalyzeRequest {
@@ -236,6 +239,7 @@ impl OpsAnalyzeRequest {
                 "profile_mode": self.profile_mode,
                 "sample_per_mille": self.sample_per_mille,
                 "empty_string_policy": self.empty_string_policy,
+                "observation_started_at": self.observation_started_at,
                 "notes": self.notes,
             }));
         }
