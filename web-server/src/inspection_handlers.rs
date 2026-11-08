@@ -71,9 +71,10 @@ async fn resolve_target(
         .or_else(|| DbType::from_url(&connection.url))
         .unwrap_or(DbType::MySQL);
     if !matches!(db_type, DbType::MySQL | DbType::MariaDB) {
-        return Err(AppError::BadRequest(
-            "首期巡检只支持 MySQL/MariaDB；PostgreSQL/SQLite 仍为实验性".into(),
-        ));
+        return Err(AppError::BadRequest(format!(
+            "定期巡检 当前仅支持 MySQL / MariaDB（依赖 MySQL 的 information_schema 与 performance_schema 元数据）；当前连接为 {}，请切换到 MySQL 连接后再使用该功能。",
+            db_type.display_name()
+        )));
     }
     let db_name = DbClient::extract_db_name(&connection.url).unwrap_or_default();
     let fingerprint = hash_json(&json!({
