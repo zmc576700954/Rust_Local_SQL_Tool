@@ -45,11 +45,84 @@ pub fn quote_ident_pg(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
+/// 带长度/空值校验的 PostgreSQL 标识符引用
+pub fn quote_ident_pg_checked(s: &str) -> Result<String, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("Invalid identifier".into());
+    }
+    if trimmed.len() > 512 {
+        return Err("Identifier too long".into());
+    }
+    Ok(quote_ident_pg(trimmed))
+}
+
 /// 根据 DbType 选择标识符引用方式
 pub fn quote_ident(s: &str, db_type: crate::config::DbType) -> String {
     match db_type {
         crate::config::DbType::MySQL | crate::config::DbType::MariaDB => quote_ident_mysql(s),
         _ => quote_ident_pg(s),
+    }
+}
+
+/// 拆分 PostgreSQL 的 schema 限定名（`schema.table`）。
+///
+/// 未带 schema 时返回 `(None, table)`；带 schema 时返回 `(Some(schema), table)`。
+pub fn split_pg_table_ref(name: &str) -> (Option<&str>, &str) {
+    match name.split_once('.') {
+        Some((schema, table)) if !schema.is_empty() && !table.is_empty() => {
+            (Some(schema), table)
+        }
+        _ => (None, name),
+    }
+}
+
+/// 按引擎引用表名：MySQL 反引号；PostgreSQL 支持 `schema.table` 两级；SQLite 双引号。
+pub fn quote_table_ref_checked(
+    name: &str,
+    db_type: &crate::config::DbType,
+) -> Result<String, String> {
+    use crate::config::DbType;
+    match db_type {
+        DbType::MySQL | DbType::MariaDB => quote_ident_mysql_checked(name),
+        DbType::PostgreSQL => {
+            let (schema, table) = split_pg_table_ref(name);
+            let table_quoted = quote_ident_pg_checked(table)?;
+            match schema {
+                Some(schema) => Ok(format!(
+                    "{}.{}",
+                    quote_ident_pg_checked(schema)?,
+                    table_quoted
+                )),
+                None => Ok(table_quoted),
+            }
+        }
+        _ => quote_ident_pg_checked(name),
+    }
+}
+
+/// MySQL 表名引用：支持 `db.table` 两级，分别加反引号。
+pub fn quote_table_ref_mysql(name: &str) -> String {
+    match name.split_once('.') {
+        Some((schema, table)) if !schema.is_empty() && !table.is_empty() => {
+            format!("{}.{}", quote_ident_mysql(schema), quote_ident_mysql(table))
+        }
+        _ => quote_ident_mysql(name),
+    }
+}
+
+/// 按引擎选择列引用的哨兵占位符（`?` 或 `$n`）。
+/// 序号从 1 开始；MySQL/SQLite 忽略序号。
+pub fn placeholder_for(
+    style: crate::db::client::PlaceholderStyle,
+    index: usize,
+) -> String {
+    use crate::db::client::PlaceholderStyle;
+    match style {
+        PlaceholderStyle::QuestionMark => "?".to_string(),
+        PlaceholderStyle::DollarNumber => format!("${}", index),
+        PlaceholderStyle::AtP => format!("@p{}", index),
+        PlaceholderStyle::ColonNumber => format!(":{}", index),
     }
 }
 
@@ -157,11 +230,66 @@ pub fn pg_row_to_json(row: &sqlx::postgres::PgRow) -> Value {
     Value::Object(map)
 }
 
+/// MySQL `information_schema` 的字符串列在部分 8.0 版本会被驱动标记为 binary，
+/// 直接按 `String` 解码会报 `VARCHAR`/`VARBINARY` 不匹配。这里先按字符串解码，
+/// 失败时退回按字节解码再转文本。
+pub fn mysql_text(row: &sqlx::mysql::MySqlRow, name: &str) -> Option<String> {
+    use sqlx::Row;
+    if let Ok(v) = row.try_get::<Option<String>, _>(name) {
+        return v;
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(name) {
+        return v.map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    }
+    None
+}
+
 /// 从 PgRow 的指定列提取为 serde_json::Value
+///
+/// PostgreSQL 的类型体系比 MySQL 宽：这里按 sqlx 的解码能力显式覆盖
+/// 布尔、各宽度整数、浮点、时间/日期、JSON/JSONB、数组与文本。
 pub fn pg_cell_to_value(row: &sqlx::postgres::PgRow, idx: usize) -> Value {
     use sqlx::Row;
     if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
         return serde_json::json!(v);
+    }
+    // JSON / JSONB：保留原始 JSON 结构，而不是字符串化
+    if let Ok(v) = row.try_get::<Option<serde_json::Value>, _>(idx) {
+        return v.unwrap_or(Value::Null);
+    }
+    // 数组类型（text[] / int[] / bigint[] / float8[] / bool[]）
+    if let Ok(v) = row.try_get::<Option<Vec<String>>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<i32>>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<i64>>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<f64>>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    if let Ok(v) = row.try_get::<Option<Vec<bool>>, _>(idx) {
+        return serde_json::json!(v);
+    }
+    // NUMERIC / DECIMAL：sqlx 不把 NUMERIC 解码为 f64，需要 BigDecimal；
+    // 与 MySQL DECIMAL 的既有行为一致，输出为 JSON number（超范围时退回字符串）。
+    if let Ok(v) = row.try_get::<Option<sqlx::types::BigDecimal>, _>(idx) {
+        return match v {
+            Some(v) => {
+                let text = v.to_string();
+                match text.parse::<f64>() {
+                    Ok(f) if f.is_finite() => serde_json::json!(f),
+                    _ => serde_json::json!(text),
+                }
+            }
+            None => Value::Null,
+        };
+    }
+    // uuid：sqlx 需要 uuid feature 才能解码，输出统一为字符串
+    if let Ok(v) = row.try_get::<Option<sqlx::types::uuid::Uuid>, _>(idx) {
+        return serde_json::json!(v.map(|u| u.to_string()));
     }
     if let Ok(v) = row.try_get::<Option<i16>, _>(idx) {
         return serde_json::json!(v);
@@ -178,6 +306,13 @@ pub fn pg_cell_to_value(row: &sqlx::postgres::PgRow, idx: usize) -> Value {
     if let Ok(v) = row.try_get::<Option<f64>, _>(idx) {
         return serde_json::json!(v);
     }
+    // timestamptz / timetz 解码为带时区类型
+    if let Ok(v) = row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(idx) {
+        return serde_json::json!(v.map(|dt| dt.to_rfc3339()));
+    }
+    if let Ok(v) = row.try_get::<Option<chrono::DateTime<chrono::FixedOffset>>, _>(idx) {
+        return serde_json::json!(v.map(|dt| dt.to_rfc3339()));
+    }
     if let Ok(v) = row.try_get::<Option<chrono::NaiveDateTime>, _>(idx) {
         return serde_json::json!(v.map(|dt| dt.to_string()));
     }
@@ -192,7 +327,9 @@ pub fn pg_cell_to_value(row: &sqlx::postgres::PgRow, idx: usize) -> Value {
     }
     if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
         if let Some(bytes) = v {
-            return serde_json::json!(String::from_utf8_lossy(&bytes).to_string());
+            // bytea：输出 PostgreSQL 的十六进制文本形式，避免 UTF-8 lossy 产生乱码。
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            return serde_json::json!(format!("\\x{}", hex));
         }
     }
     Value::Null
@@ -219,11 +356,20 @@ pub fn pg_cell_to_string(row: &sqlx::postgres::PgRow, ordinal: usize) -> Option<
     if let Ok(v) = row.try_get::<Option<f64>, _>(ordinal) {
         return v.map(|x| x.to_string());
     }
+    if let Ok(v) = row.try_get::<Option<sqlx::types::BigDecimal>, _>(ordinal) {
+        return v.map(|x| x.to_string());
+    }
+    if let Ok(v) = row.try_get::<Option<sqlx::types::uuid::Uuid>, _>(ordinal) {
+        return v.map(|u| u.to_string());
+    }
     if let Ok(v) = row.try_get::<Option<bool>, _>(ordinal) {
         return v.map(|x| x.to_string());
     }
     if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(ordinal) {
-        return v.map(|x| String::from_utf8_lossy(&x).into_owned());
+        return v.map(|x| {
+            let hex: String = x.iter().map(|b| format!("{:02x}", b)).collect();
+            format!("\\x{}", hex)
+        });
     }
     None
 }

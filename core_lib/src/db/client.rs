@@ -29,7 +29,7 @@ pub enum DbError {
     MissingUrl,
     #[error("Data is missing: {0}")]
     MissingData(String),
-    #[error("Unsupported database type: {0}")]
+    #[error("不支持的操作：{0}")]
     Unsupported(String),
     #[error("Security: {0}")]
     Security(String),
@@ -395,6 +395,7 @@ impl DbClient {
     }
 
     /// MySQL-only: get the connection ID for an active session.
+    /// Prefer `EngineConnection::backend_id` for engine-agnostic code.
     pub async fn connection_id_for_session(
         conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>,
     ) -> Result<u64, DbError> {
@@ -406,12 +407,9 @@ impl DbClient {
         Ok(row.try_get::<u64, _>("connection_id")?)
     }
 
-    /// MySQL-only: kill a running query on a specific connection.
+    /// 终止指定后端会话上的查询（按引擎分派）。
     pub async fn kill_query(&self, connection_id: u64) -> Result<(), DbError> {
-        let pool = self.pool.mysql()?;
-        let sql = format!("KILL QUERY {}", connection_id);
-        sqlx::query(&sql).execute(pool).await?;
-        Ok(())
+        self.pool.kill_backend(connection_id).await
     }
 
     /// Extract the database name from the connection URL
