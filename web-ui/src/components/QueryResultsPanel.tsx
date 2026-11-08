@@ -6,6 +6,7 @@ import { Button } from './ui'
 import type { QueryErrorInsight, QueryExecutionResult, QueryResultCompareReport } from '../types'
 import type { AppError } from '../utils'
 import { tr } from '../i18n'
+import { buildMarkdownTableAsync } from '../utils/markdownTable'
 
 type QueryResultsPanelState = {
   sql: string
@@ -152,6 +153,18 @@ export function QueryResultsPanel({
       emitToast('Loaded result JSON copied to clipboard', 'success')
     } catch {
       emitToast('Failed to copy loaded result JSON', 'error')
+    }
+  }
+
+  const handleCopyMarkdown = async () => {
+    if (!hasRows) return
+    const markdownColumns = activeResult?.columns?.length ? activeResult.columns : Object.keys(rows[0] || {})
+    try {
+      const markdown = await buildMarkdownTableAsync(markdownColumns, rows)
+      await navigator.clipboard.writeText(markdown)
+      emitToast(tr('Markdown 表格已复制', 'Markdown table copied to clipboard'), 'success')
+    } catch {
+      emitToast(tr('复制 Markdown 表格失败', 'Failed to copy Markdown table'), 'error')
     }
   }
 
@@ -308,6 +321,15 @@ export function QueryResultsPanel({
                     >
                       <Copy className="w-3 h-3" />
                       Copy JSON
+                    </Button>
+                    <Button
+                      variant="toolbar"
+                      size="sm"
+                      onClick={() => void handleCopyMarkdown()}
+                      className="gap-1"
+                    >
+                      <Copy className="w-3 h-3" />
+                      {tr('复制 Markdown 表格', 'Copy Markdown Table')}
                     </Button>
                     <Button
                       variant="toolbar"

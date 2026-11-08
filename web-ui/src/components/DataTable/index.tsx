@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, Filter, Save, Undo, Plus, Trash2, Copy, Eye, X, Che
 import { api } from '../../api';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { redactSensitiveText } from '../../utils'
+import { buildMarkdownTable, buildMarkdownTableAsync } from '../../utils/markdownTable'
 import type { DataTableProps, PreviewPayload, SaveReviewUpdatePreview, SaveReviewDeletePreview, ValidationIssue, StaleRecoveryContext, StaleConflictDiffState, StaleConflictDiffItem, SaveFailureItem, SaveAttemptReport, PendingStaleRecoveryState, StaleConflictQueueFilter, StaleConflictQueueSort, StaleConflictOverviewGroupKey, StaleConflictOverviewGroupState, StaleConflictReviewScope, ColumnLayoutState } from './types';
 import type { SortRule } from '../SortPanel/types'
 import { createRule } from '../SortPanel/helpers'
@@ -1028,6 +1029,27 @@ export function DataTable({
     const rowData = getRowSnapshot(rowIdx, isNew);
     await copyTextToClipboard(buildInsertStatement(rowData), 'Row SQL copied to clipboard', 'Failed to copy row SQL');
     setContextMenu(null);
+  };
+
+  const handleCopyRowMarkdown = async (rowIdx: number, isNew: boolean) => {
+    const rowData = getRowSnapshot(rowIdx, isNew) || {};
+    await copyTextToClipboard(
+      buildMarkdownTable(columns, [rowData]),
+      tr('行已复制为 Markdown 表格', 'Row copied as Markdown table'),
+      tr('复制 Markdown 表格失败', 'Failed to copy Markdown table'),
+    );
+    setContextMenu(null);
+  };
+
+  const handleCopyAllRowsMarkdown = async () => {
+    setContextMenu(null);
+    if (data.length === 0) return;
+    const markdown = await buildMarkdownTableAsync(columns, data);
+    await copyTextToClipboard(
+      markdown,
+      tr(`已复制 ${data.length} 行为 Markdown 表格`, `Copied ${data.length} rows as Markdown table`),
+      tr('复制 Markdown 表格失败', 'Failed to copy Markdown table'),
+    );
   };
 
   const handleCopyPreviewValue = async () => {
@@ -4258,6 +4280,22 @@ export function DataTable({
           >
             <Copy className="w-4 h-4" /> Copy Row SQL
           </button>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border"
+            onClick={() => void handleCopyRowMarkdown(contextMenu.rowIdx, contextMenu.isNew)}
+          >
+            <Copy className="w-4 h-4" /> {tr('复制行为 Markdown 表格', 'Copy Row as Markdown Table')}
+          </button>
+          {data.length > 0 && (
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-300 hover:bg-dark-border"
+              onClick={() => void handleCopyAllRowsMarkdown()}
+            >
+              <Copy className="w-4 h-4" /> {tr(`复制全部已加载行（${data.length} 行）为 Markdown`, `Copy All Loaded Rows as Markdown (${data.length} rows)`)}
+            </button>
+          )}
           <div className="h-px bg-dark-border my-1" />
           <button
             type="button"

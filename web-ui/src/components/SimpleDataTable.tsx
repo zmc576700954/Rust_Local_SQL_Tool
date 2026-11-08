@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useCallback } from 'react';
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Copy, Eye, X } from 'lucide-react';
 import { tr } from '../i18n';
 import { Button } from './ui';
+import { buildMarkdownTable, buildMarkdownTableAsync } from '../utils/markdownTable';
 
 interface SimpleDataTableProps {
   data: any[];
@@ -347,6 +348,28 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
     setContextMenu(null);
   }, [contextMenu, paginatedData, buildInsertStatement, copyTextToClipboard]);
 
+  const handleCopyRowMarkdown = useCallback(async () => {
+    if (!contextMenu) return;
+    const row = paginatedData[contextMenu.rowIdx] || {};
+    await copyTextToClipboard(
+      buildMarkdownTable(columns, [row]),
+      tr('行已复制为 Markdown 表格', 'Row copied as Markdown table'),
+      tr('复制 Markdown 表格失败', 'Failed to copy Markdown table')
+    );
+    setContextMenu(null);
+  }, [contextMenu, paginatedData, columns, copyTextToClipboard]);
+
+  const handleCopyAllRowsMarkdown = useCallback(async () => {
+    setContextMenu(null);
+    if (sortedData.length === 0) return;
+    const markdown = await buildMarkdownTableAsync(columns, sortedData);
+    await copyTextToClipboard(
+      markdown,
+      tr(`已复制 ${sortedData.length} 行为 Markdown 表格`, `Copied ${sortedData.length} rows as Markdown table`),
+      tr('复制 Markdown 表格失败', 'Failed to copy Markdown table')
+    );
+  }, [sortedData, columns, copyTextToClipboard]);
+
   const handleCopyPreviewValue = useCallback(async () => {
     if (!previewCell) return;
     await copyTextToClipboard(
@@ -586,6 +609,20 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
           >
             <Copy className="w-4 h-4" />
             {tr('复制行 SQL', 'Copy Row SQL')}
+          </button>
+          <button 
+            className="w-full text-left px-4 py-2 hover:bg-dark-surface transition-colors flex items-center gap-2"
+            onClick={handleCopyRowMarkdown}
+          >
+            <Copy className="w-4 h-4" />
+            {tr('复制行为 Markdown 表格', 'Copy Row as Markdown Table')}
+          </button>
+          <button 
+            className="w-full text-left px-4 py-2 hover:bg-dark-surface transition-colors flex items-center gap-2"
+            onClick={handleCopyAllRowsMarkdown}
+          >
+            <Copy className="w-4 h-4" />
+            {tr(`复制全部已加载行（${sortedData.length} 行）为 Markdown`, `Copy All Loaded Rows as Markdown (${sortedData.length} rows)`)}
           </button>
         </div>
       )}
