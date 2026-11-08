@@ -692,7 +692,7 @@ pub struct RetirePackage {
 pub struct RollbackAssessment {
     /// scalar_1_to_1 / json_split_1_to_1 / json_1_to_n / none
     pub shape: String,
-    /// reversible / conditional / irreversible / not_applicable
+    /// reversible / rebuildable_semantic_equivalent / irreversible / not_applicable
     pub conclusion: String,
     pub summary: String,
     #[serde(default)]
@@ -701,6 +701,10 @@ pub struct RollbackAssessment {
     pub prerequisites: Vec<String>,
     #[serde(default)]
     pub lossy_aspects: Vec<String>,
+    /// 明确不可还原的内容。`rebuildable_semantic_equivalent` 时必须非空，
+    /// 避免用户把「语义等价重建」理解成一键还原。
+    #[serde(default)]
+    pub non_restorable: Vec<String>,
     pub irreversible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse_sql: Option<String>,

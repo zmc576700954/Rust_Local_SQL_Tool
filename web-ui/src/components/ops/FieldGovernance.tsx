@@ -210,6 +210,7 @@ interface RollbackAssessment {
   reasons?: string[]
   prerequisites?: string[]
   lossy_aspects?: string[]
+  non_restorable?: string[]
   irreversible: boolean
   reverse_sql?: string | null
   note: string
@@ -1408,7 +1409,7 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
                 <RefreshCw className="h-4 w-4 text-amber-400" />
                 {tr('回滚评估', 'Rollback assessment')}
                 <span
-                  className={`rounded border px-1.5 py-0.5 text-[11px] font-mono ${
+                  className={`rounded border px-1.5 py-0.5 text-[11px] ${
                     analysis.rollback.irreversible
                       ? 'border-red-500/60 bg-red-500/20 text-red-300'
                       : analysis.rollback.conclusion === 'reversible'
@@ -1416,7 +1417,13 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
                         : 'border-amber-500/50 bg-amber-500/10 text-amber-300'
                   }`}
                 >
-                  {analysis.rollback.conclusion}
+                  {analysis.rollback.conclusion === 'reversible'
+                    ? tr('可回滚', 'Reversible')
+                    : analysis.rollback.conclusion === 'rebuildable_semantic_equivalent'
+                      ? tr('可重建（语义等价）', 'Rebuildable (semantic equivalence)')
+                      : analysis.rollback.conclusion === 'irreversible'
+                        ? tr('不可回滚', 'Irreversible')
+                        : analysis.rollback.conclusion}
                 </span>
                 <span className="rounded border border-dark-border px-1.5 py-0.5 font-mono text-[11px] text-gray-400">
                   {analysis.rollback.shape}
@@ -1442,6 +1449,16 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
                     <li key={index}>- {item}</li>
                   ))}
                 </ul>
+              )}
+              {(analysis.rollback.non_restorable || []).length > 0 && (
+                <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-300">
+                  <div className="mb-1 font-semibold">{tr('不可还原项', 'Not restorable')}</div>
+                  <ul className="space-y-1">
+                    {(analysis.rollback.non_restorable || []).map((item, index) => (
+                      <li key={index}>- {item}</li>
+                    ))}
+                  </ul>
+                </div>
               )}
               {(analysis.rollback.prerequisites || []).length > 0 && (
                 <div className="mt-2 text-xs text-gray-400">

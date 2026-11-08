@@ -25,12 +25,18 @@ use core_lib::ops::registry::{OpsContext, ScenarioRegistry};
 const DB_ID: &str = "field-migration-s3-e2e";
 
 async fn exec(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>, sql: &str) {
-    if let Err(err) = sqlx::query(sql).execute(&mut **conn).await {
+    // 触发器/存储过程等 DDL 不支持 prepared statement 协议，统一走文本协议。
+    if let Err(err) = sqlx::raw_sql(sql).execute(&mut **conn).await {
         panic!("执行 SQL 失败: {err}\nSQL: {sql}");
     }
 }
 
 async fn setup(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>) {
+    exec(conn, "DROP TRIGGER IF EXISTS trg_s3_orders").await;
+    exec(conn, "DROP PROCEDURE IF EXISTS sp_s3_owner_count").await;
+    exec(conn, "DROP FUNCTION IF EXISTS fn_s3_owner_count").await;
+    exec(conn, "DROP PROCEDURE IF EXISTS sp_s3_noise").await;
+    exec(conn, "DROP VIEW IF EXISTS v_s3_noise").await;
     exec(conn, "DROP VIEW IF EXISTS v_s3_orders").await;
     exec(conn, "DROP TABLE IF EXISTS fm_s3_orders").await;
     exec(conn, "DROP TABLE IF EXISTS fm_s3_owner_ext").await;
@@ -56,6 +62,37 @@ async fn setup(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>) {
     exec(
         conn,
         "CREATE VIEW v_s3_orders AS SELECT id, owner_id FROM fm_s3_orders",
+    )
+    .await;
+    // 触发器与存储过程/函数都真实引用 owner_id。
+    exec(
+        conn,
+        "CREATE TRIGGER trg_s3_orders BEFORE INSERT ON fm_s3_orders \
+         FOR EACH ROW SET NEW.owner_id = NEW.owner_id",
+    )
+    .await;
+    exec(
+        conn,
+        "CREATE PROCEDURE sp_s3_owner_count(IN p_owner INT) \
+         SELECT COUNT(*) FROM fm_s3_orders WHERE owner_id = p_owner",
+    )
+    .await;
+    exec(
+        conn,
+        "CREATE FUNCTION fn_s3_owner_count(p INT) RETURNS INT \
+         DETERMINISTIC READS SQL DATA \
+         RETURN (SELECT COUNT(*) FROM fm_s3_orders WHERE owner_id = p)",
+    )
+    .await;
+    // 噪声：列名只出现在字符串字面量里，不能被当成依赖。
+    exec(
+        conn,
+        "CREATE VIEW v_s3_noise AS SELECT 'owner_id' AS label",
+    )
+    .await;
+    exec(
+        conn,
+        "CREATE PROCEDURE sp_s3_noise() SELECT 'owner_id' AS label",
     )
     .await;
     exec(
@@ -196,15 +233,74 @@ async fn s3_dependency_scan_hits_all_and_rollback_differs_for_1_to_1_and_1_to_n(
                 && object.matched_columns.iter().any(|column| column == "owner_id")),
         "视图依赖必须命中 owner_id"
     );
+    assert!(
+        scalar
+            .dependencies
+            .objects
+            .iter()
+            .any(|object| object.kind == "trigger"
+                && object.name.eq_ignore_ascii_case("trg_s3_orders")
+                && object.matched_columns.iter().any(|column| column == "owner_id")),
+        "TRIGGERS 依赖必须命中 owner_id"
+    );
+    assert!(
+        scalar
+            .dependencies
+            .objects
+            .iter()
+            .any(|object| object.kind == "routine"
+                && object.name.eq_ignore_ascii_case("sp_s3_owner_count")
+                && object.matched_columns.iter().any(|column| column == "owner_id")),
+        "ROUTINES 中的存储过程必须命中 owner_id"
+    );
+    assert!(
+        scalar
+            .dependencies
+            .objects
+            .iter()
+            .any(|object| object.kind == "routine"
+                && object.name.eq_ignore_ascii_case("fn_s3_owner_count")
+                && object.matched_columns.iter().any(|column| column == "owner_id")),
+        "ROUTINES 中的函数必须命中 owner_id"
+    );
+    assert!(
+        scalar
+            .dependencies
+            .source_triggers
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("trg_s3_orders")),
+        "源表触发器必须被记录"
+    );
     for id in [
         "dependency:indexes",
         "dependency:foreign_keys",
         "dependency:generated_columns",
         "dependency:views",
+        "dependency:triggers",
+        "dependency:routines",
+        "dependency:source_triggers",
     ] {
         assert_eq!(item(&scalar, id).status, "fail", "{id} 应命中并阻断下线");
         assert!(item(&scalar, id).auto_verified, "{id} 应标记为自动核实");
     }
+
+    // 字符串字面量中的同名列不能造成假阳性。
+    assert!(
+        !scalar
+            .dependencies
+            .objects
+            .iter()
+            .any(|object| object.name.eq_ignore_ascii_case("v_s3_noise")),
+        "视图字符串字面量中的 owner_id 不应命中"
+    );
+    assert!(
+        !scalar
+            .dependencies
+            .objects
+            .iter()
+            .any(|object| object.name.eq_ignore_ascii_case("sp_s3_noise")),
+        "存储过程字符串字面量中的 owner_id 不应命中"
+    );
     assert!(scalar.retire_package.generated);
     assert!(!scalar.retire_package.observation_satisfied);
     assert!(scalar.retire_package.observation_note.contains("观察期未满"));

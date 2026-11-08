@@ -534,12 +534,14 @@ fn assess_rollback(
     let shape = classify_shape(analysis, &profile);
     let mut reasons = Vec::new();
     let mut lossy_aspects = Vec::new();
+    let mut non_restorable = Vec::new();
 
     if input.empty_string_policy() == EmptyStringPolicy::ToNull {
         lossy_aspects.push(
             "空串策略 to_null：目标表把空串写成 NULL，反写时 NULL 无法区分原始 NULL 与空串。"
                 .into(),
         );
+        non_restorable.push("空串与 NULL 的区分".into());
     }
 
     if shape == "json_1_to_n" {
@@ -550,6 +552,12 @@ fn assess_rollback(
         reasons.push(
             "1:N 反向写回缺少合并规则（顺序、重复、最大长度），因此判定不可回滚。".into(),
         );
+        non_restorable.extend([
+            "数组边界".into(),
+            "元素顺序".into(),
+            "重复元素".into(),
+            "折叠前的原始词元".into(),
+        ]);
     }
 
     if shape == "json_split_1_to_1" {
@@ -630,11 +638,19 @@ fn assess_rollback(
     let irreversible = shape == "json_1_to_n"
         || input.empty_string_policy() == EmptyStringPolicy::ToNull
         || !lossy_aspects.is_empty();
-    if shape == "json_split_1_to_1" && !irreversible {
-        lossy_aspects.push(
-            "JSON 对象的 key 顺序、数字词元（1 vs 1.0）与重复 key 在拆列后不再保留；反写只能保证语义等价，不能保证字节级一致。"
-                .into(),
-        );
+    if shape == "json_split_1_to_1" {
+        non_restorable.extend([
+            "JSON key 顺序".into(),
+            "数值词元（如 1 与 1.0）".into(),
+            "重复 key".into(),
+            "空白与转义形式".into(),
+        ]);
+        if !irreversible {
+            lossy_aspects.push(
+                "JSON 对象的 key 顺序、数字词元（1 vs 1.0）与重复 key 在拆列后不再保留；反写只能重建语义等价的 JSON，不能还原字节级原文。"
+                    .into(),
+            );
+        }
     }
 
     let (conclusion, summary) = if irreversible {
@@ -646,8 +662,8 @@ fn assess_rollback(
         )
     } else if shape == "json_split_1_to_1" {
         (
-            "conditional",
-            "有条件可回滚：目标表只保存拆出的列，反向脚本必须验证所有 key 均无损；JSON 格式不保证字节级一致。"
+            "rebuildable_semantic_equivalent",
+            "可重建（语义等价）：目标表可以重建语义等价的 JSON，但无法一键还原源列字节。不可还原项：key 顺序、数值词元（如 1 与 1.0）、重复 key、空白与转义形式。反向脚本仅为草案。"
                 .to_string(),
         )
     } else {
@@ -689,6 +705,7 @@ fn assess_rollback(
         reasons,
         prerequisites: prereqs,
         lossy_aspects,
+        non_restorable,
         irreversible,
         reverse_sql,
         note,
@@ -1315,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn rollback_json_split_is_conditional_and_to_null_is_irreversible() {
+    fn rollback_json_split_is_rebuildable_semantically_and_to_null_is_irreversible() {
         let mut split = analysis_for(profile("payload", "json", "json"));
         split.column = Some("payload".into());
         split.columns[0].json_keys = vec!["theme".into(), "age".into()];
@@ -1349,9 +1366,17 @@ mod tests {
         ];
         build(&mut split, &input(), &OpsPolicy::default(), &snapshot());
         assert_eq!(split.rollback.shape, "json_split_1_to_1");
-        assert_eq!(split.rollback.conclusion, "conditional");
+        assert_eq!(split.rollback.conclusion, "rebuildable_semantic_equivalent");
         assert!(!split.rollback.irreversible);
-        assert!(split.rollback.summary.contains("有条件可回滚"));
+        assert!(split.rollback.summary.contains("可重建（语义等价）"));
+        assert!(split.rollback.summary.contains("无法一键还原"));
+        for item in ["JSON key 顺序", "数值词元（如 1 与 1.0）", "重复 key"] {
+            assert!(
+                split.rollback.non_restorable.iter().any(|value| value == item),
+                "non_restorable 缺少 {item}: {:?}",
+                split.rollback.non_restorable
+            );
+        }
         let sql = split.rollback.reverse_sql.as_deref().unwrap_or_default();
         assert!(sql.contains("JSON_OBJECT"));
         assert!(sql.contains("'theme'"));

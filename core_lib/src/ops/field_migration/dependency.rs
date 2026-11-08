@@ -257,9 +257,143 @@ pub fn contains_identifier(text: &str, identifier: &str) -> bool {
     if identifier.trim().is_empty() {
         return false;
     }
+    let masked = mask_comments_and_literals(text);
     let target = identifier.to_ascii_lowercase();
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+    masked
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
         .any(|token| token.to_ascii_lowercase() == target)
+}
+
+/// 把 SQL 文本中的注释与字符串字面量替换为空格，保留可执行注释 `/*! ... */`。
+///
+/// 匹配策略：
+/// - 标识符按 ASCII 字母/数字/`_`/`$` 边界切分，大小写不敏感；
+/// - 反引号、schema 限定名（`db.tbl.col`）都按 token 命中；
+/// - `--`、`#`、`/* ... */` 注释内的同名列不算引用，避免假阳性；
+/// - 单引号/双引号字符串字面量内的同名列不算引用，避免假阳性；
+/// - MySQL 可执行注释 `/*! ... */` 仍按代码处理，避免漏匹配。
+/// - 动态 SQL（例如 `PREPARE stmt FROM 'SELECT ... owner_id ...'`）无法静态解析，
+///   这里按字符串处理，属于已知的漏匹配边界（宁可少报，不制造假阳性）。
+fn mask_comments_and_literals(text: &str) -> String {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        LineComment,
+        BlockComment,
+        ExecutableComment,
+        SingleQuote,
+        DoubleQuote,
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut output = String::with_capacity(text.len());
+    let mut state = State::Normal;
+    let mut index = 0;
+
+    while index < chars.len() {
+        let current = chars[index];
+        let next = chars.get(index + 1).copied();
+        match state {
+            State::Normal => {
+                if current == '-' && next == Some('-') {
+                    output.push(' ');
+                    output.push(' ');
+                    index += 2;
+                    state = State::LineComment;
+                } else if current == '#' {
+                    output.push(' ');
+                    index += 1;
+                    state = State::LineComment;
+                } else if current == '/' && next == Some('*') {
+                    if chars.get(index + 2) == Some(&'!') {
+                        // `/*!` 是 MySQL 可执行注释：保留内部 SQL。
+                        output.push_str("   ");
+                        index += 3;
+                        state = State::ExecutableComment;
+                    } else {
+                        output.push(' ');
+                        output.push(' ');
+                        index += 2;
+                        state = State::BlockComment;
+                    }
+                } else if current == '\'' {
+                    output.push(' ');
+                    index += 1;
+                    state = State::SingleQuote;
+                } else if current == '"' {
+                    output.push(' ');
+                    index += 1;
+                    state = State::DoubleQuote;
+                } else {
+                    output.push(current);
+                    index += 1;
+                }
+            }
+            State::LineComment => {
+                if current == '\n' {
+                    output.push('\n');
+                    state = State::Normal;
+                } else {
+                    output.push(' ');
+                }
+                index += 1;
+            }
+            State::BlockComment => {
+                if current == '*' && next == Some('/') {
+                    output.push(' ');
+                    output.push(' ');
+                    index += 2;
+                    state = State::Normal;
+                } else {
+                    output.push(if current == '\n' { '\n' } else { ' ' });
+                    index += 1;
+                }
+            }
+            State::ExecutableComment => {
+                if current == '*' && next == Some('/') {
+                    output.push(' ');
+                    output.push(' ');
+                    index += 2;
+                    state = State::Normal;
+                } else {
+                    output.push(current);
+                    index += 1;
+                }
+            }
+            State::SingleQuote | State::DoubleQuote => {
+                let quote = if state == State::SingleQuote {
+                    '\''
+                } else {
+                    '"'
+                };
+                if current == '\\' {
+                    // 反斜杠转义：连同下一个字符一起屏蔽。
+                    output.push(' ');
+                    if let Some(escaped) = next {
+                        output.push(if escaped == '\n' { '\n' } else { ' ' });
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                } else if current == quote {
+                    if next == Some(quote) {
+                        // SQL 双写引号转义。
+                        output.push(' ');
+                        output.push(' ');
+                        index += 2;
+                    } else {
+                        output.push(' ');
+                        index += 1;
+                        state = State::Normal;
+                    }
+                } else {
+                    output.push(if current == '\n' { '\n' } else { ' ' });
+                    index += 1;
+                }
+            }
+        }
+    }
+    output
 }
 
 #[cfg(test)]
@@ -275,9 +409,60 @@ mod tests {
     }
 
     #[test]
+    fn identifier_match_handles_backticks_case_and_schema_qualification() {
+        assert!(contains_identifier("SELECT `Owner_ID` FROM t", "owner_id"));
+        assert!(contains_identifier(
+            "SELECT `app`.`orders`.`owner_id` FROM `app`.`orders`",
+            "owner_id"
+        ));
+        assert!(contains_identifier("SELECT t.Owner_ID FROM t", "owner_id"));
+        assert!(contains_identifier(
+            "INSERT INTO t (owner_id) VALUES (NEW.owner_id)",
+            "owner_id"
+        ));
+    }
+
+    #[test]
+    fn identifier_match_ignores_comments_and_string_literals() {
+        assert!(!contains_identifier("SELECT 'owner_id' AS label FROM t", "owner_id"));
+        assert!(!contains_identifier(
+            "SELECT \"owner_id\" AS label FROM t",
+            "owner_id"
+        ));
+        assert!(!contains_identifier("-- owner_id\nSELECT 1", "owner_id"));
+        assert!(!contains_identifier("# owner_id\nSELECT 1", "owner_id"));
+        assert!(!contains_identifier("/* owner_id */ SELECT 1", "owner_id"));
+        assert!(!contains_identifier(
+            "SELECT 'it''s not owner_id' FROM t",
+            "owner_id"
+        ));
+        assert!(!contains_identifier(
+            "SELECT 'owner_id\\'s label' FROM t",
+            "owner_id"
+        ));
+        // 字面量之外仍有真实引用时仍应命中。
+        assert!(contains_identifier(
+            "SELECT 'owner_id' AS label, owner_id FROM t",
+            "owner_id"
+        ));
+        // 可执行注释里的引用不能漏掉。
+        assert!(contains_identifier("/*!40101 owner_id */ SELECT 1", "owner_id"));
+    }
+
+    #[test]
     fn matched_columns_deduplicates() {
         let columns = vec!["payload".to_string(), "id".to_string()];
         let matched = matched_columns("SELECT payload FROM t WHERE id = 1", &columns);
         assert_eq!(matched, vec!["payload", "id"]);
+    }
+
+    #[test]
+    fn matched_columns_skips_literals_but_keeps_real_references() {
+        let columns = vec!["owner_id".to_string()];
+        assert!(matched_columns("SELECT 'owner_id' AS label FROM t", &columns).is_empty());
+        assert_eq!(
+            matched_columns("SELECT t.`owner_id` FROM t WHERE 'x' = 'x'", &columns),
+            vec!["owner_id"]
+        );
     }
 }
