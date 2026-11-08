@@ -3,6 +3,8 @@ import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Copy, Eye, 
 import { tr } from '../i18n';
 import { Button } from './ui';
 import { buildMarkdownTable, buildMarkdownTableAsync } from '../utils/markdownTable';
+import { parseUnmappedValue, formatUnmappedValue } from '../utils/unmappedValue';
+import { UnmappedTypeBadge } from './UnmappedTypeBadge';
 
 interface SimpleDataTableProps {
   data: any[];
@@ -274,6 +276,8 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
 
   const formatCellValue = useCallback((value: unknown) => {
     if (value === null || value === undefined) return '';
+    const unmapped = parseUnmappedValue(value);
+    if (unmapped) return formatUnmappedValue(unmapped);
     if (typeof value === 'object') return stringifyJson(value);
     return String(value);
   }, [stringifyJson]);
@@ -507,6 +511,7 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
                 {visibleColumns.map((k) => {
                   const val = row[k];
                   const inlineValue = formatInlineCellValue(val);
+                  const unmapped = parseUnmappedValue(val);
                   return (
                     <td 
                       key={k} 
@@ -525,6 +530,8 @@ export function SimpleDataTable({ data }: SimpleDataTableProps) {
                     >
                       {val === null ? (
                         <span className="text-gray-600 italic">NULL</span>
+                      ) : unmapped ? (
+                        <UnmappedTypeBadge value={unmapped} className="truncate" />
                       ) : typeof val === 'boolean' ? (
                         <span className={`px-1.5 py-0.5 rounded text-[11px] font-bold uppercase ${val ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
                           {val ? 'TRUE' : 'FALSE'}

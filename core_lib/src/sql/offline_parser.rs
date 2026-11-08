@@ -65,6 +65,7 @@ impl OfflineParser {
                         column_key: column_key.to_string(),
                         column_default: None,
                         extra: "".to_string(),
+                        type_warning: None,
                     });
                 }
 

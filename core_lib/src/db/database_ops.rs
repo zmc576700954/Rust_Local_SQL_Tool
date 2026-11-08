@@ -111,12 +111,123 @@ fn mysql_rows_to_result(rows: Vec<sqlx::mysql::MySqlRow>) -> QueryResult {
     }
 }
 
-fn pg_rows_to_result(rows: Vec<sqlx::postgres::PgRow>) -> QueryResult {
+/// 用 PostgreSQL 的简单查询协议取回结果行（文本格式）。
+///
+/// `sqlx::query()` 会走扩展协议并把结果编码成二进制，导致枚举、range、inet、
+/// interval、复合类型等没有 Rust 解码器的类型只能拿到二进制字节。简单查询协议
+/// 让服务端直接返回文本表示，这些类型就能按文本正确回读。
+async fn pg_fetch_all_text(
+    conn: &mut sqlx::PgConnection,
+    sql: &str,
+) -> Result<Vec<sqlx::postgres::PgRow>, DbError> {
+    use futures_util::TryStreamExt;
+    use sqlx::Either;
+
+    let mut stream = sqlx::Executor::fetch_many(&mut *conn, sqlx::raw_sql(sql));
+    let mut rows = Vec::new();
+    while let Some(item) = stream.try_next().await? {
+        if let Either::Right(row) = item {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+/// 查询 `pg_type`，把用户自定义类型的 OID 解析成展示名与类别。
+///
+/// 简单查询协议不会解析自定义类型 OID，`PgTypeInfo::name()` 对这些类型会 panic，
+/// 所以必须先查目录再解码单元格。
+async fn pg_load_type_catalog(
+    conn: &mut sqlx::PgConnection,
+    oids: &[u32],
+) -> Result<std::collections::HashMap<u32, sql_util::PgTypeMeta>, DbError> {
+    use sqlx::Row;
+
+    let mut catalog = std::collections::HashMap::new();
+    if oids.is_empty() {
+        return Ok(catalog);
+    }
+    let oid_list: Vec<i32> = oids.iter().map(|o| *o as i32).collect();
+    let rows = sqlx::query(
+        r#"
+        SELECT t.oid::int4 AS type_oid,
+               format_type(t.oid, NULL) AS type_name,
+               t.typtype::text AS type_kind,
+               COALESCE((SELECT et.typtype::text FROM pg_type et WHERE et.oid = t.typelem), '') AS elem_type_kind
+        FROM pg_type t
+        WHERE t.oid::int4 = ANY($1::int4[])
+        "#,
+    )
+    .bind(&oid_list)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    for row in rows {
+        let oid: i32 = row.try_get("type_oid")?;
+        catalog.insert(
+            oid as u32,
+            sql_util::PgTypeMeta {
+                type_name: row.try_get("type_name").unwrap_or_default(),
+                type_kind: row.try_get("type_kind").unwrap_or_default(),
+                elem_type_kind: row.try_get("elem_type_kind").unwrap_or_default(),
+            },
+        );
+    }
+    Ok(catalog)
+}
+
+/// 收集结果集中 sqlx 未解析的类型 OID（简单查询协议下的用户自定义类型）。
+fn pg_custom_type_oids(rows: &[sqlx::postgres::PgRow]) -> Vec<u32> {
+    use sqlx::Column;
+    let mut oids = Vec::new();
+    if let Some(first) = rows.first() {
+        for col in first.columns() {
+            let type_info = col.type_info();
+            if sql_util::pg_type_is_unresolved(type_info) {
+                if let Some(oid) = type_info.oid() {
+                    let oid = oid.0;
+                    if !oids.contains(&oid) {
+                        oids.push(oid);
+                    }
+                }
+            }
+        }
+    }
+    oids
+}
+
+/// 按结果集里的列 OID 加载类型目录；加载失败时退化为空目录（单元格仍会
+/// 输出带 OID 的结构化标记，而不是空值）。
+async fn pg_load_catalog_for_rows(
+    conn: &mut sqlx::PgConnection,
+    rows: &[sqlx::postgres::PgRow],
+) -> std::collections::HashMap<u32, sql_util::PgTypeMeta> {
+    let oids = pg_custom_type_oids(rows);
+    if oids.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    match pg_load_type_catalog(conn, &oids).await {
+        Ok(catalog) => catalog,
+        Err(err) => {
+            tracing::warn!("加载 pg_type 目录失败，用户自定义类型将标记为 oid:N: {err}");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+fn pg_rows_to_result_with_catalog(
+    rows: Vec<sqlx::postgres::PgRow>,
+    catalog: &std::collections::HashMap<u32, sql_util::PgTypeMeta>,
+) -> QueryResult {
     let columns = columns_of_pg(&rows);
     let count = columns.len();
     let row_values = rows
         .iter()
-        .map(|r| (0..count).map(|i| sql_util::pg_cell_to_value(r, i)).collect())
+        .map(|r| {
+            (0..count)
+                .map(|i| sql_util::pg_cell_to_value_with_catalog(r, i, catalog))
+                .collect()
+        })
         .collect();
     QueryResult {
         columns,
@@ -223,8 +334,9 @@ impl EngineConnection {
                 Ok(mysql_rows_to_result(rows))
             }
             EngineConnection::Postgres(conn) => {
-                let rows = sqlx::query(sql).fetch_all(&mut **conn).await?;
-                Ok(pg_rows_to_result(rows))
+                let rows = pg_fetch_all_text(&mut **conn, sql).await?;
+                let catalog = pg_load_catalog_for_rows(&mut **conn, &rows).await;
+                Ok(pg_rows_to_result_with_catalog(rows, &catalog))
             }
             EngineConnection::SQLite(conn) => {
                 let rows = sqlx::query(sql).fetch_all(&mut **conn).await?;
@@ -289,8 +401,10 @@ impl DbPool {
                 Ok(mysql_rows_to_result(rows))
             }
             DbPool::Postgres(p) => {
-                let rows = sqlx::query(sql).fetch_all(p).await?;
-                Ok(pg_rows_to_result(rows))
+                let mut conn = p.acquire().await?;
+                let rows = pg_fetch_all_text(&mut conn, sql).await?;
+                let catalog = pg_load_catalog_for_rows(&mut conn, &rows).await;
+                Ok(pg_rows_to_result_with_catalog(rows, &catalog))
             }
             DbPool::SQLite(p) => {
                 let rows = sqlx::query(sql).fetch_all(p).await?;

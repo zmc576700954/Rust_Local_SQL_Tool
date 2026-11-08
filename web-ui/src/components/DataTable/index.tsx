@@ -4,6 +4,8 @@ import { api } from '../../api';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { redactSensitiveText } from '../../utils'
 import { buildMarkdownTable, buildMarkdownTableAsync } from '../../utils/markdownTable'
+import { parseUnmappedValue, formatUnmappedValue } from '../../utils/unmappedValue'
+import { UnmappedTypeBadge } from '../UnmappedTypeBadge'
 import type { DataTableProps, PreviewPayload, SaveReviewUpdatePreview, SaveReviewDeletePreview, ValidationIssue, StaleRecoveryContext, StaleConflictDiffState, StaleConflictDiffItem, SaveFailureItem, SaveAttemptReport, PendingStaleRecoveryState, StaleConflictQueueFilter, StaleConflictQueueSort, StaleConflictOverviewGroupKey, StaleConflictOverviewGroupState, StaleConflictReviewScope, ColumnLayoutState } from './types';
 import type { SortRule } from '../SortPanel/types'
 import { createRule } from '../SortPanel/helpers'
@@ -306,6 +308,8 @@ export function DataTable({
 
   const formatCellValue = useCallback((value: unknown) => {
     if (value === null || value === undefined) return '';
+    const unmapped = parseUnmappedValue(value);
+    if (unmapped) return formatUnmappedValue(unmapped);
     if (typeof value === 'object') return stringifyJson(value);
     return String(value);
   }, [stringifyJson]);
@@ -4404,6 +4408,8 @@ function CellDisplay({
 }) {
   if (isNewEmpty) return <span className="text-gray-600 italic" title={titleText}>Empty</span>;
   if (val === null) return <span className="text-gray-600 italic" title={titleText}>NULL</span>;
+  const unmapped = parseUnmappedValue(val);
+  if (unmapped) return <UnmappedTypeBadge value={unmapped} className="truncate" />;
   if (typeof val === 'boolean') {
     return (
       <span

@@ -95,7 +95,17 @@ export function SchemaView({ table, dbName, onInsertText }: { table: any, dbName
                       </button>
                     )}
                   </td>
-                  <td className="py-2.5 px-4 text-purple-300">{col.data_type}</td>
+                  <td className="py-2.5 px-4 text-purple-300">
+                    <span>{col.data_type}</span>
+                    {col.type_warning && (
+                      <span
+                        className="ml-2 inline-block px-1 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 align-middle"
+                        title={col.type_warning}
+                      >
+                        未映射类型
+                      </span>
+                    )}
+                  </td>
                   <td className="py-2.5 px-4 text-gray-400">{col.is_nullable}</td>
                   <td className="py-2.5 px-4 text-gray-400">{col.column_key}</td>
                   <td className="py-2.5 px-4 text-gray-500">{col.column_comment}</td>

@@ -874,6 +874,7 @@ mod tests {
             column_key: key.to_string(),
             column_default: None,
             extra: String::new(),
+            type_warning: None,
         }
     }
 

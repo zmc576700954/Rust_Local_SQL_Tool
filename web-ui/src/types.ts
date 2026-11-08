@@ -24,6 +24,8 @@ export interface ColumnInfo {
   column_key?: string;
   column_default?: string | null;
   extra?: string;
+  /** 该列类型尚无字段级映射时的提示（目前仅 PostgreSQL 自定义类型会返回） */
+  type_warning?: string | null;
 }
 
 export interface IndexInfo {

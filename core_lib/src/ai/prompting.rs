@@ -471,6 +471,7 @@ mod tests {
                             column_key: "PRI".to_string(),
                             column_default: None,
                             extra: String::new(),
+                            type_warning: None,
                         },
                         ColumnInfo {
                             column_name: "email".to_string(),
@@ -481,6 +482,7 @@ mod tests {
                             column_key: String::new(),
                             column_default: None,
                             extra: String::new(),
+                            type_warning: None,
                         },
                     ],
                     indexes: vec![],
@@ -497,6 +499,7 @@ mod tests {
                         column_key: "MUL".to_string(),
                         column_default: None,
                         extra: String::new(),
+                        type_warning: None,
                     }],
                     indexes: vec![],
                     foreign_keys: vec![],

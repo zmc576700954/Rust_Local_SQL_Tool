@@ -20,6 +20,10 @@ pub struct ColumnInfo {
     pub column_key: String,
     pub column_default: Option<String>,
     pub extra: String,
+    /// 该列类型没有字段级映射时的提示（目前只有 PostgreSQL 的自定义复合/未知类型会填充），
+    /// 用于界面把「类型未支持」和「值为 NULL」区分开。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +147,7 @@ impl SchemaExtractor {
                             .unwrap_or_default(),
                         column_default: crate::sql_util::mysql_text(&row, "column_default"),
                         extra: crate::sql_util::mysql_text(&row, "extra").unwrap_or_default(),
+                        type_warning: None,
                     });
                 }
                 Ok(result)
@@ -167,7 +172,6 @@ impl SchemaExtractor {
         db_name: &str,
     ) -> Result<HashMap<String, Vec<ColumnInfo>>, DbError> {
         use crate::config::DbType;
-        use sqlx::Row;
 
         match &client.db_type {
             DbType::MySQL | DbType::MariaDB => {
@@ -209,6 +213,7 @@ impl SchemaExtractor {
                             .unwrap_or_default(),
                         column_default: crate::sql_util::mysql_text(&row, "column_default"),
                         extra: crate::sql_util::mysql_text(&row, "extra").unwrap_or_default(),
+                        type_warning: None,
                     });
                 }
                 Ok(result)
@@ -247,6 +252,8 @@ impl SchemaExtractor {
                    c.relname AS table_name,
                    a.attname AS column_name,
                    t.typname AS data_type,
+                   t.typtype::text AS type_kind,
+                   COALESCE(et.typtype::text, '') AS elem_type_kind,
                    format_type(a.atttypid, a.atttypmod) AS column_type,
                    CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
                    col_description(a.attrelid, a.attnum) AS column_comment,
@@ -256,6 +263,7 @@ impl SchemaExtractor {
             JOIN pg_class c ON c.oid = a.attrelid
             JOIN pg_namespace n ON n.oid = c.relnamespace
             JOIN pg_type t ON t.oid = a.atttypid
+            LEFT JOIN pg_type et ON et.oid = t.typelem AND t.typcategory = 'A'
             LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
               AND c.relkind IN ('r', 'p')
@@ -292,12 +300,17 @@ impl SchemaExtractor {
                 .get(&(pg_display_name(&schema_name, &table_name), column_name.clone()))
                 .cloned()
                 .unwrap_or_default();
+            let data_type: String = row.try_get("data_type")?;
+            let column_type: String = row.try_get("column_type")?;
+            let type_kind: String = row.try_get("type_kind").unwrap_or_default();
+            let elem_type_kind: String = row.try_get("elem_type_kind").unwrap_or_default();
             result.push(PgColumnRow {
                 table_name: pg_display_name(&schema_name, &table_name),
                 column: ColumnInfo {
                     column_name,
-                    data_type: row.try_get("data_type")?,
-                    column_type: row.try_get("column_type")?,
+                    type_warning: pg_column_type_warning(&data_type, &type_kind, &elem_type_kind),
+                    data_type,
+                    column_type,
                     is_nullable: row.try_get("is_nullable")?,
                     column_comment: row.try_get("column_comment").unwrap_or_default(),
                     column_key: key,
@@ -368,13 +381,57 @@ pub fn pg_display_name(schema: &str, table: &str) -> String {
     }
 }
 
+/// 判断 PostgreSQL 列是否已有字段级映射；没有时返回给界面展示的提示。
+///
+/// 判定依据：
+/// - `typtype` 为 e(enum)/r(range)/m(multirange)/d(domain) 时按文本可直接还原；
+/// - 数组（`typcategory = 'A'`）看元素类型是否属于上述类别；
+/// - 其余基础类型看是否有 sqlx 解码器或可文本化。
+fn pg_column_type_warning(
+    data_type: &str,
+    type_kind: &str,
+    elem_type_kind: &str,
+) -> Option<String> {
+    let base = data_type.strip_prefix('_').unwrap_or(data_type);
+    let readable = matches!(type_kind, "e" | "r" | "m" | "d")
+        || matches!(elem_type_kind, "e" | "r" | "m" | "d")
+        || crate::sql_util::pg_type_has_field_mapping(base)
+        || crate::sql_util::pg_text_type_supported(base);
+    if readable {
+        None
+    } else {
+        Some(format!(
+            "未映射类型 {data_type}：值以结构化标记返回，不视为 NULL"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::pg_display_name;
+    use super::{pg_column_type_warning, pg_display_name};
 
     #[test]
     fn pg_display_name_keeps_non_public_schema_qualified() {
         assert_eq!(pg_display_name("public", "users"), "users");
         assert_eq!(pg_display_name("app", "orders"), "app.orders");
+    }
+
+    #[test]
+    fn pg_column_type_warning_marks_only_unmapped_types() {
+        // 枚举/range/domain 按文本可读，不应提示
+        assert!(pg_column_type_warning("mood", "e", "").is_none());
+        assert!(pg_column_type_warning("int4range", "r", "").is_none());
+        assert!(pg_column_type_warning("mood", "d", "").is_none());
+        // 枚举数组：typname 为 _mood，元素类型为 enum
+        assert!(pg_column_type_warning("_mood", "b", "e").is_none());
+        // 基础类型有字段级映射
+        assert!(pg_column_type_warning("int4", "b", "").is_none());
+        assert!(pg_column_type_warning("jsonb", "b", "").is_none());
+        // 文本化类型
+        assert!(pg_column_type_warning("inet", "b", "").is_none());
+        // 自定义复合类型给出提示
+        assert!(pg_column_type_warning("mycomp", "c", "").is_some());
+        // 完全未知的基础类型也要提示
+        assert!(pg_column_type_warning("geometry", "b", "").is_some());
     }
 }

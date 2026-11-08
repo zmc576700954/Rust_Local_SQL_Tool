@@ -244,12 +244,229 @@ pub fn mysql_text(row: &sqlx::mysql::MySqlRow, name: &str) -> Option<String> {
     None
 }
 
+/// 「类型未映射」标记的键名。
+///
+/// 真 NULL 用 JSON `null` 表示；某个非空值无法被字段级映射时，返回
+/// `{ "$unmapped_type": <PG 类型名>, "$value": <原始文本或 null>, "$encoding": "text"|"binary" }`，
+/// 让前端能把「数据是空」和「能力没覆盖」区分开。
+pub const UNMAPPED_TYPE_KEY: &str = "$unmapped_type";
+pub const UNMAPPED_VALUE_KEY: &str = "$value";
+pub const UNMAPPED_ENCODING_KEY: &str = "$encoding";
+
+/// 这些 PostgreSQL 基础类型有专门的解码/映射（sqlx Decode 或本模块的文本化处理）。
+pub fn pg_type_has_field_mapping(type_name: &str) -> bool {
+    let type_name = type_name.to_ascii_lowercase();
+    matches!(
+        type_name.as_str(),
+        "bool"
+            | "int2"
+            | "int4"
+            | "int8"
+            | "float4"
+            | "float8"
+            | "numeric"
+            | "text"
+            | "varchar"
+            | "bpchar"
+            | "char"
+            | "name"
+            | "citext"
+            | "json"
+            | "jsonb"
+            | "uuid"
+            | "timestamptz"
+            | "timestamp"
+            | "date"
+            | "time"
+            | "timetz"
+            | "bytea"
+    )
+}
+
+/// 这些 PostgreSQL 类型没有对应的 Rust 解码器，但服务端文本表示本身就是
+/// 稳定、可读的，直接按文本回读即可（枚举与 range 由 `PgTypeKind` 判定）。
+pub fn pg_text_type_supported(type_name: &str) -> bool {
+    // 内置类型的 `PgTypeInfo::name()` 返回大写（INET/INTERVAL），自定义类型保持
+    // 定义时的大小写，所以这里统一转小写比较。
+    let type_name = type_name.to_ascii_lowercase();
+    matches!(
+        type_name.as_str(),
+        "inet"
+            | "cidr"
+            | "macaddr"
+            | "macaddr8"
+            | "interval"
+            | "money"
+            | "tsvector"
+            | "tsquery"
+            | "xml"
+            | "bit"
+            | "varbit"
+            | "bit varying"
+            | "point"
+            | "line"
+            | "lseg"
+            | "box"
+            | "path"
+            | "polygon"
+            | "circle"
+            | "oid"
+            | "regclass"
+            | "regtype"
+            | "pg_lsn"
+            | "txid_snapshot"
+    )
+}
+
+/// 自定义类型（OID >= 16384）的元信息，来自 `pg_type` 目录查询。
+///
+/// 简单查询协议下 sqlx 不会解析用户自定义类型的 OID，直接调用 `name()`
+/// 会触发 `unreachable!`。这里预先查好名称与类别，避免依赖内部解析状态。
+#[derive(Debug, Clone, Default)]
+pub struct PgTypeMeta {
+    /// `format_type(oid, NULL)` 的结果，如 `mood`、`mood[]`、`color_pair`
+    pub type_name: String,
+    /// pg_type.typtype：b 基础 / c 复合 / d 域 / e 枚举 / r range / m 多值 range
+    pub type_kind: String,
+    /// 数组元素类型的 typtype，非数组为空
+    pub elem_type_kind: String,
+}
+
+impl PgTypeMeta {
+    fn text_readable(&self) -> bool {
+        matches!(self.type_kind.as_str(), "e" | "r" | "m" | "d")
+            || matches!(self.elem_type_kind.as_str(), "e" | "r" | "m" | "d")
+    }
+}
+
+/// 该列的 `PgTypeInfo` 是否是 sqlx「未解析」的类型声明。
+///
+/// 简单查询协议（`raw_sql`）不会去 catalog 解析非内置 OID，`PgTypeInfo` 停在
+/// `DeclareWithOid`：此时 `name()` 恒为 `"?"`，而 `kind()` 会直接 `unreachable!`，
+/// 所有基于数组/类别的解码兼容性检查（`array_compatible` → `kind()`）都会 panic。
+/// 这类列必须跳过逐类型 try_get，直接走目录兜底。
+pub fn pg_type_is_unresolved(type_info: &sqlx::postgres::PgTypeInfo) -> bool {
+    use sqlx::TypeInfo;
+    type_info.oid().is_none() || type_info.name() == "?"
+}
+
+/// 该 PostgreSQL 类型是否"按文本即可读回"（枚举、range、domain 以及上面列出的文本类型）。
+///
+/// 数组按元素类型递归判断：枚举数组/range 数组的文本表示（`{a,b}`）同样可读。
+fn pg_type_is_text_readable(type_info: &sqlx::postgres::PgTypeInfo) -> bool {
+    use sqlx::postgres::PgTypeKind;
+    use sqlx::TypeInfo;
+    match type_info.kind() {
+        PgTypeKind::Enum(_) | PgTypeKind::Range(_) | PgTypeKind::Domain(_) => true,
+        PgTypeKind::Array(element) => pg_type_is_text_readable(element),
+        _ => pg_text_type_supported(type_info.name()),
+    }
+}
+
+/// 所有字段级解码都失败后的兜底：
+/// - 真 NULL 仍返回 `Value::Null`；
+/// - 可文本化的类型（枚举/range/inet/interval 等）返回原始文本；
+/// - 其余类型返回结构化「类型未映射」标记，绝不静默变成空值。
+fn pg_cell_fallback(
+    row: &sqlx::postgres::PgRow,
+    idx: usize,
+    catalog: &std::collections::HashMap<u32, PgTypeMeta>,
+) -> Value {
+    use sqlx::{Row, TypeInfo, ValueRef};
+
+    let raw = match row.try_get_raw(idx) {
+        Ok(raw) => raw,
+        // 列序号越界等异常：此时无法判断是否为 NULL，按未映射标记返回。
+        Err(_) => return pg_unmapped_value("<unknown>", None, "unknown"),
+    };
+    if raw.is_null() {
+        return Value::Null;
+    }
+
+    // 简单查询协议下结果固定是文本格式；若走了二进制（例如带参数的查询），
+    // 未映射类型没有解码器，二进制字节无法安全转文本，只能标注编码方式。
+    let (text, encoding) = match raw.format() {
+        sqlx::postgres::PgValueFormat::Text => {
+            (raw.as_str().ok().map(|s| s.to_string()), "text")
+        }
+        sqlx::postgres::PgValueFormat::Binary => (None, "binary"),
+    };
+
+    let type_info = raw.type_info().into_owned();
+    let oid = type_info.oid().map(|o| o.0).unwrap_or(0);
+
+    // 已解析的内置类型：name()/kind() 可安全调用，直接按类型判断。
+    if !pg_type_is_unresolved(&type_info) {
+        let type_name = type_info.name().to_string();
+        if pg_type_is_text_readable(&type_info) {
+            if let Some(text) = text {
+                return Value::String(text);
+            }
+        }
+        return pg_unmapped_value(&type_name, text.as_deref(), encoding);
+    }
+
+    // 未解析的类型：优先用目录查询结果判断，缺失时退化为 OID 标记。
+    match catalog.get(&oid) {
+        Some(meta) if meta.text_readable() => match text {
+            Some(text) => Value::String(text),
+            None => pg_unmapped_value(&meta.type_name, None, encoding),
+        },
+        // 扩展类型（如 citext）在目录里是基础类型，但文本表示可直接回读。
+        Some(meta)
+            if pg_text_type_supported(&meta.type_name)
+                || pg_type_has_field_mapping(&meta.type_name) =>
+        {
+            match text {
+                Some(text) => Value::String(text),
+                None => pg_unmapped_value(&meta.type_name, None, encoding),
+            }
+        }
+        Some(meta) => pg_unmapped_value(&meta.type_name, text.as_deref(), encoding),
+        None => pg_unmapped_value(&format!("oid:{}", oid), text.as_deref(), encoding),
+    }
+}
+
+fn pg_unmapped_value(type_name: &str, text: Option<&str>, encoding: &str) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        UNMAPPED_TYPE_KEY.to_string(),
+        Value::String(type_name.to_string()),
+    );
+    map.insert(
+        UNMAPPED_VALUE_KEY.to_string(),
+        text.map(|t| Value::String(t.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        UNMAPPED_ENCODING_KEY.to_string(),
+        Value::String(encoding.to_string()),
+    );
+    Value::Object(map)
+}
+
 /// 从 PgRow 的指定列提取为 serde_json::Value
 ///
 /// PostgreSQL 的类型体系比 MySQL 宽：这里按 sqlx 的解码能力显式覆盖
 /// 布尔、各宽度整数、浮点、时间/日期、JSON/JSONB、数组与文本。
 pub fn pg_cell_to_value(row: &sqlx::postgres::PgRow, idx: usize) -> Value {
-    use sqlx::Row;
+    pg_cell_to_value_with_catalog(row, idx, &std::collections::HashMap::new())
+}
+
+/// 带自定义类型目录的版本：枚举/复合类型等用户定义类型需要目录来判断类别与展示名。
+pub fn pg_cell_to_value_with_catalog(
+    row: &sqlx::postgres::PgRow,
+    idx: usize,
+    catalog: &std::collections::HashMap<u32, PgTypeMeta>,
+) -> Value {
+    use sqlx::{Row, ValueRef};
+    // 未解析的自定义类型必须先绕过下面的逐类型 try_get：数组兼容性检查会调用
+    // `PgTypeInfo::kind()`，对 `DeclareWithOid` 是 `unreachable!` panic。
+    if let Ok(raw) = row.try_get_raw(idx) {
+        if pg_type_is_unresolved(&raw.type_info()) {
+            return pg_cell_fallback(row, idx, catalog);
+        }
+    }
     if let Ok(v) = row.try_get::<Option<bool>, _>(idx) {
         return serde_json::json!(v);
     }
@@ -332,12 +549,22 @@ pub fn pg_cell_to_value(row: &sqlx::postgres::PgRow, idx: usize) -> Value {
             return serde_json::json!(format!("\\x{}", hex));
         }
     }
-    Value::Null
+    pg_cell_fallback(row, idx, catalog)
 }
 
 /// 从 PgRow 提取单列为 Option<String>（逐类型 try-get）
 pub fn pg_cell_to_string(row: &sqlx::postgres::PgRow, ordinal: usize) -> Option<String> {
-    use sqlx::Row;
+    use sqlx::{Row, ValueRef};
+    // 未解析的自定义类型跳过逐类型 try_get，避免 `kind()` panic。
+    if let Ok(raw) = row.try_get_raw(ordinal) {
+        if pg_type_is_unresolved(&raw.type_info()) {
+            return match pg_cell_fallback(row, ordinal, &std::collections::HashMap::new()) {
+                Value::Null => None,
+                Value::String(text) => Some(text),
+                other => Some(other.to_string()),
+            };
+        }
+    }
     if let Ok(v) = row.try_get::<Option<String>, _>(ordinal) {
         return v;
     }
@@ -371,7 +598,11 @@ pub fn pg_cell_to_string(row: &sqlx::postgres::PgRow, ordinal: usize) -> Option<
             format!("\\x{}", hex)
         });
     }
-    None
+    match pg_cell_fallback(row, ordinal, &std::collections::HashMap::new()) {
+        Value::Null => None,
+        Value::String(text) => Some(text),
+        other => Some(other.to_string()),
+    }
 }
 
 /// 从 SqliteRow 提取整行为 serde_json::Value（逐类型 try-get）
@@ -689,6 +920,60 @@ pub fn mysql_to_pg_type(mysql_type: &str, column_type: &str, extra: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pg_text_readable_covers_enum_range_and_inet_family() {
+        // 枚举/range 由 PgTypeKind 判定，文本类型由白名单判定
+        for name in ["inet", "cidr", "interval", "money", "tsvector", "point"] {
+            assert!(pg_text_type_supported(name), "{name} 应按文本回读");
+        }
+        assert!(!pg_text_type_supported("mycomp"));
+        assert!(!pg_text_type_supported("mood"));
+    }
+
+    #[test]
+    fn pg_field_mapping_covers_core_scalar_types() {
+        for name in [
+            "bool", "int2", "int4", "int8", "float4", "float8", "numeric", "text", "varchar",
+            "json", "jsonb", "uuid", "timestamptz", "date", "time", "bytea",
+        ] {
+            assert!(pg_type_has_field_mapping(name), "{name} 应有字段级映射");
+        }
+        assert!(!pg_type_has_field_mapping("mycomp"));
+        assert!(!pg_type_has_field_mapping("_mood"));
+    }
+
+    #[test]
+    fn unmapped_marker_is_structured_and_not_null() {
+        let marker = pg_unmapped_value("mycomp", Some("(1,abc)"), "text");
+        let obj = marker.as_object().expect("未映射标记应为对象");
+        assert_eq!(obj.get(UNMAPPED_TYPE_KEY).and_then(|v| v.as_str()), Some("mycomp"));
+        assert_eq!(obj.get(UNMAPPED_VALUE_KEY).and_then(|v| v.as_str()), Some("(1,abc)"));
+        assert_eq!(obj.get(UNMAPPED_ENCODING_KEY).and_then(|v| v.as_str()), Some("text"));
+        assert!(!marker.is_null(), "未映射标记不能是 JSON null");
+    }
+
+    #[test]
+    fn unmapped_marker_keeps_binary_encoding_when_no_text() {
+        let marker = pg_unmapped_value("mycomp", None, "binary");
+        let obj = marker.as_object().expect("未映射标记应为对象");
+        assert_eq!(obj.get(UNMAPPED_ENCODING_KEY).and_then(|v| v.as_str()), Some("binary"));
+        assert!(obj.get(UNMAPPED_VALUE_KEY).map(|v| v.is_null()).unwrap_or(false));
+    }
+
+    #[test]
+    fn pg_type_is_unresolved_detects_declare_with_oid() {
+        use sqlx::postgres::types::Oid;
+        use sqlx::Type;
+        // 简单查询协议下的自定义类型：只带 OID，name() 为 "?"，kind() 会 panic
+        let custom = sqlx::postgres::PgTypeInfo::with_oid(Oid(16_524));
+        assert!(pg_type_is_unresolved(&custom));
+        // 内置类型已解析
+        let int4 = <i32 as Type<sqlx::Postgres>>::type_info();
+        assert!(!pg_type_is_unresolved(&int4));
+        let text = <String as Type<sqlx::Postgres>>::type_info();
+        assert!(!pg_type_is_unresolved(&text));
+    }
 
     #[test]
     fn validate_identifier_accepts_alphanumeric() {
