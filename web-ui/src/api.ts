@@ -7,26 +7,19 @@ import type { RowData, TableWithDetails, KnowledgeItem, ConfigData } from './typ
 export const HTTP_TIMEOUT_MS = 120000
 export const JOB_POLL_REQUEST_TIMEOUT_MS = 10000
 export const JOB_POLL_INTERVAL_MS = 1200
-const DESKTOP_HTTP_FALLBACK_PREFIX = 'DESKTOP_HTTP_FALLBACK:'
+const DESKTOP_BACKEND_COMMAND = 'desktop_backend_base_url'
+const WEB_BACKEND_BASE_URL = '/backend'
+const DESKTOP_BACKEND_UNAVAILABLE_PREFIX = '本地后端服务不可用'
 
 type TauriInvoke = <T = unknown>(command: string, args?: Record<string, unknown>) => Promise<T>
 
-let tauriInvokePromise: Promise<TauriInvoke | null> | null = null
+let backendBaseUrlPromise: Promise<string> | null = null
+let resolvedBackendBaseUrl: string | null = null
 
-function isDesktopRuntime(): boolean {
+export function isDesktopRuntime(): boolean {
   if (typeof window === 'undefined') return false
   const w = window as Window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }
   return Boolean(w.__TAURI__ || w.__TAURI_INTERNALS__)
-}
-
-async function getTauriInvoke(): Promise<TauriInvoke | null> {
-  if (!isDesktopRuntime()) return null
-  if (!tauriInvokePromise) {
-    tauriInvokePromise = import('@tauri-apps/api/core')
-      .then((mod) => mod.invoke as TauriInvoke)
-      .catch(() => null)
-  }
-  return tauriInvokePromise
 }
 
 function normalizeDesktopError(error: unknown): Error {
@@ -41,43 +34,42 @@ function normalizeDesktopError(error: unknown): Error {
   }
 }
 
-function shouldFallbackToHttp(error: unknown): boolean {
-  const errorObj = error as { message?: unknown }
-  const message =
-    typeof error === 'string'
-      ? error
-      : typeof errorObj?.message === 'string'
-        ? errorObj.message
-        : ''
-  return message.startsWith(DESKTOP_HTTP_FALLBACK_PREFIX)
-}
-
-function stripLeadingSqlComments(sql: string): string {
-  let cleanSql = sql.trim()
-  while (cleanSql) {
-    if (cleanSql.startsWith('--')) {
-      const idx = cleanSql.indexOf('\n')
-      cleanSql = idx >= 0 ? cleanSql.slice(idx + 1).trim() : ''
-      continue
-    }
-    if (cleanSql.startsWith('/*')) {
-      const idx = cleanSql.indexOf('*/')
-      cleanSql = idx >= 0 ? cleanSql.slice(idx + 2).trim() : ''
-      continue
-    }
-    break
+/**
+ * Desktop: ask the Tauri shell for the sidecar's base URL. The shell resolves
+ * this only after the local web-server announced readiness, so every request
+ * waits until the backend is actually up. Web: keep the same-origin prefix.
+ */
+async function resolveBackendBaseUrl(): Promise<string> {
+  if (!isDesktopRuntime()) {
+    resolvedBackendBaseUrl = WEB_BACKEND_BASE_URL
+    return WEB_BACKEND_BASE_URL
   }
-  return cleanSql
+  if (!backendBaseUrlPromise) {
+    backendBaseUrlPromise = import('@tauri-apps/api/core')
+      .then((mod) => mod.invoke as TauriInvoke)
+      .then((invoke) => invoke<string>(DESKTOP_BACKEND_COMMAND))
+      .then((baseUrl) => {
+        resolvedBackendBaseUrl = baseUrl
+        return baseUrl
+      })
+      .catch((error) => {
+        throw new Error(
+          `${DESKTOP_BACKEND_UNAVAILABLE_PREFIX}：${normalizeDesktopError(error).message}`
+        )
+      })
+  }
+  return backendBaseUrlPromise
 }
 
-function isDesktopReadQuery(sql: string): boolean {
-  const upperSql = stripLeadingSqlComments(sql).toUpperCase()
-  return (
-    upperSql.startsWith('SELECT') ||
-    upperSql.startsWith('SHOW') ||
-    upperSql.startsWith('DESCRIBE') ||
-    upperSql.startsWith('EXPLAIN')
-  )
+/** Absolute backend base URL once resolved; `/backend` (same-origin) otherwise. */
+export function getBackendBaseUrl(): string {
+  return resolvedBackendBaseUrl || WEB_BACKEND_BASE_URL
+}
+
+/** Builds an absolute URL for endpoints used outside axios (downloads, fetch). */
+export function backendUrl(path: string): string {
+  const normalized = path.startsWith('/') ? path : `/${path}`
+  return `${getBackendBaseUrl()}${normalized}`
 }
 
 async function runExecuteRequest(
@@ -90,35 +82,11 @@ async function runExecuteRequest(
   transaction_id?: string
 ) {
   const payload = { sql, force, db_id, chunk_offset, chunk_size, cancel_token, transaction_id }
-  const httpRequest = () => client.post('/execute', payload).then(res => res.data)
-  if (transaction_id) {
-    return invokeDesktopOrHttp('workbench_run', { request: payload }, httpRequest)
-  }
-  if (!isDesktopReadQuery(sql)) {
-    return httpRequest()
-  }
-  return invokeDesktopOrHttp('workbench_run', { request: payload }, httpRequest)
-}
-
-async function invokeDesktopOrHttp<T>(
-  command: string,
-  args: Record<string, unknown>,
-  httpFallback: () => Promise<T>
-): Promise<T> {
-  const invoke = await getTauriInvoke()
-  if (!invoke) return httpFallback()
-  try {
-    return await invoke<T>(command, args)
-  } catch (error) {
-    if (shouldFallbackToHttp(error)) {
-      return httpFallback()
-    }
-    throw normalizeDesktopError(error)
-  }
+  const res = await client.post('/execute', payload)
+  return res.data
 }
 
 const client = axios.create({
-  baseURL: '/backend',
   timeout: HTTP_TIMEOUT_MS,
 })
 
@@ -134,7 +102,8 @@ type AiQueryPayload = {
   chat_history?: ChatMessage[]
 }
 
-client.interceptors.request.use((config) => {
+client.interceptors.request.use(async (config) => {
+  config.baseURL = await resolveBackendBaseUrl()
   const locale = getLocale()
   config.headers = config.headers || {}
   ;(config.headers as Record<string, string>)['Accept-Language'] = locale
@@ -152,8 +121,12 @@ client.interceptors.response.use(
     const status = error?.response?.status as number | undefined;
     const data = error?.response?.data as { code?: string; message?: string; details?: string } | undefined;
     const isCanceled = data?.code === 'ERR_CANCELED';
+    const backendUnavailable = error instanceof Error
+      && error.message.startsWith(DESKTOP_BACKEND_UNAVAILABLE_PREFIX);
 
-    if (data) {
+    if (backendUnavailable) {
+      message = error.message;
+    } else if (data) {
       const { code, message: serverMessage, details } = data;
       if (code) {
         const fallback = tr('发生未知错误', 'Unknown error')
@@ -316,10 +289,7 @@ export const api = {
     sql?: string
     table_name?: string
     iterations?: number
-  }) => {
-    const httpRequest = () => client.post('/diagnostics/perf/probe', payload).then(res => res.data)
-    return invokeDesktopOrHttp('perf_probe', { request: payload }, httpRequest)
-  },
+  }) => client.post('/diagnostics/perf/probe', payload).then(res => res.data),
   listPerfSuites: (limit?: number) =>
     client.get('/diagnostics/perf/suites', { params: { limit } }).then(res => res.data),
   savePerfSuite: (suite: Record<string, unknown>) =>
@@ -345,7 +315,8 @@ export const api = {
     client.post('/chat', { query, chat_history: chatHistory, mode, current_sql: currentSql }).then(res => res.data),
   chatToSqlStream: async (query: string, chatHistory?: ChatMessage[], mode?: string, currentSql?: string, signal?: AbortSignal) => {
     const locale = getLocale()
-    const response = await fetch('/backend/chat/stream', {
+    const baseUrl = await resolveBackendBaseUrl()
+    const response = await fetch(`${baseUrl}/chat/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -365,35 +336,16 @@ export const api = {
     runExecuteRequest(sql, force, db_id, undefined, undefined, cancel_token, transaction_id),
   executeSqlChunk: (sql: string, chunk_offset: number, chunk_size: number, db_id?: string, transaction_id?: string) =>
     runExecuteRequest(sql, true, db_id, chunk_offset, chunk_size, undefined, transaction_id),
-  executeTransactionAction: async (
+  executeTransactionAction: (
     action: 'begin' | 'commit' | 'rollback',
     transaction_id: string,
     db_id?: string
-  ) => {
-    const payload = { action, transaction_id, db_id }
-    const httpRequest = () => client.post('/execute/transaction', payload).then(res => res.data)
-    return invokeDesktopOrHttp('workbench_transaction', { request: payload }, httpRequest)
-  },
-  cancelExecution: async (cancel_token: string, db_id?: string) => {
-    const payload = { cancel_token, db_id }
-    const httpRequest = () =>
-      client.post('/execute/cancel', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data)
-    const invoke = await getTauriInvoke()
-    if (!invoke) {
-      return httpRequest()
-    }
-    try {
-      const result = await invoke<{ canceled?: boolean }>('workbench_cancel', { request: payload })
-      if (result?.canceled) {
-        return result
-      }
-    } catch (error) {
-      if (!shouldFallbackToHttp(error)) {
-        throw normalizeDesktopError(error)
-      }
-    }
-    return httpRequest()
-  },
+  ) =>
+    client.post('/execute/transaction', { action, transaction_id, db_id }).then(res => res.data),
+  cancelExecution: (cancel_token: string, db_id?: string) =>
+    client
+      .post('/execute/cancel', { cancel_token, db_id }, { headers: { 'x-silent-error': '1' } })
+      .then(res => res.data),
   parseNavicat: (xmlContent: string) => client.post('/navicat/parse', { xml_content: xmlContent }).then(res => res.data),
   // Rules
   getRules: () => client.get('/rules').then(res => res.data),
@@ -405,24 +357,10 @@ export const api = {
   snapshotPolicy: () => client.post('/policy/snapshot').then(res => res.data),
   rollbackPolicy: (name: string) => client.post('/policy/rollback', { name }).then(res => res.data),
   // Tables
-  getTableData: (tableName: string, page: number, pageSize: number, filters?: string, orders?: string, db_id?: string) => {
-    const httpRequest = () =>
-      client.get(`/table/data`, { params: { table_name: tableName, page, page_size: pageSize, filters, orders, db_id } }).then(res => res.data)
-    return invokeDesktopOrHttp(
-      'table_page',
-      { request: { table_name: tableName, page, page_size: pageSize, filters, orders, db_id } },
-      httpRequest
-    )
-  },
-  getTableSchema: (tableName: string, db_id?: string) => {
-    const httpRequest = () =>
-      client.get(`/table/schema`, { params: { table_name: tableName, db_id } }).then(res => res.data)
-    return invokeDesktopOrHttp(
-      'table_schema',
-      { request: { table_name: tableName, db_id } },
-      httpRequest
-    )
-  },
+  getTableData: (tableName: string, page: number, pageSize: number, filters?: string, orders?: string, db_id?: string) =>
+    client.get(`/table/data`, { params: { table_name: tableName, page, page_size: pageSize, filters, orders, db_id } }).then(res => res.data),
+  getTableSchema: (tableName: string, db_id?: string) =>
+    client.get(`/table/schema`, { params: { table_name: tableName, db_id } }).then(res => res.data),
   previewDdl: (oldTable: TableWithDetails | null, newTable: TableWithDetails | null) =>
     client.post('/table/ddl/preview', { old_table: oldTable, new_table: newTable }).then(res => res.data),
   executeDdl: (sql: string, db_id?: string) => 

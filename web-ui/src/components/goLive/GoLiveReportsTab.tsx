@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { api } from '../../api'
+import { api, backendUrl } from '../../api'
 import { useToast } from '../Toast'
 import { parseError } from '../../utils'
 import { tr } from '../../i18n'
@@ -24,7 +24,7 @@ function statusClass(status: StepStatus): string {
 function downloadGoLiveReport(jobId: string) {
   const id = String(jobId || '').trim()
   if (!id) return
-  const url = `/backend/tools/jobs/${encodeURIComponent(id)}/artifacts/data`
+  const url = backendUrl(`/tools/jobs/${encodeURIComponent(id)}/artifacts/data`)
   const link = document.createElement('a')
   link.href = url
   document.body.appendChild(link)

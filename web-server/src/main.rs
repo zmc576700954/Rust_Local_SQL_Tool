@@ -1049,6 +1049,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "http://127.0.0.1:5173",
         "http://127.0.0.1:3000",
         "tauri://localhost",
+        "http://tauri.localhost",
         "https://tauri.localhost",
     ]
     .iter()
@@ -1122,8 +1123,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    tracing::info!("Server listening on http://{}", bind_addr);
-    axum::serve(listener, app).await?;
+    let actual_addr = listener.local_addr()?;
+    tracing::info!("Server listening on http://{}", actual_addr);
+
+    // Desktop sidecar mode: announce the resolved address so the Tauri shell can
+    // wait for readiness instead of guessing/polling a fixed port. Using port 0
+    // above lets the OS pick a free port, avoiding collisions between instances.
+    if std::env::var("SIDECAR_READY_STDOUT").is_ok() {
+        println!("SIDECAR_READY http://{}", actual_addr);
+    }
+
+    // Desktop sidecar mode: the Tauri shell owns our stdin. If the shell exits
+    // (including crash / force quit) the pipe closes and we see EOF, which lets
+    // the sidecar shut down and release DB connections instead of lingering.
+    if std::env::var("EXIT_ON_STDIN_EOF").is_ok() {
+        use tokio::io::AsyncReadExt;
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let mut stdin = tokio::io::stdin();
+            let mut buf = [0u8; 64];
+            loop {
+                match stdin.read(&mut buf).await {
+                    Ok(0) | Err(_) => {
+                        tracing::info!("stdin closed, shutting down sidecar");
+                        let _ = shutdown_tx.send(());
+                        break;
+                    }
+                    Ok(_) => {}
+                }
+            }
+        });
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await?;
+    } else {
+        axum::serve(listener, app).await?;
+    }
 
     Ok(())
 }

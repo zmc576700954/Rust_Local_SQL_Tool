@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Play } from 'lucide-react';
 import { ModalShell } from './ui';
-import { api, JOB_POLL_INTERVAL_MS } from '../api';
+import { api, backendUrl, JOB_POLL_INTERVAL_MS } from '../api';
 import { useToast } from './Toast';
 import { MockDataConfig } from './MockDataConfig';
 import { ImportWizard } from './ImportWizard';
@@ -145,7 +145,7 @@ export function WizardModal({ isOpen, onClose, title, type, payload }: WizardMod
 
   const downloadExportArtifact = (artifact: 'data' | 'manifest') => {
     if (!exportJobId) return;
-    const url = `/backend/tools/jobs/${encodeURIComponent(exportJobId)}/artifacts/${artifact}`;
+    const url = backendUrl(`/tools/jobs/${encodeURIComponent(exportJobId)}/artifacts/${artifact}`);
     const link = document.createElement('a');
     link.href = url;
     document.body.appendChild(link);

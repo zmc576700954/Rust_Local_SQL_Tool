@@ -26,4 +26,6 @@ log = { workspace = true }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql", "chrono"] }
 tauri = { workspace = true }
 tauri-plugin-log = { workspace = true }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
 tokio = { workspace = true }

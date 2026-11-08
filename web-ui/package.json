@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "sidecar:build": "node scripts/build-sidecar.mjs",
+    "sidecar:build:release": "node scripts/build-sidecar.mjs --release",
+    "build:desktop": "npm run sidecar:build:release && npm run build",
     "lint": "eslint .",
     "test": "vitest run",
     "preview": "vite preview",
@@ -31,6 +34,7 @@
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@tauri-apps/cli": "^2.12.4",
     "@vitejs/plugin-react": "^6.0.1",
     "autoprefixer": "^10.5.0",
     "eslint": "^9.39.4",

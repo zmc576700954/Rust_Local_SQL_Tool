@@ -1,1654 +1,445 @@
-use core_lib::{
-    config::{AppConfig, DbConnection, DbType},
-    db::DbClient,
-    perf_report::{summarize_perf_samples, PerfBudget, PerfProbeSummary, PerfSample},
-    schema::{SchemaExtractor, SchemaResponse, TableWithDetails},
-    service::sort_expr::sanitize_sort_expression,
-    sql_history::{SqlHistory, SqlHistoryStore},
-    timeout_policy::TimeoutPolicy,
-};
-use serde::{Deserialize, Serialize};
-use sqlx::{mysql::MySqlRow, Column, Row, TypeInfo};
 use std::{
-    collections::HashMap,
+    fs::OpenOptions,
+    io::{BufRead, BufReader, Read, Write},
+    path::PathBuf,
+    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
+    thread,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, RwLock};
+use tauri::{AppHandle, Manager, RunEvent, State, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 
-const DB_CLIENT_CACHE_TTL: Duration = Duration::from_secs(600);
-const DESKTOP_HTTP_FALLBACK_PREFIX: &str = "DESKTOP_HTTP_FALLBACK:";
-const PERF_PROBE_MAX_ITERATIONS: u32 = 30;
-const QUERY_PREVIEW_CHUNK_SIZE: u32 = 200;
-const QUERY_PREVIEW_ROW_CAP: u32 = 1000;
+const SIDECAR_BIN_NAME: &str = "web-server";
+const SIDECAR_READY_PREFIX: &str = "SIDECAR_READY ";
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+const LOG_TAIL_LINES: usize = 40;
 
-#[derive(Debug, Clone)]
-struct CachedDbClient {
-    client: DbClient,
-    url: String,
-    expires_at: Instant,
+#[derive(Clone)]
+enum BackendStatus {
+    Starting,
+    /// Base URL of the local backend, e.g. `http://127.0.0.1:12345/backend`.
+    Ready(String),
+    Failed(String),
 }
 
-struct DesktopState {
-    db_client_cache: Arc<RwLock<HashMap<String, CachedDbClient>>>,
-    active_queries: Arc<RwLock<HashMap<String, ActiveQueryHandle>>>,
-    transaction_sessions: Arc<RwLock<HashMap<String, SharedTransactionSession>>>,
+struct BackendInner {
+    status: Mutex<BackendStatus>,
+    child: Mutex<Option<Child>>,
+    log_path: PathBuf,
+    log_file: Mutex<Option<std::fs::File>>,
+    log_tail: Mutex<Vec<String>>,
+    shutting_down: AtomicBool,
+    failure_shown: AtomicBool,
 }
 
-impl Default for DesktopState {
-    fn default() -> Self {
+#[derive(Clone)]
+struct BackendRuntime {
+    inner: Arc<BackendInner>,
+}
+
+impl BackendRuntime {
+    fn new(log_path: PathBuf) -> Self {
         Self {
-            db_client_cache: Arc::new(RwLock::new(HashMap::new())),
-            active_queries: Arc::new(RwLock::new(HashMap::new())),
-            transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-}
-
-struct ResolvedConnection {
-    cache_key: String,
-    url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkbenchRunRequest {
-    sql: String,
-    force: Option<bool>,
-    db_id: Option<String>,
-    chunk_offset: Option<u32>,
-    chunk_size: Option<u32>,
-    cancel_token: Option<String>,
-    transaction_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct WorkbenchRunResponse {
-    columns: Vec<String>,
-    rows: Vec<serde_json::Value>,
-    row_count: usize,
-    affected_rows: u64,
-    execution_time_ms: u64,
-    has_more: bool,
-    next_offset: Option<u32>,
-    chunk_offset: u32,
-    chunk_size: Option<u32>,
-    preview_cap: Option<u32>,
-    truncated: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkbenchCancelRequest {
-    cancel_token: String,
-    db_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct WorkbenchCancelResponse {
-    canceled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkbenchTransactionRequest {
-    action: String,
-    transaction_id: String,
-    db_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct WorkbenchTransactionResponse {
-    action: String,
-    transaction_id: String,
-    state: String,
-    execution_time_ms: u64,
-}
-
-#[derive(Clone)]
-struct ActiveQueryHandle {
-    db_client: DbClient,
-    connection_id: u64,
-    canceled: Arc<AtomicBool>,
-}
-
-struct ActiveQuerySession {
-    token: String,
-    connection_id: u64,
-    canceled: Arc<AtomicBool>,
-    owned_conn: Option<sqlx::pool::PoolConnection<sqlx::MySql>>,
-    transaction_session: Option<SharedTransactionSession>,
-}
-
-struct TransactionSession {
-    connection_id: u64,
-    db_id: Option<String>,
-    conn: sqlx::pool::PoolConnection<sqlx::MySql>,
-    last_accessed: Instant,
-}
-
-type SharedTransactionSession = Arc<Mutex<TransactionSession>>;
-
-#[derive(Clone, Copy)]
-enum MySqlJsonDecodeStrategy {
-    I64,
-    F64,
-    DateTime,
-    Date,
-    Time,
-    String,
-    Bytes,
-    Unknown,
-}
-
-#[derive(Clone)]
-struct MySqlRowJsonEncoder {
-    columns: Vec<(String, usize, MySqlJsonDecodeStrategy)>,
-}
-
-impl MySqlRowJsonEncoder {
-    fn from_row(row: &MySqlRow) -> Self {
-        let columns = row
-            .columns()
-            .iter()
-            .map(|col| {
-                (
-                    col.name().to_string(),
-                    col.ordinal(),
-                    mysql_json_decode_strategy(col.type_info().name()),
-                )
-            })
-            .collect();
-        Self { columns }
-    }
-
-    fn column_names(&self) -> Vec<String> {
-        self.columns.iter().map(|(name, _, _)| name.clone()).collect()
-    }
-}
-
-fn mysql_json_decode_strategy(type_name: &str) -> MySqlJsonDecodeStrategy {
-    match type_name.to_ascii_lowercase().as_str() {
-        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year" => {
-            MySqlJsonDecodeStrategy::I64
-        }
-        "float" | "double" | "decimal" | "numeric" | "real" => MySqlJsonDecodeStrategy::F64,
-        "datetime" | "timestamp" => MySqlJsonDecodeStrategy::DateTime,
-        "date" => MySqlJsonDecodeStrategy::Date,
-        "time" => MySqlJsonDecodeStrategy::Time,
-        "char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext" | "enum"
-        | "set" | "json" => MySqlJsonDecodeStrategy::String,
-        "binary" | "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob" | "bit" => {
-            MySqlJsonDecodeStrategy::Bytes
-        }
-        _ => MySqlJsonDecodeStrategy::Unknown,
-    }
-}
-
-fn fallback_mysql_json_value(row: &MySqlRow, ordinal: usize) -> serde_json::Value {
-    if let Ok(val) = row.try_get::<Option<i64>, _>(ordinal) {
-        serde_json::json!(val)
-    } else if let Ok(val) = row.try_get::<Option<f64>, _>(ordinal) {
-        serde_json::json!(val)
-    } else if let Ok(val) = row.try_get::<Option<bool>, _>(ordinal) {
-        serde_json::json!(val)
-    } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDateTime>, _>(ordinal) {
-        serde_json::json!(val.map(|dt| dt.to_string()))
-    } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDate>, _>(ordinal) {
-        serde_json::json!(val.map(|d| d.to_string()))
-    } else if let Ok(val) = row.try_get::<Option<chrono::NaiveTime>, _>(ordinal) {
-        serde_json::json!(val.map(|t| t.to_string()))
-    } else if let Ok(val) = row.try_get::<Option<String>, _>(ordinal) {
-        serde_json::json!(val)
-    } else if let Ok(val) = row.try_get::<Option<Vec<u8>>, _>(ordinal) {
-        serde_json::json!(val.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
-    } else {
-        serde_json::Value::Null
-    }
-}
-
-fn mysql_json_value_by_strategy(
-    row: &MySqlRow,
-    ordinal: usize,
-    strategy: MySqlJsonDecodeStrategy,
-) -> serde_json::Value {
-    let encoded = match strategy {
-        MySqlJsonDecodeStrategy::I64 => row
-            .try_get::<Option<i64>, _>(ordinal)
-            .ok()
-            .map(|val| serde_json::json!(val)),
-        MySqlJsonDecodeStrategy::F64 => row
-            .try_get::<Option<f64>, _>(ordinal)
-            .ok()
-            .map(|val| serde_json::json!(val)),
-        MySqlJsonDecodeStrategy::DateTime => row
-            .try_get::<Option<chrono::NaiveDateTime>, _>(ordinal)
-            .ok()
-            .map(|val| serde_json::json!(val.map(|dt| dt.to_string()))),
-        MySqlJsonDecodeStrategy::Date => row
-            .try_get::<Option<chrono::NaiveDate>, _>(ordinal)
-            .ok()
-            .map(|val| serde_json::json!(val.map(|d| d.to_string()))),
-        MySqlJsonDecodeStrategy::Time => row
-            .try_get::<Option<chrono::NaiveTime>, _>(ordinal)
-            .ok()
-            .map(|val| serde_json::json!(val.map(|t| t.to_string()))),
-        MySqlJsonDecodeStrategy::String => row
-            .try_get::<Option<String>, _>(ordinal)
-            .ok()
-            .map(|val| serde_json::json!(val)),
-        MySqlJsonDecodeStrategy::Bytes => row
-            .try_get::<Option<Vec<u8>>, _>(ordinal)
-            .ok()
-            .map(|val| serde_json::json!(val.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))),
-        MySqlJsonDecodeStrategy::Unknown => None,
-    };
-
-    encoded.unwrap_or_else(|| fallback_mysql_json_value(row, ordinal))
-}
-
-fn encode_mysql_row(row: &MySqlRow, encoder: &MySqlRowJsonEncoder) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for (col_name, ordinal, strategy) in &encoder.columns {
-        map.insert(
-            col_name.clone(),
-            mysql_json_value_by_strategy(row, *ordinal, *strategy),
-        );
-    }
-    serde_json::Value::Object(map)
-}
-
-#[derive(Debug, Deserialize)]
-struct TablePageRequest {
-    table_name: String,
-    page: Option<u32>,
-    page_size: Option<u32>,
-    filters: Option<String>,
-    orders: Option<String>,
-    db_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct TablePageResponse {
-    data: Vec<serde_json::Value>,
-    total: Option<i64>,
-    total_status: String,
-    has_more: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct TableSchemaRequest {
-    table_name: String,
-    db_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PerfProbeRequest {
-    operation: Option<String>,
-    db_id: Option<String>,
-    sql: Option<String>,
-    table_name: Option<String>,
-    iterations: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FilterCondition {
-    column: String,
-    operator: String,
-    value: String,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-enum OrderKind {
-    #[default]
-    Column,
-    Expression,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-enum OrderNulls {
-    #[default]
-    Default,
-    First,
-    Last,
-}
-
-#[derive(Debug, Deserialize)]
-struct OrderCondition {
-    #[serde(default)]
-    kind: OrderKind,
-    #[serde(default)]
-    column: Option<String>,
-    #[serde(default)]
-    expression: Option<String>,
-    desc: bool,
-    #[serde(default)]
-    nulls: OrderNulls,
-}
-
-fn fallback_required(reason: &str) -> String {
-    format!("{DESKTOP_HTTP_FALLBACK_PREFIX}{reason}")
-}
-
-fn quote_mysql_ident(raw: &str) -> Result<String, String> {
-    core_lib::sql::util::quote_ident_mysql_checked(raw)
-}
-
-fn strip_leading_sql_comments(sql: &str) -> String {
-    let mut clean_sql = sql.trim().to_string();
-    loop {
-        if clean_sql.starts_with("--") {
-            if let Some(idx) = clean_sql.find('\n') {
-                clean_sql = clean_sql[idx + 1..].trim().to_string();
-            } else {
-                return String::new();
-            }
-        } else if clean_sql.starts_with("/*") {
-            if let Some(idx) = clean_sql.find("*/") {
-                clean_sql = clean_sql[idx + 2..].trim().to_string();
-            } else {
-                return String::new();
-            }
-        } else {
-            return clean_sql;
-        }
-    }
-}
-
-fn is_desktop_direct_supported(conn: &DbConnection) -> bool {
-    let db_type = conn
-        .db_type
-        .clone()
-        .unwrap_or_else(|| DbType::from_url(&conn.url).unwrap_or(DbType::MySQL));
-    matches!(db_type, DbType::MySQL | DbType::MariaDB) && conn.ssh.is_none() && conn.ssl.is_none()
-}
-
-async fn resolve_connection(db_id: Option<&str>) -> Result<ResolvedConnection, String> {
-    let config = AppConfig::load()
-        .await
-        .map_err(|e| format!("Failed to load local config: {e}"))?
-        .normalize();
-
-    if let Some(id) = db_id.or(config.active_db_id.as_deref()) {
-        if let Some(conn) = config.db_connections.iter().find(|conn| conn.id == id) {
-            if !is_desktop_direct_supported(conn) {
-                return Err(fallback_required("unsupported_connection"));
-            }
-            return Ok(ResolvedConnection {
-                cache_key: id.to_string(),
-                url: conn.url.clone(),
-            });
-        }
-        if db_id.is_some() {
-            return Err("Database connection not found".to_string());
+            inner: Arc::new(BackendInner {
+                status: Mutex::new(BackendStatus::Starting),
+                child: Mutex::new(None),
+                log_path,
+                log_file: Mutex::new(None),
+                log_tail: Mutex::new(Vec::new()),
+                shutting_down: AtomicBool::new(false),
+                failure_shown: AtomicBool::new(false),
+            }),
         }
     }
 
-    let url = config
-        .get_active_db_url()
-        .ok_or_else(|| "Database not connected".to_string())?;
-
-    if !matches!(DbType::from_url(&url), Some(DbType::MySQL | DbType::MariaDB)) {
-        return Err(fallback_required("unsupported_connection"));
-    }
-
-    Ok(ResolvedConnection {
-        cache_key: config
-            .active_db_id
+    fn status(&self) -> BackendStatus {
+        self.inner
+            .status
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
             .clone()
-            .unwrap_or_else(|| "__active__".to_string()),
-        url,
-    })
-}
+    }
 
-async fn get_db_client(
-    state: &DesktopState,
-    db_id: Option<&str>,
-) -> Result<(DbClient, String), String> {
-    let resolved = resolve_connection(db_id).await?;
+    fn is_shutting_down(&self) -> bool {
+        self.inner.shutting_down.load(Ordering::SeqCst)
+    }
 
-    {
-        let cache = state.db_client_cache.read().await;
-        if let Some(cached) = cache.get(&resolved.cache_key) {
-            if cached.url == resolved.url && cached.expires_at > Instant::now() {
-                return Ok((cached.client.clone(), resolved.url));
-            }
+    fn mark_ready(&self, base_url: String) {
+        let mut status = self
+            .inner
+            .status
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if matches!(*status, BackendStatus::Starting) {
+            *status = BackendStatus::Ready(base_url);
         }
     }
 
-    let client = DbClient::new_default(&resolved.url)
-        .await
-        .map_err(|e| format!("Failed to connect database: {e}"))?;
-
-    let cached = CachedDbClient {
-        client: client.clone(),
-        url: resolved.url.clone(),
-        expires_at: Instant::now() + DB_CLIENT_CACHE_TTL,
-    };
-
-    let mut cache = state.db_client_cache.write().await;
-    cache.insert(resolved.cache_key, cached);
-
-    Ok((client, resolved.url))
-}
-
-fn normalize_perf_probe_sql(raw: Option<&str>) -> Result<String, String> {
-    let sql = raw.unwrap_or("SELECT 1 AS perf_probe").trim().to_string();
-    if sql.is_empty() {
-        return Err("Perf probe SQL cannot be empty".to_string());
-    }
-
-    let clean_sql = strip_leading_sql_comments(&sql);
-    let upper_sql = clean_sql.to_uppercase();
-    let is_read_only = upper_sql.starts_with("SELECT")
-        || upper_sql.starts_with("SHOW")
-        || upper_sql.starts_with("DESCRIBE")
-        || upper_sql.starts_with("EXPLAIN");
-    if !is_read_only {
-        return Err("Perf probe only supports read-only SQL".to_string());
-    }
-
-    Ok(sql.trim_end_matches(';').to_string())
-}
-
-fn build_perf_probe_explain_sql(raw: Option<&str>) -> Result<String, String> {
-    let sql = normalize_perf_probe_sql(raw)?;
-    let clean_sql = strip_leading_sql_comments(&sql);
-    if clean_sql.to_uppercase().starts_with("EXPLAIN") {
-        return Ok(sql);
-    }
-    Ok(format!("EXPLAIN {sql}"))
-}
-
-fn normalize_perf_probe_iterations(raw: Option<u32>) -> u32 {
-    raw.unwrap_or(5).clamp(1, PERF_PROBE_MAX_ITERATIONS)
-}
-
-fn normalize_perf_probe_table_name(raw: Option<&str>) -> Result<String, String> {
-    let table_name = raw.unwrap_or("").trim();
-    if table_name.is_empty() {
-        return Err("Perf probe table_name is required".to_string());
-    }
-    Ok(table_name.to_string())
-}
-
-async fn get_fresh_db_client(db_id: Option<&str>) -> Result<(DbClient, String), String> {
-    let resolved = resolve_connection(db_id).await?;
-    let client = DbClient::new_default(&resolved.url)
-        .await
-        .map_err(|e| format!("Failed to connect database: {e}"))?;
-    Ok((client, resolved.url))
-}
-
-fn default_perf_probe_budget(operation: &str) -> Option<PerfBudget> {
-    match operation {
-        "connect_warm" => Some(PerfBudget {
-            operation: operation.to_string(),
-            target_p50_ms: Some(50),
-            target_p95_ms: Some(120),
-            source: Some("phase1_desktop_warm_connect_target".to_string()),
-        }),
-        "query_select_small" => Some(PerfBudget {
-            operation: operation.to_string(),
-            target_p50_ms: Some(50),
-            target_p95_ms: Some(120),
-            source: Some("phase1_desktop_query_target".to_string()),
-        }),
-        "catalog_first_paint" => Some(PerfBudget {
-            operation: operation.to_string(),
-            target_p50_ms: Some(300),
-            target_p95_ms: Some(700),
-            source: Some("phase1_desktop_catalog_target".to_string()),
-        }),
-        "table_first_page" => Some(PerfBudget {
-            operation: operation.to_string(),
-            target_p50_ms: Some(80),
-            target_p95_ms: Some(150),
-            source: Some("phase1_desktop_table_first_page_target".to_string()),
-        }),
-        _ => None,
-    }
-}
-
-async fn run_connect_warm_probe(
-    state: &DesktopState,
-    db_id: Option<&str>,
-    iterations: u32,
-) -> Result<PerfProbeSummary, String> {
-    let (warm_client, _) = get_db_client(state, db_id).await?;
-    warm_client
-        .ping()
-        .await
-        .map_err(|e| format!("connect_warm warmup ping failed: {e}"))?;
-
-    let mut samples = Vec::with_capacity(iterations as usize);
-    for iteration in 0..iterations {
-        let started_at = Instant::now();
-        let (db_client, _) = get_db_client(state, db_id).await?;
-        db_client
-            .ping()
-            .await
-            .map_err(|e| format!("connect_warm ping failed: {e}"))?;
-        samples.push(PerfSample {
-            operation: "connect_warm".to_string(),
-            iteration: iteration + 1,
-            duration_ms: started_at.elapsed().as_millis(),
-            rows: None,
-        });
-    }
-
-    Ok(summarize_perf_samples(
-        "connect_warm",
-        samples,
-        default_perf_probe_budget("connect_warm"),
-    ))
-}
-
-async fn run_connect_cold_probe(
-    db_id: Option<&str>,
-    iterations: u32,
-) -> Result<PerfProbeSummary, String> {
-    let mut samples = Vec::with_capacity(iterations as usize);
-    for iteration in 0..iterations {
-        let started_at = Instant::now();
-        let (db_client, _) = get_fresh_db_client(db_id).await?;
-        db_client
-            .ping()
-            .await
-            .map_err(|e| format!("connect_cold ping failed: {e}"))?;
-        let duration_ms = started_at.elapsed().as_millis();
-        db_client.pool.close().await;
-        samples.push(PerfSample {
-            operation: "connect_cold".to_string(),
-            iteration: iteration + 1,
-            duration_ms,
-            rows: None,
-        });
-    }
-
-    Ok(summarize_perf_samples(
-        "connect_cold",
-        samples,
-        default_perf_probe_budget("connect_cold"),
-    ))
-}
-
-async fn run_query_select_small_probe(
-    state: &DesktopState,
-    db_id: Option<&str>,
-    sql: Option<&str>,
-    iterations: u32,
-) -> Result<PerfProbeSummary, String> {
-    let sql = normalize_perf_probe_sql(sql)?;
-    let (warm_client, _) = get_db_client(state, db_id).await?;
-    sqlx::query(&sql)
-        .fetch_all(warm_client.mysql_pool().map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| format!("query_select_small warmup failed: {e}"))?;
-
-    let mut samples = Vec::with_capacity(iterations as usize);
-    for iteration in 0..iterations {
-        let (db_client, _) = get_db_client(state, db_id).await?;
-        let started_at = Instant::now();
-        let rows = sqlx::query(&sql)
-            .fetch_all(db_client.mysql_pool().map_err(|e| e.to_string())?)
-            .await
-            .map_err(|e| format!("query_select_small failed: {e}"))?;
-        samples.push(PerfSample {
-            operation: "query_select_small".to_string(),
-            iteration: iteration + 1,
-            duration_ms: started_at.elapsed().as_millis(),
-            rows: Some(rows.len() as u64),
-        });
-    }
-
-    Ok(summarize_perf_samples(
-        "query_select_small",
-        samples,
-        default_perf_probe_budget("query_select_small"),
-    ))
-}
-
-async fn run_query_write_small_probe(
-    state: &DesktopState,
-    db_id: Option<&str>,
-    iterations: u32,
-) -> Result<PerfProbeSummary, String> {
-    let (db_client, _) = get_db_client(state, db_id).await?;
-    let mut conn = db_client.mysql_pool().map_err(|e| e.to_string())?.acquire().await.map_err(|e| e.to_string())?;
-    let temp_table = "__perf_probe_write_small";
-    let drop_sql = format!("DROP TEMPORARY TABLE IF EXISTS {temp_table}");
-    let create_sql = format!(
-        "CREATE TEMPORARY TABLE {temp_table} (id BIGINT PRIMARY KEY AUTO_INCREMENT, marker VARCHAR(64) NOT NULL)"
-    );
-    let insert_sql = format!("INSERT INTO {temp_table} (marker) VALUES (?)");
-
-    sqlx::query(&drop_sql)
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| format!("query_write_small temp table cleanup failed: {e}"))?;
-    sqlx::query(&create_sql)
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| format!("query_write_small temp table create failed: {e}"))?;
-    sqlx::query(&insert_sql)
-        .bind("warmup")
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| format!("query_write_small warmup failed: {e}"))?;
-
-    let mut samples = Vec::with_capacity(iterations as usize);
-    for iteration in 0..iterations {
-        let started_at = Instant::now();
-        let result = sqlx::query(&insert_sql)
-            .bind(format!("probe-{}", iteration + 1))
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| format!("query_write_small failed: {e}"))?;
-        samples.push(PerfSample {
-            operation: "query_write_small".to_string(),
-            iteration: iteration + 1,
-            duration_ms: started_at.elapsed().as_millis(),
-            rows: Some(result.rows_affected()),
-        });
-    }
-
-    let _ = sqlx::query(&drop_sql).execute(&mut *conn).await;
-
-    Ok(summarize_perf_samples(
-        "query_write_small",
-        samples,
-        default_perf_probe_budget("query_write_small"),
-    ))
-}
-
-async fn run_explain_plan_probe(
-    state: &DesktopState,
-    db_id: Option<&str>,
-    sql: Option<&str>,
-    iterations: u32,
-) -> Result<PerfProbeSummary, String> {
-    let explain_sql = build_perf_probe_explain_sql(sql)?;
-    let (warm_client, _) = get_db_client(state, db_id).await?;
-    sqlx::query(&explain_sql)
-        .fetch_all(warm_client.mysql_pool().map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| format!("explain_plan warmup failed: {e}"))?;
-
-    let mut samples = Vec::with_capacity(iterations as usize);
-    for iteration in 0..iterations {
-        let (db_client, _) = get_db_client(state, db_id).await?;
-        let started_at = Instant::now();
-        let rows = sqlx::query(&explain_sql)
-            .fetch_all(db_client.mysql_pool().map_err(|e| e.to_string())?)
-            .await
-            .map_err(|e| format!("explain_plan failed: {e}"))?;
-        samples.push(PerfSample {
-            operation: "explain_plan".to_string(),
-            iteration: iteration + 1,
-            duration_ms: started_at.elapsed().as_millis(),
-            rows: Some(rows.len() as u64),
-        });
-    }
-
-    Ok(summarize_perf_samples(
-        "explain_plan",
-        samples,
-        default_perf_probe_budget("explain_plan"),
-    ))
-}
-
-async fn fetch_schema_for_perf(
-    db_client: &DbClient,
-    db_name: &str,
-) -> Result<SchemaResponse, String> {
-    let tables = SchemaExtractor::get_tables(db_client, db_name)
-        .await
-        .map_err(|e| e.to_string())?;
-    let columns_map = SchemaExtractor::get_columns_map(db_client, db_name)
-        .await
-        .map_err(|e| e.to_string())?;
-    let indexes_map = SchemaExtractor::get_indexes_map(db_client, db_name)
-        .await
-        .map_err(|e| e.to_string())?;
-    let foreign_keys_map = SchemaExtractor::get_foreign_keys_map(db_client, db_name)
-        .await
-        .map_err(|e| e.to_string())?;
-    let views = SchemaExtractor::get_views(db_client, db_name)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let mut result_tables = Vec::with_capacity(tables.len());
-    for table in tables {
-        let table_name = table.table_name;
-        result_tables.push(TableWithDetails {
-            columns: columns_map.get(&table_name).cloned().unwrap_or_default(),
-            indexes: indexes_map.get(&table_name).cloned().unwrap_or_default(),
-            foreign_keys: foreign_keys_map
-                .get(&table_name)
-                .cloned()
-                .unwrap_or_default(),
-            table_name,
-        });
-    }
-
-    Ok(SchemaResponse {
-        db_name: db_name.to_string(),
-        tables: result_tables,
-        views,
-    })
-}
-
-async fn run_catalog_first_paint_probe(
-    state: &DesktopState,
-    db_id: Option<&str>,
-    iterations: u32,
-) -> Result<PerfProbeSummary, String> {
-    let mut samples = Vec::with_capacity(iterations as usize);
-    for iteration in 0..iterations {
-        let (db_client, url) = get_db_client(state, db_id).await?;
-        let db_name = DbClient::extract_db_name(&url)
-            .ok_or_else(|| "Unable to determine database name from connection URL".to_string())?;
-        let started_at = Instant::now();
-        let schema = fetch_schema_for_perf(&db_client, &db_name).await?;
-        samples.push(PerfSample {
-            operation: "catalog_first_paint".to_string(),
-            iteration: iteration + 1,
-            duration_ms: started_at.elapsed().as_millis(),
-            rows: Some((schema.tables.len() + schema.views.len()) as u64),
-        });
-    }
-
-    Ok(summarize_perf_samples(
-        "catalog_first_paint",
-        samples,
-        default_perf_probe_budget("catalog_first_paint"),
-    ))
-}
-
-async fn run_table_first_page_probe(
-    state: &DesktopState,
-    db_id: Option<&str>,
-    table_name: Option<&str>,
-    iterations: u32,
-) -> Result<PerfProbeSummary, String> {
-    let table_name = normalize_perf_probe_table_name(table_name)?;
-    let table_ident = quote_mysql_ident(&table_name)?;
-    let data_sql = format!("SELECT * FROM {table_ident} LIMIT 101 OFFSET 0");
-    let policy = TimeoutPolicy::default();
-    let mut samples = Vec::with_capacity(iterations as usize);
-
-    for iteration in 0..iterations {
-        let (db_client, url) = get_db_client(state, db_id).await?;
-        let db_name = DbClient::extract_db_name(&url)
-            .ok_or_else(|| "Unable to determine database name from connection URL".to_string())?;
-        let started_at = Instant::now();
-
-        let _table_schema = tokio::try_join!(
-            SchemaExtractor::get_columns(&db_client, &db_name, &table_name),
-            SchemaExtractor::get_indexes(&db_client, &db_name, &table_name),
-            SchemaExtractor::get_foreign_keys(&db_client, &db_name, &table_name),
-        )
-        .map_err(|e| e.to_string())?;
-
-        let result_rows = tokio::time::timeout(policy.db_query, sqlx::query(&data_sql).fetch_all(db_client.mysql_pool().map_err(|e| e.to_string())?))
-            .await
-            .map_err(|_| "Query timed out after 30 seconds. Please optimize SQL or add indexes.".to_string())?
-            .map_err(|e| e.to_string())?;
-
-        let mut row_encoder = None;
-        let data: Vec<serde_json::Value> = result_rows
-            .into_iter()
-            .take(100)
-            .map(|row| {
-                if row_encoder.is_none() {
-                    row_encoder = Some(MySqlRowJsonEncoder::from_row(&row));
-                }
-                encode_mysql_row(
-                    &row,
-                    row_encoder
-                        .as_ref()
-                        .expect("row encoder should be initialized"),
-                )
-            })
-            .collect();
-
-        samples.push(PerfSample {
-            operation: "table_first_page".to_string(),
-            iteration: iteration + 1,
-            duration_ms: started_at.elapsed().as_millis(),
-            rows: Some(data.len() as u64),
-        });
-    }
-
-    Ok(summarize_perf_samples(
-        "table_first_page",
-        samples,
-        default_perf_probe_budget("table_first_page"),
-    ))
-}
-
-async fn run_cancel_latency_probe(
-    state: &DesktopState,
-    db_id: Option<&str>,
-    iterations: u32,
-) -> Result<PerfProbeSummary, String> {
-    let mut samples = Vec::with_capacity(iterations as usize);
-
-    for iteration in 0..iterations {
-        let (db_client, _) = get_db_client(state, db_id).await?;
-        let mut conn = db_client.mysql_pool().map_err(|e| e.to_string())?.acquire().await.map_err(|e| e.to_string())?;
-        let connection_id = DbClient::connection_id_for_session(&mut conn)
-            .await
-            .map_err(|e| e.to_string())?;
-        let canceled = Arc::new(AtomicBool::new(false));
-        let cancel_token = format!(
-            "perf_probe_cancel_{}_{}",
-            iteration + 1,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0)
+    fn write_log(&self, stream: &str, line: &str) {
+        let entry = format!(
+            "{} [{stream}] {line}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
         );
-        register_active_query(
-            state,
-            cancel_token.clone(),
-            ActiveQueryHandle {
-                db_client: db_client.clone(),
-                connection_id,
-                canceled,
-            },
-        )
-        .await;
-
-        let query_task = tokio::spawn(async move {
-            sqlx::query("SELECT SLEEP(2) AS perf_probe_cancel")
-                .fetch_all(&mut *conn)
-                .await
-        });
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let started_at = Instant::now();
-        let canceled_ok = cancel_active_query(state, &cancel_token).await?;
-        let join_result = tokio::time::timeout(Duration::from_secs(5), query_task)
-            .await
-            .map_err(|_| "cancel_latency probe join timed out".to_string())?;
-        unregister_active_query(state, &cancel_token).await;
-        join_result
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
-
-        if !canceled_ok {
-            return Err("cancel_latency probe could not cancel active query".to_string());
+        if let Ok(mut guard) = self.inner.log_file.lock() {
+            if let Some(file) = guard.as_mut() {
+                let _ = writeln!(file, "{entry}");
+                let _ = file.flush();
+            }
         }
-
-        samples.push(PerfSample {
-            operation: "cancel_latency".to_string(),
-            iteration: iteration + 1,
-            duration_ms: started_at.elapsed().as_millis(),
-            rows: None,
-        });
-    }
-
-    Ok(summarize_perf_samples(
-        "cancel_latency",
-        samples,
-        default_perf_probe_budget("cancel_latency"),
-    ))
-}
-
-async fn register_active_query(state: &DesktopState, token: String, handle: ActiveQueryHandle) {
-    state.active_queries.write().await.insert(token, handle);
-}
-
-async fn unregister_active_query(state: &DesktopState, token: &str) {
-    state.active_queries.write().await.remove(token);
-}
-
-async fn cancel_active_query(state: &DesktopState, cancel_token: &str) -> Result<bool, String> {
-    let handle = state.active_queries.read().await.get(cancel_token).cloned();
-    let Some(handle) = handle else {
-        return Ok(false);
-    };
-
-    match handle.db_client.kill_query(handle.connection_id).await {
-        Ok(_) => {
-            handle.canceled.store(true, Ordering::SeqCst);
-            Ok(true)
-        }
-        Err(e) => {
-            let message = e.to_string().to_lowercase();
-            if message.contains("unknown thread id") {
-                Ok(false)
-            } else {
-                Err(e.to_string())
+        if let Ok(mut tail) = self.inner.log_tail.lock() {
+            tail.push(entry);
+            if tail.len() > LOG_TAIL_LINES {
+                tail.remove(0);
             }
         }
     }
-}
 
-async fn resolve_transaction_db_id(db_id: Option<&str>) -> Result<Option<String>, String> {
-    if let Some(value) = db_id.map(str::trim).filter(|value| !value.is_empty()) {
-        return Ok(Some(value.to_string()));
-    }
-    let config = AppConfig::load()
-        .await
-        .map_err(|e| format!("Failed to load local config: {e}"))?
-        .normalize();
-    Ok(config.active_db_id)
-}
-
-async fn get_or_open_transaction_session(
-    state: &DesktopState,
-    db_id: Option<&str>,
-    transaction_id: &str,
-    create_if_not_found: bool,
-) -> Result<SharedTransactionSession, String> {
-    if let Some(existing) = state
-        .transaction_sessions
-        .read()
-        .await
-        .get(transaction_id)
-        .cloned()
-    {
-        let expected_db_id = resolve_transaction_db_id(db_id).await?;
-        let mut session = existing.lock().await;
-        if session.db_id != expected_db_id {
-            return Err("Transaction session is bound to a different database connection".to_string());
+    fn try_wait_child(&self) -> Option<std::process::ExitStatus> {
+        let mut guard = self
+            .inner
+            .child
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        match guard.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(Some(status)) => Some(status),
+                _ => None,
+            },
+            None => None,
         }
-        session.last_accessed = Instant::now();
-        drop(session);
-        return Ok(existing);
     }
 
-    if !create_if_not_found {
-        return Err("transaction session not found".to_string());
+    fn fail(&self, app: &AppHandle, reason: impl Into<String>) {
+        if self.is_shutting_down() {
+            return;
+        }
+        let reason = reason.into();
+        {
+            let mut status = self
+                .inner
+                .status
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if matches!(*status, BackendStatus::Failed(_)) {
+                return;
+            }
+            *status = BackendStatus::Failed(reason.clone());
+        }
+
+        if self.inner.failure_shown.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let tail = self
+            .inner
+            .log_tail
+            .lock()
+            .map(|tail| tail.join("\n"))
+            .unwrap_or_default();
+        let message = format!(
+            "{reason}\n\n日志文件：{}\n\n最近日志：\n{}",
+            self.inner.log_path.display(),
+            if tail.is_empty() { "(无)" } else { &tail }
+        );
+        let _ = app
+            .dialog()
+            .message(message)
+            .title("本地后端服务不可用")
+            .blocking_show();
     }
-
-    let resolved_db_id = resolve_transaction_db_id(db_id).await?;
-    let (db_client, _) = get_db_client(state, db_id).await?;
-    let mut conn = db_client
-        .mysql_pool().map_err(|e| format!("Not MySQL: {e}"))?
-        .acquire()
-        .await
-        .map_err(|e| format!("Failed to acquire connection: {e}"))?;
-    let connection_id = DbClient::connection_id_for_session(&mut conn)
-        .await
-        .map_err(|e| format!("Failed to resolve connection id: {e}"))?;
-    sqlx::query("START TRANSACTION")
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| format!("Failed to start transaction: {e}"))?;
-
-    let session = Arc::new(Mutex::new(TransactionSession {
-        connection_id,
-        db_id: resolved_db_id,
-        conn,
-        last_accessed: Instant::now(),
-    }));
-    state
-        .transaction_sessions
-        .write()
-        .await
-        .insert(transaction_id.to_string(), session.clone());
-    Ok(session)
 }
 
-async fn append_sql_history(sql: String, status: &str, execution_time_ms: u64) {
-    let Ok(mut store) = SqlHistoryStore::load().await else {
+fn parse_ready_base_url(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix(SIDECAR_READY_PREFIX)?;
+    let url = rest.trim().trim_end_matches('/');
+    if !url.starts_with("http://127.0.0.1:") && !url.starts_with("http://localhost:") {
+        return None;
+    }
+    Some(format!("{url}/backend"))
+}
+
+fn sidecar_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|err| format!("无法定位主程序路径: {err}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "无法定位主程序目录".to_string())?;
+    let candidate = dir.join(format!("{SIDECAR_BIN_NAME}{}", std::env::consts::EXE_SUFFIX));
+    if candidate.is_file() {
+        Ok(candidate)
+    } else {
+        Err(format!(
+            "未找到 sidecar 可执行文件：{}。请先运行 npm run sidecar:build，或使用 npm run tauri:dev / npm run tauri:build 自动构建。",
+            candidate.display()
+        ))
+    }
+}
+
+fn spawn_reader<R: Read + Send + 'static>(
+    app: AppHandle,
+    runtime: BackendRuntime,
+    reader: R,
+    is_stdout: bool,
+) {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let text = line.trim_end_matches(['\r', '\n']);
+                    runtime.write_log(if is_stdout { "out" } else { "err" }, text);
+                    if is_stdout {
+                        if let Some(base_url) = parse_ready_base_url(text) {
+                            runtime.mark_ready(base_url);
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        if is_stdout && !runtime.is_shutting_down() {
+            // The sidecar exits on its own after stdout closes; give it a moment
+            // so we can report the real exit status instead of a generic message.
+            thread::sleep(Duration::from_millis(150));
+            if !runtime.is_shutting_down() {
+                let reason = match runtime.try_wait_child() {
+                    Some(status) => format!("本地后端进程已退出（{status}）"),
+                    None => "本地后端进程的输出流已关闭".to_string(),
+                };
+                runtime.fail(&app, reason);
+            }
+        }
+    });
+}
+
+fn spawn_watchdog(app: AppHandle, runtime: BackendRuntime) {
+    thread::spawn(move || {
+        let deadline = Instant::now() + READY_TIMEOUT;
+        loop {
+            if runtime.is_shutting_down() {
+                return;
+            }
+            if !matches!(runtime.status(), BackendStatus::Starting) {
+                return;
+            }
+            if let Some(status) = runtime.try_wait_child() {
+                runtime.fail(&app, format!("本地后端进程在就绪前退出（{status}）"));
+                return;
+            }
+            if Instant::now() >= deadline {
+                runtime.fail(
+                    &app,
+                    format!("本地后端服务在 {} 秒内未就绪", READY_TIMEOUT.as_secs()),
+                );
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+}
+
+fn start_sidecar(app: &AppHandle, runtime: &BackendRuntime) {
+    let path = match sidecar_path() {
+        Ok(path) => path,
+        Err(reason) => {
+            runtime.fail(app, reason);
+            return;
+        }
+    };
+
+    if let Some(parent) = runtime.inner.log_path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            runtime.fail(
+                app,
+                format!(
+                    "无法创建 sidecar 日志目录 {}: {err}",
+                    parent.display()
+                ),
+            );
+            return;
+        }
+    }
+    match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&runtime.inner.log_path)
+    {
+        Ok(file) => {
+            if let Ok(mut guard) = runtime.inner.log_file.lock() {
+                *guard = Some(file);
+            }
+        }
+        Err(err) => {
+            runtime.fail(
+                app,
+                format!(
+                    "无法创建 sidecar 日志文件 {}: {err}",
+                    runtime.inner.log_path.display()
+                ),
+            );
+            return;
+        }
+    }
+
+    // Port 0 lets the OS pick a free port, so two app instances never fight over
+    // a fixed port. The sidecar announces the actual address on stdout.
+    let spawned = Command::new(&path)
+        .env("BIND_ADDR", "127.0.0.1:0")
+        .env("SIDECAR_READY_STDOUT", "1")
+        .env("EXIT_ON_STDIN_EOF", "1")
+        .env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(err) => {
+            runtime.fail(
+                app,
+                format!("无法启动 sidecar {}: {err}", path.display()),
+            );
+            return;
+        }
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    if let Ok(mut guard) = runtime.inner.child.lock() {
+        *guard = Some(child);
+    }
+
+    if let Some(stdout) = stdout {
+        spawn_reader(app.clone(), runtime.clone(), stdout, true);
+    }
+    if let Some(stderr) = stderr {
+        spawn_reader(app.clone(), runtime.clone(), stderr, false);
+    }
+    spawn_watchdog(app.clone(), runtime.clone());
+}
+
+fn shutdown_sidecar(runtime: &BackendRuntime) {
+    if runtime.inner.shutting_down.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let mut guard = runtime
+        .inner
+        .child
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let Some(mut child) = guard.take() else {
         return;
     };
-    store.add_history(SqlHistory {
-        id: String::new(),
-        sql,
-        status: status.to_string(),
-        execution_time_ms,
-        executed_at: 0,
-        db_id: None,
-        row_count: None,
-        affected_rows: None,
-        statement_kind: None,
-    });
-    let _ = store.save().await;
+
+    // Closing stdin is the graceful signal (web-server watches stdin EOF), then
+    // force kill if it does not exit within the grace period.
+    drop(child.stdin.take());
+    let deadline = Instant::now() + SHUTDOWN_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            _ => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[tauri::command]
-async fn workbench_run(
-    state: tauri::State<'_, DesktopState>,
-    request: WorkbenchRunRequest,
-) -> Result<WorkbenchRunResponse, String> {
-    let _ = request.force;
-    let clean_sql = strip_leading_sql_comments(&request.sql);
-    let upper_sql = clean_sql.to_uppercase();
-    let is_select = upper_sql.starts_with("SELECT")
-        || upper_sql.starts_with("SHOW")
-        || upper_sql.starts_with("DESCRIBE")
-        || upper_sql.starts_with("EXPLAIN");
-
-    let transaction_id = request
-        .transaction_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_string);
-    if transaction_id.is_none() && !is_select {
-        return Err(fallback_required("write_or_ddl"));
-    }
-
-    let (db_client, _) = get_db_client(&state, request.db_id.as_deref()).await?;
-    let mut sql = request.sql.trim().trim_end_matches(';').to_string();
-    let chunk_offset = request.chunk_offset.unwrap_or(0);
-    let mut chunk_size = None;
-    let mut preview_cap = None;
-    let mut has_more = false;
-    let mut next_offset = None;
-    let mut truncated = false;
-    let is_chunked_preview = is_select && upper_sql.starts_with("SELECT") && !upper_sql.contains("LIMIT");
-    if is_chunked_preview {
-        let requested_chunk_size = request
-            .chunk_size
-            .unwrap_or(QUERY_PREVIEW_CHUNK_SIZE)
-            .clamp(1, QUERY_PREVIEW_CHUNK_SIZE);
-        let remaining = QUERY_PREVIEW_ROW_CAP.saturating_sub(chunk_offset);
-        let effective_chunk_size = requested_chunk_size.min(remaining.max(1));
-        sql.push_str(&format!(
-            " LIMIT {} OFFSET {}",
-            effective_chunk_size + 1,
-            chunk_offset
-        ));
-        chunk_size = Some(requested_chunk_size);
-        preview_cap = Some(QUERY_PREVIEW_ROW_CAP);
-    } else if is_select && !upper_sql.contains("LIMIT") {
-        sql.push_str(" LIMIT 1000");
-    }
-
-    let transaction_session = if let Some(id) = transaction_id.as_deref() {
-        Some(get_or_open_transaction_session(&state, request.db_id.as_deref(), id, false).await?)
-    } else {
-        None
-    };
-    let cancel_token = request
-        .cancel_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_string);
-    let mut active_query = if let Some(token) = cancel_token {
-        let canceled = Arc::new(AtomicBool::new(false));
-        if let Some(transaction_session) = transaction_session.clone() {
-            let connection_id = transaction_session.lock().await.connection_id;
-            register_active_query(
-                &state,
-                token.clone(),
-                ActiveQueryHandle {
-                    db_client: db_client.clone(),
-                    connection_id,
-                    canceled: canceled.clone(),
-                },
-            )
-            .await;
-            Some(ActiveQuerySession {
-                token,
-                connection_id,
-                canceled,
-                owned_conn: None,
-                transaction_session: Some(transaction_session),
-            })
-        } else {
-            let mut conn = db_client
-                .mysql_pool().map_err(|e| format!("Not MySQL: {e}"))?
-                .acquire()
-                .await
-                .map_err(|e| format!("Failed to acquire connection: {e}"))?;
-            let connection_id = DbClient::connection_id_for_session(&mut conn)
-                .await
-                .map_err(|e| format!("Failed to resolve connection id: {e}"))?;
-            register_active_query(
-                &state,
-                token.clone(),
-                ActiveQueryHandle {
-                    db_client: db_client.clone(),
-                    connection_id,
-                    canceled: canceled.clone(),
-                },
-            )
-            .await;
-            Some(ActiveQuerySession {
-                token,
-                connection_id,
-                canceled,
-                owned_conn: Some(conn),
-                transaction_session: None,
-            })
+async fn desktop_backend_base_url(runtime: State<'_, BackendRuntime>) -> Result<String, String> {
+    let runtime = runtime.inner().clone();
+    let deadline = Instant::now() + READY_TIMEOUT + Duration::from_secs(10);
+    loop {
+        match runtime.status() {
+            BackendStatus::Ready(base_url) => return Ok(base_url),
+            BackendStatus::Failed(reason) => return Err(reason),
+            BackendStatus::Starting => {}
         }
-    } else {
-        None
-    };
-
-    let start_time = Instant::now();
-    let policy = TimeoutPolicy::default();
-    let mut rows = Vec::new();
-    let mut columns = Vec::new();
-    let mut affected_rows = 0;
-    let mut status = "success".to_string();
-    let mut err_msg = None;
-
-    let mysql_pool = db_client.mysql_pool().ok().cloned();
-
-    if is_select {
-        let result = match tokio::time::timeout(policy.db_query, async {
-            if let Some(active_query) = active_query.as_mut() {
-                if let Some(transaction_session) = active_query.transaction_session.as_ref() {
-                    let mut session = transaction_session.lock().await;
-                    sqlx::query(&sql).fetch_all(&mut *session.conn).await
-                } else if let Some(conn) = active_query.owned_conn.as_mut() {
-                    sqlx::query(&sql).fetch_all(&mut **conn).await
-                } else if let Some(pool) = &mysql_pool {
-                    sqlx::query(&sql).fetch_all(pool).await
-                } else {
-                    Err(sqlx::Error::PoolClosed)
-                }
-            } else if let Some(transaction_session) = transaction_session.as_ref() {
-                let mut session = transaction_session.lock().await;
-                sqlx::query(&sql).fetch_all(&mut *session.conn).await
-            } else if let Some(pool) = &mysql_pool {
-                sqlx::query(&sql).fetch_all(pool).await
-            } else {
-                Err(sqlx::Error::PoolClosed)
-            }
-        })
-        .await
-        {
-            Ok(result) => result.map_err(|e| e.to_string()),
-            Err(_) => {
-                if let Some(active_query) = active_query.as_ref() {
-                    let _ = db_client.kill_query(active_query.connection_id).await;
-                    unregister_active_query(&state, &active_query.token).await;
-                }
-                return Err("Query timed out after 30 seconds. Please optimize SQL or add indexes.".to_string());
-            }
-        };
-
-        match result {
-            Ok(result_rows) => {
-                let mut row_encoder = None;
-                let chunk_limit = if is_chunked_preview {
-                    chunk_size.unwrap_or(QUERY_PREVIEW_CHUNK_SIZE)
-                } else {
-                    result_rows.len() as u32
-                };
-                let fetched_len = result_rows.len() as u32;
-                if is_chunked_preview {
-                    has_more = fetched_len > chunk_limit
-                        && chunk_offset.saturating_add(chunk_limit) < QUERY_PREVIEW_ROW_CAP;
-                    next_offset = has_more.then_some(chunk_offset.saturating_add(chunk_limit));
-                    truncated = fetched_len > chunk_limit;
-                }
-                rows = result_rows
-                    .into_iter()
-                    .take(chunk_limit as usize)
-                    .map(|row| {
-                        if row_encoder.is_none() {
-                            let encoder = MySqlRowJsonEncoder::from_row(&row);
-                            columns = encoder.column_names();
-                            row_encoder = Some(encoder);
-                        }
-                        encode_mysql_row(
-                            &row,
-                            row_encoder
-                                .as_ref()
-                                .expect("row encoder should be initialized"),
-                        )
-                    })
-                    .collect();
-            }
-            Err(error) => {
-                let was_canceled = active_query
-                    .as_ref()
-                    .map(|query| query.canceled.load(Ordering::SeqCst))
-                    .unwrap_or(false);
-                status = if was_canceled {
-                    "canceled".to_string()
-                } else {
-                    "error".to_string()
-                };
-                err_msg = Some(if was_canceled {
-                    "Query canceled".to_string()
-                } else {
-                    error
-                });
-            }
+        if Instant::now() >= deadline {
+            return Err("本地后端服务仍未就绪".to_string());
         }
-    } else {
-        let result = match tokio::time::timeout(policy.db_query, async {
-            if let Some(active_query) = active_query.as_mut() {
-                if let Some(transaction_session) = active_query.transaction_session.as_ref() {
-                    let mut session = transaction_session.lock().await;
-                    sqlx::query(&sql).execute(&mut *session.conn).await
-                } else if let Some(conn) = active_query.owned_conn.as_mut() {
-                    sqlx::query(&sql).execute(&mut **conn).await
-                } else if let Some(pool) = &mysql_pool {
-                    sqlx::query(&sql).execute(pool).await
-                } else {
-                    Err(sqlx::Error::PoolClosed)
-                }
-            } else if let Some(transaction_session) = transaction_session.as_ref() {
-                let mut session = transaction_session.lock().await;
-                sqlx::query(&sql).execute(&mut *session.conn).await
-            } else if let Some(pool) = &mysql_pool {
-                sqlx::query(&sql).execute(pool).await
-            } else {
-                Err(sqlx::Error::PoolClosed)
-            }
-        })
-        .await
-        {
-            Ok(result) => result.map_err(|e| e.to_string()),
-            Err(_) => {
-                if let Some(active_query) = active_query.as_ref() {
-                    let _ = db_client.kill_query(active_query.connection_id).await;
-                    unregister_active_query(&state, &active_query.token).await;
-                }
-                return Err("Query timed out after 30 seconds. Please optimize SQL or add indexes.".to_string());
-            }
-        };
-
-        match result {
-            Ok(result) => {
-                affected_rows = result.rows_affected();
-            }
-            Err(error) => {
-                let was_canceled = active_query
-                    .as_ref()
-                    .map(|query| query.canceled.load(Ordering::SeqCst))
-                    .unwrap_or(false);
-                status = if was_canceled {
-                    "canceled".to_string()
-                } else {
-                    "error".to_string()
-                };
-                err_msg = Some(if was_canceled {
-                    "Query canceled".to_string()
-                } else {
-                    error
-                });
-            }
-        }
-    }
-
-    if let Some(active_query) = active_query.as_ref() {
-        unregister_active_query(&state, &active_query.token).await;
-    }
-    let was_canceled = active_query
-        .as_ref()
-        .map(|query| query.canceled.load(Ordering::SeqCst))
-        .unwrap_or(false);
-
-    let elapsed = start_time.elapsed().as_millis() as u64;
-
-    if let Some(session) = transaction_session.as_ref() {
-        let mut session_lock = session.lock().await;
-        session_lock.last_accessed = Instant::now();
-        drop(session_lock);
-
-        // If this was a successful COMMIT or ROLLBACK, clean up the session
-        let is_tx_end = {
-            let s = upper_sql.trim();
-            s == "COMMIT" || s == "ROLLBACK" || s == "COMMIT;" || s == "ROLLBACK;"
-        };
-        if is_tx_end && err_msg.is_none() {
-            if let Some(id) = transaction_id.as_deref() {
-                state.transaction_sessions.write().await.remove(id);
-            }
-        }
-    }
-
-    if let Some(error) = err_msg {
-        if was_canceled {
-            append_sql_history(sql, "canceled", elapsed).await;
-            Err("ERR_CANCELED: Query canceled".to_string())
-        } else {
-            append_sql_history(sql, "error", elapsed).await;
-            Err(error)
-        }
-    } else {
-        append_sql_history(sql, &status, elapsed).await;
-        Ok(WorkbenchRunResponse {
-            columns,
-            row_count: rows.len(),
-            rows,
-            affected_rows,
-            execution_time_ms: elapsed,
-            has_more,
-            next_offset,
-            chunk_offset,
-            chunk_size,
-            preview_cap,
-            truncated,
-        })
-    }
-}
-
-#[tauri::command]
-async fn workbench_cancel(
-    state: tauri::State<'_, DesktopState>,
-    request: WorkbenchCancelRequest,
-) -> Result<WorkbenchCancelResponse, String> {
-    let _ = request.db_id;
-    let cancel_token = request.cancel_token.trim();
-    if cancel_token.is_empty() {
-        return Ok(WorkbenchCancelResponse { canceled: false });
-    }
-
-    let canceled = cancel_active_query(&state, cancel_token).await?;
-    Ok(WorkbenchCancelResponse { canceled })
-}
-
-#[tauri::command]
-async fn workbench_transaction(
-    state: tauri::State<'_, DesktopState>,
-    request: WorkbenchTransactionRequest,
-) -> Result<WorkbenchTransactionResponse, String> {
-    let transaction_id = request.transaction_id.trim();
-    if transaction_id.is_empty() {
-        return Err("transaction_id is required".to_string());
-    }
-
-    let action = request.action.trim().to_lowercase();
-    if action == "begin" {
-        let _ = get_or_open_transaction_session(&state, request.db_id.as_deref(), transaction_id, true).await?;
-        return Ok(WorkbenchTransactionResponse {
-            action: "begin".to_string(),
-            transaction_id: transaction_id.to_string(),
-            state: "active".to_string(),
-            execution_time_ms: 0,
-        });
-    }
-
-    if action != "commit" && action != "rollback" {
-        return Err("transaction action must be begin, commit or rollback".to_string());
-    }
-
-    let session = state
-        .transaction_sessions
-        .read()
-        .await
-        .get(transaction_id)
-        .cloned()
-        .ok_or_else(|| "transaction session not found".to_string())?;
-    let expected_db_id = resolve_transaction_db_id(request.db_id.as_deref()).await?;
-    {
-        let guard = session.lock().await;
-        if guard.db_id != expected_db_id {
-            return Err("Transaction session is bound to a different database connection".to_string());
-        }
-    }
-
-    let started_at = Instant::now();
-    {
-        let mut guard = session.lock().await;
-        let sql = if action == "commit" { "COMMIT" } else { "ROLLBACK" };
-        sqlx::query(sql)
-            .execute(&mut *guard.conn)
-            .await
-            .map_err(|e| format!("Failed to {action} transaction: {e}"))?;
-    }
-    state.transaction_sessions.write().await.remove(transaction_id);
-
-    Ok(WorkbenchTransactionResponse {
-        action,
-        transaction_id: transaction_id.to_string(),
-        state: "idle".to_string(),
-        execution_time_ms: started_at.elapsed().as_millis() as u64,
-    })
-}
-
-#[tauri::command]
-async fn table_page(
-    state: tauri::State<'_, DesktopState>,
-    request: TablePageRequest,
-) -> Result<TablePageResponse, String> {
-    let (db_client, _) = get_db_client(&state, request.db_id.as_deref()).await?;
-
-    let page = request.page.unwrap_or(1);
-    let page_size = request.page_size.unwrap_or(100);
-    let offset = (page - 1) * page_size;
-
-    let mut where_clause = String::new();
-    let mut bindings = Vec::new();
-
-    if let Some(filters_str) = &request.filters {
-        if let Ok(filters) = serde_json::from_str::<Vec<FilterCondition>>(filters_str) {
-            let mut conditions = Vec::new();
-            for filter in filters {
-                let op = match filter.operator.as_str() {
-                    "equals" => "=",
-                    "contains" => "LIKE",
-                    "greater_than" => ">",
-                    "less_than" => "<",
-                    _ => "=",
-                };
-                let col = quote_mysql_ident(&filter.column)?;
-                conditions.push(format!("{col} {op} ?"));
-                if filter.operator == "contains" {
-                    bindings.push(format!("%{}%", filter.value));
-                } else {
-                    bindings.push(filter.value);
-                }
-            }
-            if !conditions.is_empty() {
-                where_clause = format!("WHERE {}", conditions.join(" AND "));
-            }
-        }
-    }
-
-    // KEEP IN SYNC with core_lib::service::schema::SchemaService::build_order_clause
-    let mut order_clause = String::new();
-    if let Some(orders_str) = &request.orders {
-        let orders: Vec<OrderCondition> = serde_json::from_str(orders_str)
-            .map_err(|e| format!("解析 orders 失败: {e}"))?;
-        let mut clauses = Vec::new();
-        for order in orders {
-            let target: String = match order.kind {
-                OrderKind::Column => {
-                    let col = order
-                        .column
-                        .ok_or_else(|| "排序规则缺少 column 字段".to_string())?;
-                    quote_mysql_ident(&col)?
-                }
-                OrderKind::Expression => {
-                    let expr = order
-                        .expression
-                        .ok_or_else(|| "排序规则缺少 expression 字段".to_string())?;
-                    sanitize_sort_expression(&expr)
-                        .map_err(|e| format!("非法排序表达式: {e}"))?;
-                    expr
-                }
-            };
-            let dir = if order.desc { "DESC" } else { "ASC" };
-            match order.nulls {
-                OrderNulls::Default => clauses.push(format!("{target} {dir}")),
-                OrderNulls::First => clauses.push(format!("{target} IS NULL DESC, {target} {dir}")),
-                OrderNulls::Last => clauses.push(format!("{target} IS NULL ASC, {target} {dir}")),
-            }
-        }
-        if !clauses.is_empty() {
-            order_clause = format!("ORDER BY {}", clauses.join(", "));
-        }
-    }
-
-    let table_ident = quote_mysql_ident(&request.table_name)?;
-    let data_sql = format!(
-        "SELECT * FROM {table_ident} {where_clause} {order_clause} LIMIT {} OFFSET {}",
-        page_size + 1,
-        offset
-    );
-    let mut query = sqlx::query(&data_sql);
-    for binding in &bindings {
-        query = query.bind(binding);
-    }
-
-    let policy = TimeoutPolicy::default();
-    let result_rows = tokio::time::timeout(policy.db_query, query.fetch_all(db_client.mysql_pool().map_err(|e| e.to_string())?))
-        .await
-        .map_err(|_| "Query timed out after 30 seconds. Please optimize SQL or add indexes.".to_string())?
-        .map_err(|e| e.to_string())?;
-
-    let has_more = result_rows.len() as u32 > page_size;
-    let mut row_encoder = None;
-    let data = result_rows
-        .into_iter()
-        .take(page_size as usize)
-        .map(|row| {
-            if row_encoder.is_none() {
-                row_encoder = Some(MySqlRowJsonEncoder::from_row(&row));
-            }
-            encode_mysql_row(
-                &row,
-                row_encoder
-                    .as_ref()
-                    .expect("row encoder should be initialized"),
-            )
-        })
-        .collect();
-
-    Ok(TablePageResponse {
-        data,
-        total: None,
-        total_status: "calculating".to_string(),
-        has_more,
-    })
-}
-
-#[tauri::command]
-async fn table_schema(
-    state: tauri::State<'_, DesktopState>,
-    request: TableSchemaRequest,
-) -> Result<TableWithDetails, String> {
-    let (db_client, url) = get_db_client(&state, request.db_id.as_deref()).await?;
-    let db_name = DbClient::extract_db_name(&url)
-        .ok_or_else(|| "Unable to determine database name from connection URL".to_string())?;
-
-    let (columns, indexes, foreign_keys) = tokio::try_join!(
-        SchemaExtractor::get_columns(&db_client, &db_name, &request.table_name),
-        SchemaExtractor::get_indexes(&db_client, &db_name, &request.table_name),
-        SchemaExtractor::get_foreign_keys(&db_client, &db_name, &request.table_name),
-    )
-    .map_err(|e| e.to_string())?;
-
-    Ok(TableWithDetails {
-        table_name: request.table_name,
-        columns,
-        indexes,
-        foreign_keys,
-    })
-}
-
-#[tauri::command]
-async fn perf_probe(
-    state: tauri::State<'_, DesktopState>,
-    request: PerfProbeRequest,
-) -> Result<PerfProbeSummary, String> {
-    let operation = request
-        .operation
-        .clone()
-        .unwrap_or_else(|| "connect_warm".to_string())
-        .trim()
-        .to_lowercase();
-    let iterations = normalize_perf_probe_iterations(request.iterations);
-
-    match operation.as_str() {
-        "connect_cold" => run_connect_cold_probe(request.db_id.as_deref(), iterations).await,
-        "connect_warm" => run_connect_warm_probe(&state, request.db_id.as_deref(), iterations).await,
-        "query_select_small" => {
-            run_query_select_small_probe(&state, request.db_id.as_deref(), request.sql.as_deref(), iterations)
-                .await
-        }
-        "query_write_small" => {
-            run_query_write_small_probe(&state, request.db_id.as_deref(), iterations).await
-        }
-        "explain_plan" => {
-            run_explain_plan_probe(&state, request.db_id.as_deref(), request.sql.as_deref(), iterations)
-                .await
-        }
-        "catalog_first_paint" => {
-            run_catalog_first_paint_probe(&state, request.db_id.as_deref(), iterations).await
-        }
-        "table_first_page" => {
-            run_table_first_page_probe(
-                &state,
-                request.db_id.as_deref(),
-                request.table_name.as_deref(),
-                iterations,
-            )
-            .await
-        }
-        "cancel_latency" => run_cancel_latency_probe(&state, request.db_id.as_deref(), iterations).await,
-        _ => Err(format!(
-            "Unsupported perf probe operation: {}",
-            operation
-        )),
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let state = Arc::new(DesktopState::default());
-
-    // Start background cleanup task for idle transaction sessions
-    let state_for_cleanup = state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            let mut sessions_to_remove = Vec::new();
-            {
-                let sessions = state_for_cleanup.transaction_sessions.read().await;
-                for (id, session_arc) in sessions.iter() {
-                    let session = session_arc.lock().await;
-                    if session.last_accessed.elapsed() > Duration::from_secs(600) {
-                        sessions_to_remove.push(id.clone());
-                    }
-                }
-            }
-
-            if !sessions_to_remove.is_empty() {
-                let mut sessions = state_for_cleanup.transaction_sessions.write().await;
-                for id in sessions_to_remove {
-                    if let Some(session_arc) = sessions.remove(&id) {
-                        let mut session = session_arc.lock().await;
-                        // Try to rollback just in case, though it might fail if connection is broken
-                        let _ = sqlx::query("ROLLBACK").execute(&mut *session.conn).await;
-                        // In Tauri we don't have tracing configured by default, but we can log to stdout
-                        println!("Cleaned up idle transaction session: {}", id);
-                    }
-                }
-            }
-        }
-    });
-
     tauri::Builder::default()
-        .manage(state)
-        .invoke_handler(tauri::generate_handler![
-            workbench_run,
-            workbench_cancel,
-            workbench_transaction,
-            table_page,
-            table_schema,
-            perf_probe
-        ])
-        .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+        // Single-instance must be registered before other plugins.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
             }
+        }))
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![desktop_backend_base_url])
+        .setup(|app| {
+            let log_path = app
+                .path()
+                .app_log_dir()
+                .unwrap_or_else(|_| std::env::temp_dir())
+                .join("web-server.log");
+            let runtime = BackendRuntime::new(log_path);
+            app.manage(runtime.clone());
+            start_sidecar(app.handle(), &runtime);
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            RunEvent::WindowEvent {
+                event: WindowEvent::CloseRequested { .. },
+                ..
+            } => {
+                // Single-window utility: closing the window exits the app so the
+                // sidecar never outlives a windowless process on macOS.
+                app.exit(0);
+            }
+            RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                if let Some(runtime) = app.try_state::<BackendRuntime>() {
+                    shutdown_sidecar(&runtime);
+                }
+            }
+            _ => {}
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ready_base_url;
+
+    #[test]
+    fn parses_sidecar_ready_line() {
+        assert_eq!(
+            parse_ready_base_url("SIDECAR_READY http://127.0.0.1:53267"),
+            Some("http://127.0.0.1:53267/backend".to_string())
+        );
+        assert_eq!(
+            parse_ready_base_url("  SIDECAR_READY http://127.0.0.1:53267/  "),
+            Some("http://127.0.0.1:53267/backend".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_unrelated_or_unsafe_lines() {
+        assert_eq!(parse_ready_base_url("INFO Server listening on http://127.0.0.1:3000"), None);
+        assert_eq!(parse_ready_base_url("SIDECAR_READY http://0.0.0.0:3000"), None);
+        assert_eq!(parse_ready_base_url("SIDECAR_READY"), None);
+    }
 }

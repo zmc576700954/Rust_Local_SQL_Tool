@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { StepWizard } from '../StepWizard'
 import type { WizardStep } from '../StepWizard'
-import { api, JOB_POLL_INTERVAL_MS } from '../../api'
+import { api, backendUrl, JOB_POLL_INTERVAL_MS } from '../../api'
 import { useToast } from '../Toast'
 import { parseError } from '../../utils'
 import { tr } from '../../i18n'
@@ -211,7 +211,7 @@ export function GoLive({ onCancel }: GoLiveProps) {
   const downloadArtifact = (artifact: string) => {
     const id = String(jobId || '').trim()
     if (!id) return
-    const url = `/backend/tools/jobs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifact)}`
+    const url = backendUrl(`/tools/jobs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifact)}`)
     const link = document.createElement('a')
     link.href = url
     document.body.appendChild(link)

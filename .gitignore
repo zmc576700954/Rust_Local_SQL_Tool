@@ -6,6 +6,7 @@
 /web-ui/.vite/
 /web-ui/.cache/
 /web-ui/coverage/
+/web-ui/src-tauri/binaries/
 
 *.log
 *.local
