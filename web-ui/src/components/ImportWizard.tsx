@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Upload, ArrowRight, Check, AlertCircle } from 'lucide-react';
 import { api, JOB_POLL_INTERVAL_MS } from '../api';
 import { useToast } from './Toast';
+import { parseDelimited } from '../utils/csv';
 import { tr } from '../i18n';
 
 interface ImportWizardProps {
@@ -80,36 +81,17 @@ export function ImportWizard({ tableName, columns, dbId, onComplete }: ImportWiz
           throw new Error('Invalid JSON format: expected array of objects');
         }
       } else if (lowerName.endsWith('.csv')) {
-        const rows = text.split('\n').filter(r => r.trim());
-        if (rows.length > 0) {
-          headers = rows[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
-          data = rows.slice(1).map(row => {
-            const values = row.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
-            const obj: any = {};
-            headers.forEach((h, i) => {
-              obj[h] = values[i];
-            });
-            return obj;
-          });
-        }
+        const parsed = parseDelimited(text, ',');
+        headers = parsed.headers;
+        data = parsed.rows;
       } else if (lowerName.endsWith('.txt') || lowerName.endsWith('.xls') || lowerName.endsWith('.xlsx')) {
-        const rows = text.split('\n').filter(r => r.trim());
-        if (rows.length > 0) {
-          const first = rows[0];
-          const delimiter = first.includes('\t') ? '\t' : (first.includes(',') ? ',' : null);
-          if (!delimiter) {
-            throw new Error('无法识别分隔符：首行未发现 \\t 或 ,。当前仅支持 xls/xlsx 兼容模式（CSV/TSV 纯文本）。');
-          }
-          headers = rows[0].split(delimiter).map(h => h.trim().replace(/^"|"$/g, ''));
-          data = rows.slice(1).map(row => {
-            const values = row.split(delimiter).map(v => v.trim().replace(/^"|"$/g, ''));
-            const obj: any = {};
-            headers.forEach((h, i) => {
-              obj[h] = values[i];
-            });
-            return obj;
-          });
+        const firstLine = text.split(/\r?\n/, 1)[0] ?? '';
+        if (!firstLine.includes('\t') && !firstLine.includes(',')) {
+          throw new Error('无法识别分隔符：首行未发现 \\t 或 ,。当前仅支持 xls/xlsx 兼容模式（CSV/TSV 纯文本）。');
         }
+        const parsed = parseDelimited(text);
+        headers = parsed.headers;
+        data = parsed.rows;
       } else if (lowerName.endsWith('.xml')) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(text, 'application/xml');

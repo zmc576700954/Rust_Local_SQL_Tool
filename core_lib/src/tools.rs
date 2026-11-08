@@ -800,18 +800,33 @@ impl MockDataGenerator {
 pub struct DataExporter;
 
 impl DataExporter {
+    /// CSV 字段转义：所有非空值一律加双引号，内部双引号翻倍。
+    ///
+    /// 这样 `NULL`（不带引号的空字段）与空串 `""` 在文件里可区分，
+    /// 逗号、换行、制表符、双引号也不需要额外规则。
+    fn csv_field(text: &str) -> String {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    }
+
+    fn csv_text(value: &Value) -> String {
+        match value {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    }
+
     pub fn csv_header(headers: &[String]) -> String {
-        format!("{}\n", headers.join(","))
+        let fields: Vec<String> = headers.iter().map(|h| Self::csv_field(h)).collect();
+        format!("{}\n", fields.join(","))
     }
 
     pub fn csv_row(headers: &[String], row: &serde_json::Map<String, Value>) -> String {
         let mut row_data = Vec::new();
         for header in headers {
             let val_str = match row.get(header) {
-                Some(Value::String(s)) => format!("\"{}\"", s.replace("\"", "\"\"")),
-                Some(Value::Null) => String::new(),
-                Some(v) => v.to_string(),
-                None => String::new(),
+                // NULL 与缺失列都输出不带引号的空字段
+                Some(Value::Null) | None => String::new(),
+                Some(v) => Self::csv_field(&Self::csv_text(v)),
             };
             row_data.push(val_str);
         }
@@ -826,6 +841,15 @@ impl DataExporter {
         )
     }
 
+    /// SQL 导出头：表名与列名由调用方按引擎引用（支持特殊字符 / schema 限定名）。
+    pub fn sql_header_quoted(table_ident: &str, quoted_headers: &[String]) -> String {
+        format!(
+            "INSERT INTO {} ({}) VALUES\n",
+            table_ident,
+            quoted_headers.join(", ")
+        )
+    }
+
     pub fn sql_row(
         headers: &[String],
         row: &serde_json::Map<String, Value>,
@@ -837,6 +861,27 @@ impl DataExporter {
                 Some(Value::String(s)) => format!("'{}'", s.replace("'", "''")),
                 Some(Value::Null) => "NULL".to_string(),
                 Some(v) => v.to_string(),
+                None => "NULL".to_string(),
+            };
+            row_data.push(val_str);
+        }
+        let suffix = if is_last { ";\n" } else { ",\n" };
+        format!("({}){}", row_data.join(", "), suffix)
+    }
+
+    /// 按 SQL 字面量输出一行（PostgreSQL / SQLite 用）。
+    ///
+    /// 与 `sql_row` 的差异：对象/数组按 JSON 文本加引号输出，布尔输出 TRUE/FALSE，
+    /// 这样 jsonb 与高精度 numeric（字符串）都能作为合法字面量重新导入。
+    pub fn sql_row_literal(
+        headers: &[String],
+        row: &serde_json::Map<String, Value>,
+        is_last: bool,
+    ) -> String {
+        let mut row_data = Vec::new();
+        for header in headers {
+            let val_str = match row.get(header) {
+                Some(v) => crate::sql_util::format_sql_value(v),
                 None => "NULL".to_string(),
             };
             row_data.push(val_str);
@@ -885,6 +930,52 @@ mod tests {
             indexes: vec![],
             foreign_keys: vec![],
         }
+    }
+
+    #[test]
+    fn csv_keeps_null_and_empty_string_distinct() {
+        let headers = vec!["id".to_string(), "note".to_string()];
+        let mut row = serde_json::Map::new();
+        row.insert("id".to_string(), serde_json::json!(1));
+        row.insert("note".to_string(), serde_json::Value::Null);
+        assert_eq!(DataExporter::csv_header(&headers), "\"id\",\"note\"\n");
+        assert_eq!(DataExporter::csv_row(&headers, &row), "\"1\",\n");
+
+        let mut empty = serde_json::Map::new();
+        empty.insert("id".to_string(), serde_json::json!(2));
+        empty.insert("note".to_string(), serde_json::json!(""));
+        assert_eq!(DataExporter::csv_row(&headers, &empty), "\"2\",\"\"\n");
+    }
+
+    #[test]
+    fn csv_quotes_embedded_specials() {
+        let headers = vec!["t".to_string()];
+        let mut row = serde_json::Map::new();
+        row.insert(
+            "t".to_string(),
+            serde_json::json!("a,b\"c\n第二行\t尾"),
+        );
+        assert_eq!(
+            DataExporter::csv_row(&headers, &row),
+            "\"a,b\"\"c\n第二行\t尾\"\n"
+        );
+    }
+
+    #[test]
+    fn sql_row_literal_quotes_json_and_preserves_numeric_text() {
+        let headers = vec!["doc".to_string(), "amount".to_string(), "bin".to_string()];
+        let mut row = serde_json::Map::new();
+        row.insert("doc".to_string(), serde_json::json!({"k": "值😀"}));
+        row.insert(
+            "amount".to_string(),
+            serde_json::json!("1234567890123456789.123456789012345678"),
+        );
+        row.insert("bin".to_string(), serde_json::json!("\\x0102"));
+        let sql = DataExporter::sql_row_literal(&headers, &row, true);
+        assert_eq!(
+            sql,
+            "('{\"k\":\"值😀\"}', '1234567890123456789.123456789012345678', '\\x0102');\n"
+        );
     }
 
     #[test]

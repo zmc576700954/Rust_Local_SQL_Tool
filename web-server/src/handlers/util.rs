@@ -19,6 +19,17 @@ pub fn require_mysql_client(db_client: &DbClient, feature: &str) -> Result<(), A
     }
 }
 
+/// 导入/导出的引擎守卫：MySQL 与 PostgreSQL 已接通，SQLite 暂未支持。
+pub fn require_file_transfer_client(db_client: &DbClient, feature: &str) -> Result<(), AppError> {
+    match &db_client.db_type {
+        DbType::MySQL | DbType::MariaDB | DbType::PostgreSQL => Ok(()),
+        other => Err(AppError::BadRequest(format!(
+            "{} 当前仅支持 MySQL / MariaDB / PostgreSQL；当前连接为 {:?}，请切换到已支持的连接后再使用该功能。",
+            feature, other
+        ))),
+    }
+}
+
 /// 连接配置层面的同类守卫：用于尚未打开连接池、只解析出 URL 的入口。
 pub fn require_mysql_connection(conn: &DbConnection, feature: &str) -> Result<(), AppError> {
     let db_type = conn

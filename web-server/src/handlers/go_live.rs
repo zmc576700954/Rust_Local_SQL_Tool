@@ -1,6 +1,6 @@
 //! GoLive handler — pre-deployment checks, job orchestration, and report generation.
 
-use super::util::{require_mysql_client, row_to_json};
+use super::util::{require_file_transfer_client, row_to_json};
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -234,7 +234,7 @@ pub async fn export_job_start(
             .clone()
             .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
     };
-    require_mysql_client(&db_client, "导出任务")?;
+    require_file_transfer_client(&db_client, "导出任务")?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -395,7 +395,7 @@ pub async fn import_job_start(
             .clone()
             .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
     };
-    require_mysql_client(&db_client, "导入任务")?;
+    require_file_transfer_client(&db_client, "导入任务")?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -495,7 +495,7 @@ pub async fn import_sql_job_start(
             .clone()
             .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
     };
-    require_mysql_client(&db_client, "SQL 脚本导入任务")?;
+    require_file_transfer_client(&db_client, "SQL 脚本导入任务")?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -1774,6 +1774,334 @@ pub async fn fetch_table_columns(
     Ok(cols)
 }
 
+/// PostgreSQL / SQLite 导出：通过统一查询层（文本协议）一次性取回结果，
+/// 再按与 MySQL 相同的 DataExporter 写文件。
+///
+/// 注意：整表一次性取回，内存随行数线性增长；MySQL 路径才是流式导出。
+async fn run_export_job_text_protocol(
+    db_client: &DbClient,
+    req: &ExportJobStartRequest,
+    data_path: &str,
+    max_bytes: u64,
+    export_type: &str,
+    is_excel_compat: bool,
+) -> Result<ExportStats, AppError> {
+    use sha2::Digest;
+    use tokio::io::AsyncWriteExt;
+
+    let db_type = db_client.db_type.clone();
+    let table_ident = core_lib::sql_util::quote_table_ref_checked(&req.table_name, &db_type)
+        .map_err(AppError::BadRequest)?;
+
+    let mut conditions = Vec::new();
+    if let Some(w) = &req.where_clause {
+        if !w.trim().is_empty() {
+            conditions.push(format!("({})", w));
+        }
+    }
+    if let Some(pk) = &req.primary_key {
+        let safe_pk = match db_type {
+            DbType::MySQL | DbType::MariaDB => {
+                core_lib::sql_util::quote_ident_mysql_checked(pk)
+            }
+            _ => core_lib::sql_util::quote_ident_pg_checked(pk),
+        }
+        .map_err(AppError::BadRequest)?;
+        if let Some(s) = &req.pk_start {
+            if !s.trim().is_empty() {
+                conditions.push(format!("{} >= {}", safe_pk, sql_literal(s)));
+            }
+        }
+        if let Some(s) = &req.pk_end {
+            if !s.trim().is_empty() {
+                conditions.push(format!("{} <= {}", safe_pk, sql_literal(s)));
+            }
+        }
+    }
+
+    let where_sql = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    let order_sql = req
+        .primary_key
+        .as_ref()
+        .map(|pk| {
+            let quoted = match db_type {
+                DbType::MySQL | DbType::MariaDB => {
+                    core_lib::sql_util::quote_ident_mysql_checked(pk)
+                }
+                _ => core_lib::sql_util::quote_ident_pg_checked(pk),
+            }?;
+            Ok::<_, String>(format!(" ORDER BY {}", quoted))
+        })
+        .transpose()
+        .map_err(AppError::BadRequest)?
+        .unwrap_or_default();
+    let mut limit_sql = String::new();
+    if let Some(lim) = req.window_limit {
+        limit_sql.push_str(&format!(" LIMIT {}", lim));
+        if let Some(off) = req.window_offset {
+            limit_sql.push_str(&format!(" OFFSET {}", off));
+        }
+    }
+
+    let data_sql = format!(
+        "SELECT * FROM {}{}{}{}",
+        table_ident, where_sql, order_sql, limit_sql
+    );
+    let result = db_client
+        .pool
+        .fetch_all_result(&data_sql)
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let headers = result.columns.clone();
+    let rows = result.to_objects();
+
+    let file = tokio::fs::File::create(data_path)
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let mut writer = tokio::io::BufWriter::new(file);
+    let mut bytes: u64 = 0;
+    let mut line_count: u64 = 0;
+    let mut hasher = sha2::Sha256::new();
+
+    if is_excel_compat {
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            b"\xEF\xBB\xBF",
+        )
+        .await?;
+    }
+
+    if export_type == "csv" && !headers.is_empty() {
+        let header = DataExporter::csv_header(&headers);
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            header.as_bytes(),
+        )
+        .await?;
+    } else if export_type == "txt" && !headers.is_empty() {
+        let mut s = String::new();
+        s.push_str(&headers.join("\t"));
+        s.push('\n');
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            s.as_bytes(),
+        )
+        .await?;
+    } else if export_type == "sql" && !headers.is_empty() {
+        let quoted_headers: Vec<String> = headers
+            .iter()
+            .map(|h| {
+                core_lib::sql_util::quote_ident_pg_checked(h)
+                    .unwrap_or_else(|_| core_lib::sql_util::quote_ident_pg(h))
+            })
+            .collect();
+        let header = DataExporter::sql_header_quoted(&table_ident, &quoted_headers);
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            header.as_bytes(),
+        )
+        .await?;
+    } else if export_type == "xml" {
+        let mut s = String::new();
+        s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        s.push_str(&format!(
+            "<export schema_version=\"1\" table=\"{}\">\n",
+            escape_xml(&req.table_name)
+        ));
+        s.push_str("<columns>\n");
+        for h in &headers {
+            s.push_str(&format!("  <column name=\"{}\" />\n", escape_xml(h)));
+        }
+        s.push_str("</columns>\n<rows>\n");
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            s.as_bytes(),
+        )
+        .await?;
+    }
+
+    let mut is_first_json = true;
+    let mut previous_row: Option<serde_json::Map<String, serde_json::Value>> = None;
+    let row_count = rows.len() as u64;
+
+    for value in rows {
+        let map = match value.as_object() {
+            Some(m) => m.clone(),
+            None => continue,
+        };
+        if export_type == "csv" {
+            let s = DataExporter::csv_row(&headers, &map);
+            write_stats_chunk(
+                &mut writer,
+                &mut bytes,
+                &mut line_count,
+                &mut hasher,
+                max_bytes,
+                s.as_bytes(),
+            )
+            .await?;
+        } else if export_type == "txt" {
+            let mut vals = Vec::new();
+            for h in &headers {
+                let v = match map.get(h) {
+                    Some(serde_json::Value::Null) | None => String::new(),
+                    Some(serde_json::Value::String(s)) => s.replace(['\t', '\n'], " "),
+                    Some(v) => v.to_string(),
+                };
+                vals.push(v);
+            }
+            let line = format!("{}\n", vals.join("\t"));
+            write_stats_chunk(
+                &mut writer,
+                &mut bytes,
+                &mut line_count,
+                &mut hasher,
+                max_bytes,
+                line.as_bytes(),
+            )
+            .await?;
+        } else if export_type == "sql" {
+            if let Some(prev) = previous_row.take() {
+                let s = DataExporter::sql_row_literal(&headers, &prev, false);
+                write_stats_chunk(
+                    &mut writer,
+                    &mut bytes,
+                    &mut line_count,
+                    &mut hasher,
+                    max_bytes,
+                    s.as_bytes(),
+                )
+                .await?;
+            }
+            previous_row = Some(map);
+        } else if export_type == "json" {
+            if let Some(prev) = previous_row.take() {
+                let s = DataExporter::json_row(&prev, is_first_json, false);
+                write_stats_chunk(
+                    &mut writer,
+                    &mut bytes,
+                    &mut line_count,
+                    &mut hasher,
+                    max_bytes,
+                    s.as_bytes(),
+                )
+                .await?;
+                is_first_json = false;
+            }
+            previous_row = Some(map);
+        } else if export_type == "xml" {
+            let mut s = String::new();
+            s.push_str("  <row>\n");
+            for h in &headers {
+                let val_s = match map.get(h) {
+                    Some(serde_json::Value::Null) | None => String::new(),
+                    Some(serde_json::Value::String(v)) => v.clone(),
+                    Some(v) => v.to_string(),
+                };
+                s.push_str(&format!(
+                    "    <col name=\"{}\">{}</col>\n",
+                    escape_xml(h),
+                    escape_xml(&val_s)
+                ));
+            }
+            s.push_str("  </row>\n");
+            write_stats_chunk(
+                &mut writer,
+                &mut bytes,
+                &mut line_count,
+                &mut hasher,
+                max_bytes,
+                s.as_bytes(),
+            )
+            .await?;
+        }
+    }
+
+    if export_type == "sql" {
+        if let Some(prev) = previous_row {
+            let s = DataExporter::sql_row_literal(&headers, &prev, true);
+            write_stats_chunk(
+                &mut writer,
+                &mut bytes,
+                &mut line_count,
+                &mut hasher,
+                max_bytes,
+                s.as_bytes(),
+            )
+            .await?;
+        }
+    } else if export_type == "json" {
+        if let Some(prev) = previous_row {
+            let s = DataExporter::json_row(&prev, is_first_json, true);
+            write_stats_chunk(
+                &mut writer,
+                &mut bytes,
+                &mut line_count,
+                &mut hasher,
+                max_bytes,
+                s.as_bytes(),
+            )
+            .await?;
+        } else {
+            write_stats_chunk(
+                &mut writer,
+                &mut bytes,
+                &mut line_count,
+                &mut hasher,
+                max_bytes,
+                b"[]\n",
+            )
+            .await?;
+        }
+    } else if export_type == "xml" {
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            b"</rows>\n</export>\n",
+        )
+        .await?;
+    }
+
+    writer
+        .flush()
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+
+    Ok(ExportStats {
+        sha256: format!("{:x}", hasher.finalize()),
+        line_count,
+        bytes,
+        row_count,
+    })
+}
+
 pub async fn run_export_job(
     db_client: &DbClient,
     state: &AppState,
@@ -1800,6 +2128,19 @@ pub async fn run_export_job(
             "Unsupported export format: {}",
             req.export_type
         )));
+    }
+
+    // PostgreSQL / SQLite：统一查询层（文本协议 + 类型目录），走通用导出实现。
+    if !matches!(db_client.db_type, DbType::MySQL | DbType::MariaDB) {
+        return run_export_job_text_protocol(
+            db_client,
+            req,
+            data_path,
+            max_bytes,
+            &export_type,
+            is_excel_compat,
+        )
+        .await;
     }
 
     let headers = fetch_table_columns(db_client.mysql_pool()?, &req.table_name)
@@ -2185,12 +2526,124 @@ pub async fn run_export_job(
     })
 }
 
+/// PostgreSQL / SQLite 导入：把 JSON 行内联成 SQL 字面量，分批 INSERT。
+///
+/// 与 MySQL 路径的差异：不使用占位符绑定（统一查询层只接受完整 SQL），
+/// 字面量由 `format_sql_value` 转义；布尔输出 TRUE/FALSE，对象/数组按 JSON 文本。
+async fn run_import_job_text_protocol(
+    db_client: &DbClient,
+    state: &AppState,
+    job_id: &str,
+    req: ImportJobStartRequest,
+) -> Result<serde_json::Value, AppError> {
+    let db_type = db_client.db_type.clone();
+    let table_ident = core_lib::sql_util::quote_table_ref_checked(&req.table_name, &db_type)
+        .map_err(AppError::BadRequest)?;
+
+    let mapped_cols: Vec<(String, String)> = req
+        .mapping
+        .into_iter()
+        .filter(|(_, src)| !src.is_empty())
+        .collect();
+    if mapped_cols.is_empty() {
+        return Err(AppError::BadRequest("No columns mapped".to_string()));
+    }
+    let db_col_names: Vec<String> = mapped_cols
+        .iter()
+        .map(|(db, _)| crate::quote_ident_for(&db_type, db))
+        .collect::<Result<_, _>>()?;
+    let col_list = db_col_names.join(", ");
+    let total = req.data.len() as u64;
+    let batch_size = 200usize;
+    let mut inserted: u64 = 0;
+    let mut errors: u64 = 0;
+    let mut details: Vec<String> = Vec::new();
+    let mut batch_values: Vec<String> = Vec::new();
+
+    for (idx, row) in req.data.iter().enumerate() {
+        let values: Vec<String> = mapped_cols
+            .iter()
+            .map(|(_, src)| match row.get(src) {
+                Some(v) => core_lib::sql_util::format_sql_value(v),
+                None => "NULL".to_string(),
+            })
+            .collect();
+        batch_values.push(format!("({})", values.join(", ")));
+
+        let is_last = idx + 1 == req.data.len();
+        if batch_values.len() >= batch_size || is_last {
+            let batch_start = idx + 1 - batch_values.len();
+            let sql = format!(
+                "INSERT INTO {} ({}) VALUES {}",
+                table_ident,
+                col_list,
+                batch_values.join(", ")
+            );
+            match db_client.pool.execute_affected(&sql).await {
+                Ok(_) => inserted += batch_values.len() as u64,
+                Err(_err) if req.skip_errors => {
+                    // 逐行重试，只跳过真正失败的行
+                    for (offset, chunk) in batch_values.iter().enumerate() {
+                        let row_sql = format!(
+                            "INSERT INTO {} ({}) VALUES {}",
+                            table_ident, col_list, chunk
+                        );
+                        match db_client.pool.execute_affected(&row_sql).await {
+                            Ok(_) => inserted += 1,
+                            Err(row_err) => {
+                                errors += 1;
+                                details.push(format!(
+                                    "Row {}: {}",
+                                    batch_start + offset + 1,
+                                    row_err
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    return Err(AppError::BadRequest(format!(
+                        "Batch insert failed at row {}: {}",
+                        batch_start + 1,
+                        err
+                    )));
+                }
+            }
+            batch_values.clear();
+            if (idx + 1) % 200 == 0 {
+                let processed = (idx + 1) as u64;
+                update_tool_job(state, job_id, |j| {
+                    j.progress.current = processed;
+                })
+                .await;
+            }
+        }
+    }
+
+    update_tool_job(state, job_id, |j| {
+        j.progress.current = total;
+    })
+    .await;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "inserted": inserted,
+        "errors": errors,
+        "total": total,
+        "error_details": details,
+    }))
+}
+
 pub async fn run_import_job(
     db_client: &DbClient,
     state: &AppState,
     job_id: &str,
     req: ImportJobStartRequest,
 ) -> Result<serde_json::Value, AppError> {
+    // PostgreSQL / SQLite：按字面量批量 INSERT（统一查询层执行）。
+    if !matches!(db_client.db_type, DbType::MySQL | DbType::MariaDB) {
+        return run_import_job_text_protocol(db_client, state, job_id, req).await;
+    }
     let table_name = req.table_name;
 
     let mapped_cols: Vec<(String, String)> = req
@@ -2346,13 +2799,14 @@ pub async fn run_import_sql_job(
     })
     .await;
 
-    let result = sqlx::query(&req.sql)
-        .execute(db_client.mysql_pool()?)
+    let affected = db_client
+        .pool
+        .execute_affected(&req.sql)
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
     Ok(serde_json::json!({
-        "affected_rows": result.rows_affected()
+        "affected_rows": affected
     }))
 }
 

@@ -406,7 +406,7 @@ async fn import_data(
 }
 
 /// 按引擎引用列名 / 表名。
-fn quote_ident_for(
+pub(crate) fn quote_ident_for(
     db_type: &core_lib::config::DbType,
     s: &str,
 ) -> Result<String, AppError> {
@@ -2735,7 +2735,25 @@ async fn export_data(
         tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(100);
 
     let spawn_table_name = table_name.clone();
+    let spawn_safe_table = safe_table.clone();
     let spawn_export_type = export_type.clone();
+    let spawn_quoted_headers: Vec<String> = if is_mysql {
+        Vec::new()
+    } else {
+        // PostgreSQL / SQLite：SQL 导出必须引用列名，否则特殊字符列名会生成非法 SQL。
+        prefetched
+            .as_ref()
+            .map(|(headers, _)| {
+                headers
+                    .iter()
+                    .map(|h| {
+                        core_lib::sql_util::quote_ident_pg_checked(h)
+                            .unwrap_or_else(|_| core_lib::sql_util::quote_ident_pg(h))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     tokio::spawn(async move {
         if let Some((headers, rows)) = prefetched {
             let mut is_first_json = true;
@@ -2748,10 +2766,12 @@ async fn export_data(
                         .await;
                 } else if spawn_export_type == "sql" {
                     let _ = tx
-                        .send(Ok(axum::body::Bytes::from(DataExporter::sql_header(
-                            &spawn_table_name,
-                            &headers,
-                        ))))
+                        .send(Ok(axum::body::Bytes::from(
+                            DataExporter::sql_header_quoted(
+                                &spawn_safe_table,
+                                &spawn_quoted_headers,
+                            ),
+                        )))
                         .await;
                 }
             }
@@ -2770,7 +2790,7 @@ async fn export_data(
                 } else if spawn_export_type == "sql" {
                     if let Some(prev) = previous_row.take() {
                         let _ = tx
-                            .send(Ok(axum::body::Bytes::from(DataExporter::sql_row(
+                            .send(Ok(axum::body::Bytes::from(DataExporter::sql_row_literal(
                                 &headers, &prev, false,
                             ))))
                             .await;
@@ -2793,7 +2813,7 @@ async fn export_data(
             if spawn_export_type == "sql" {
                 if let Some(prev) = previous_row {
                     let _ = tx
-                        .send(Ok(axum::body::Bytes::from(DataExporter::sql_row(
+                        .send(Ok(axum::body::Bytes::from(DataExporter::sql_row_literal(
                             &headers, &prev, true,
                         ))))
                         .await;
@@ -2862,7 +2882,7 @@ async fn export_data(
                 } else if spawn_export_type == "sql" {
                     if let Some(prev) = previous_row.take() {
                         let _ = tx
-                            .send(Ok(axum::body::Bytes::from(DataExporter::sql_row(
+                            .send(Ok(axum::body::Bytes::from(DataExporter::sql_row_literal(
                                 &headers, &prev, false,
                             ))))
                             .await;

@@ -417,7 +417,8 @@ impl DbPool {
     pub async fn execute_affected(&self, sql: &str) -> Result<u64, DbError> {
         match self {
             DbPool::MySQL(p) => Ok(sqlx::query(sql).execute(p).await?.rows_affected()),
-            DbPool::Postgres(p) => Ok(sqlx::query(sql).execute(p).await?.rows_affected()),
+            // 简单查询协议支持一个脚本里的多条语句（导出文件本身就是多行 INSERT）。
+            DbPool::Postgres(p) => Ok(sqlx::raw_sql(sql).execute(p).await?.rows_affected()),
             DbPool::SQLite(p) => Ok(sqlx::query(sql).execute(p).await?.rows_affected()),
         }
     }

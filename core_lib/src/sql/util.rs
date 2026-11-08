@@ -427,6 +427,30 @@ fn pg_cell_fallback(
     }
 }
 
+/// NUMERIC 文本能否用 f64 精确表达。
+///
+/// 比较方式是「数值相等」而不是字面相等：`1.50` 与 `1.5` 视为同一数值，
+/// 只有 f64 丢精度（如 `1234567890123456789.123456789`）时才判为不相等。
+fn decimal_text_matches_f64(text: &str, value: f64) -> bool {
+    let printed = format!("{}", value);
+    normalize_decimal_text(&printed) == normalize_decimal_text(text)
+}
+
+/// 去掉小数部分末尾无意义的 0 与单独的 `.`，便于数值文本比较。
+fn normalize_decimal_text(s: &str) -> String {
+    let s = s.trim();
+    if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+        return s.trim_start_matches('+').to_string();
+    }
+    if s.contains('e') || s.contains('E') {
+        // 科学计数法不在此做规范化，交给调用方按字符串处理。
+        return s.to_string();
+    }
+    let trimmed = s.trim_end_matches('0');
+    let trimmed = trimmed.trim_end_matches('.');
+    trimmed.trim_start_matches('+').to_string()
+}
+
 fn pg_unmapped_value(type_name: &str, text: Option<&str>, encoding: &str) -> Value {
     let mut map = serde_json::Map::new();
     map.insert(
@@ -490,14 +514,17 @@ pub fn pg_cell_to_value_with_catalog(
     if let Ok(v) = row.try_get::<Option<Vec<bool>>, _>(idx) {
         return serde_json::json!(v);
     }
-    // NUMERIC / DECIMAL：sqlx 不把 NUMERIC 解码为 f64，需要 BigDecimal；
-    // 与 MySQL DECIMAL 的既有行为一致，输出为 JSON number（超范围时退回字符串）。
+    // NUMERIC / DECIMAL：sqlx 不把 NUMERIC 解码为 f64，需要 BigDecimal。
+    // f64 能精确还原时输出 JSON number（与 MySQL DECIMAL 行为一致），
+    // 超出 f64 精度时退回字符串，避免高精度数值在导出/往返中丢位。
     if let Ok(v) = row.try_get::<Option<sqlx::types::BigDecimal>, _>(idx) {
         return match v {
             Some(v) => {
                 let text = v.to_string();
                 match text.parse::<f64>() {
-                    Ok(f) if f.is_finite() => serde_json::json!(f),
+                    Ok(f) if f.is_finite() && decimal_text_matches_f64(&text, f) => {
+                        serde_json::json!(f)
+                    }
                     _ => serde_json::json!(text),
                 }
             }
@@ -973,6 +1000,18 @@ mod tests {
         assert!(!pg_type_is_unresolved(&int4));
         let text = <String as Type<sqlx::Postgres>>::type_info();
         assert!(!pg_type_is_unresolved(&text));
+    }
+
+    #[test]
+    fn decimal_precision_detects_f64_loss() {
+        // f64 能精确表达（1.50 与 1.5 视为同一数值）
+        assert!(decimal_text_matches_f64("1.50", 1.5));
+        assert!(decimal_text_matches_f64("123.45", 123.45));
+        assert!(decimal_text_matches_f64("100", 100.0));
+        // 超出 f64 精度：必须退回字符串
+        let precise = "1234567890123456789.123456789012345678";
+        let f = precise.parse::<f64>().unwrap();
+        assert!(!decimal_text_matches_f64(precise, f));
     }
 
     #[test]
