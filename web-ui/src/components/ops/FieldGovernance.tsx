@@ -15,6 +15,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { api } from '../../api'
+import type { EmptyStringPolicy, FieldDiffPage, FieldTargetColumn } from '../../api'
 import { tr } from '../../i18n'
 import type { SchemaResponse, TableWithDetails } from '../../types'
 
@@ -181,6 +182,8 @@ interface FieldGovernanceAnalysis {
   declaration_evidence?: DeclarationEvidence[]
   target_table: string
   target_exists: boolean
+  empty_string_policy?: EmptyStringPolicy
+  target_columns?: FieldTargetColumn[]
   risks: FieldRisk[]
   risk_summary: RiskSummary
   scripts: ManualScript[]
@@ -288,6 +291,7 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
   const [column, setColumn] = useState('')
   const [profileMode, setProfileMode] = useState<'auto' | 'full' | 'sampled'>('auto')
   const [samplePerMille, setSamplePerMille] = useState('100')
+  const [emptyStringPolicy, setEmptyStringPolicy] = useState<EmptyStringPolicy>('preserve')
 
   const [targetTable, setTargetTable] = useState('')
   const [pkColumn, setPkColumn] = useState('')
@@ -302,6 +306,13 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
   const [notice, setNotice] = useState('')
   const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null)
   const [copiedScript, setCopiedScript] = useState('')
+
+  const [diffPhase, setDiffPhase] = useState<'v2' | 'v3' | 'v4'>('v4')
+  const [diffPages, setDiffPages] = useState<FieldDiffPage[]>([])
+  const [diffIndex, setDiffIndex] = useState(0)
+  const [diffBusy, setDiffBusy] = useState(false)
+  const [diffError, setDiffError] = useState('')
+  const [diffCopied, setDiffCopied] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -410,6 +421,7 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
         declarations: payloadDeclarations,
         profile_mode: profileMode,
         sample_per_mille: profileMode === 'sampled' ? Number(samplePerMille) || undefined : undefined,
+        empty_string_policy: emptyStringPolicy,
       })
       const extra = resp?.evidence?.extra || null
       if (!extra) {
@@ -417,6 +429,9 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
         return
       }
       setAnalysis(extra)
+      setDiffPages([])
+      setDiffIndex(0)
+      setDiffError('')
       setNotice(
         tr(
           `分析完成：阻断 ${extra.risk_summary.block} / 高风险 ${extra.risk_summary.high} / 提示 ${extra.risk_summary.info}`,
@@ -454,10 +469,111 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
     setDeclarations((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)))
   }
 
+  const buildDiffRequest = (
+    phase: 'v2' | 'v3' | 'v4',
+    lastPk?: string | null,
+    pageSize = 100,
+  ) => {
+    if (!analysis?.column) return null
+    return {
+      db_id: dbId,
+      table: analysis.table,
+      column: analysis.column,
+      target_table: analysis.target_table,
+      pk_column: pkColumn.trim() || analysis.dependencies.single_column_pk || undefined,
+      target_columns: analysis.target_columns || [],
+      empty_string_policy: analysis.empty_string_policy || 'preserve',
+      phase,
+      last_pk: lastPk || null,
+      page_size: pageSize,
+    }
+  }
+
+  const loadFirstDiffPage = async () => {
+    const request = buildDiffRequest(diffPhase)
+    if (!request) {
+      setDiffError(tr('请先选择源列并完成分析', 'Select a source column and run analysis first'))
+      return
+    }
+    setDiffBusy(true)
+    setDiffError('')
+    setDiffCopied('')
+    try {
+      const page = await api.opsFieldDiffPage(request)
+      setDiffPages([page])
+      setDiffIndex(0)
+    } catch (err) {
+      setDiffError(describeError(err))
+    } finally {
+      setDiffBusy(false)
+    }
+  }
+
+  const loadNextDiffPage = async () => {
+    const current = diffPages[diffIndex]
+    if (!current?.has_more || !current.next_last_pk) return
+    const request = buildDiffRequest(diffPhase, current.next_last_pk)
+    if (!request) return
+    setDiffBusy(true)
+    setDiffError('')
+    try {
+      const page = await api.opsFieldDiffPage(request)
+      setDiffPages((prev) => [...prev.slice(0, diffIndex + 1), page])
+      setDiffIndex((index) => index + 1)
+    } catch (err) {
+      setDiffError(describeError(err))
+    } finally {
+      setDiffBusy(false)
+    }
+  }
+
+  const copyDiffPks = async (pks: string[], label: string) => {
+    const ok = await copyText(pks.join('\n'))
+    if (!ok) {
+      setDiffError(tr('复制失败，请手动选择主键', 'Copy failed; select the primary keys manually'))
+      return
+    }
+    setDiffCopied(label)
+    window.setTimeout(() => setDiffCopied(''), 2000)
+  }
+
+  const copyAllDiffPks = async () => {
+    if (!analysis?.column) return
+    setDiffBusy(true)
+    setDiffError('')
+    setDiffCopied('')
+    try {
+      const all: string[] = []
+      let lastPk: string | null = null
+      for (let page = 0; ; page += 1) {
+        if (page >= 10_000) {
+          throw new Error(
+            tr(
+              '差异主键超过 1000 万条，已中止复制；请缩小范围',
+              'More than 10 million diff PKs; copy aborted, narrow the scope'
+            )
+          )
+        }
+        const request = buildDiffRequest(diffPhase, lastPk, 1000)
+        if (!request) return
+        const result = await api.opsFieldDiffPage(request)
+        all.push(...result.pks)
+        if (!result.has_more || !result.next_last_pk) break
+        lastPk = result.next_last_pk
+      }
+      await copyDiffPks(all, 'all')
+    } catch (err) {
+      setDiffError(describeError(err))
+    } finally {
+      setDiffBusy(false)
+    }
+  }
+
   const blockRisks = (analysis?.risks || []).filter((risk) => risk.level === 'block')
   const highRisks = (analysis?.risks || []).filter((risk) => risk.level === 'high')
   const infoRisks = (analysis?.risks || []).filter((risk) => risk.level === 'info')
   const irreversibleScripts = (analysis?.scripts || []).filter((script) => script.irreversible)
+  const currentDiffPage = diffPages[diffIndex]
 
   return (
     <div className="flex flex-col gap-4">
@@ -590,6 +706,23 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
               />
             </div>
           )}
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-400">{tr('空串策略', 'Empty string policy')}</label>
+              <select
+                value={emptyStringPolicy}
+                onChange={(event) => setEmptyStringPolicy(event.target.value as EmptyStringPolicy)}
+                className="h-8 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none"
+              >
+                <option value="preserve">{tr('保留空串（默认）', 'Preserve (default)')}</option>
+                <option value="to_null">{tr('空串转 NULL（高风险）', 'Convert to NULL (high risk)')}</option>
+                <option value="block">{tr('命中空串即阻断', 'Block on empty string')}</option>
+              </select>
+            </div>
+            <span className="text-[11px] text-gray-500">
+              {tr('空串与 SQL NULL 严格区分，不会被静默合并。', 'Empty string and SQL NULL are kept distinct; no silent conversion.')}
+            </span>
+          </div>
           <label className="flex items-center gap-2 text-xs text-gray-400">
             <input type="checkbox" checked={residualJson} onChange={(event) => setResidualJson(event.target.checked)} />
             {tr('允许 residual JSON 兜底', 'Allow residual JSON column')}
@@ -1141,6 +1274,121 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
               <div className="mt-2 text-gray-500">{analysis.dry_run.note}</div>
             </div>
           </div>
+
+          {analysis.column && (analysis.target_columns || []).length > 0 && (
+            <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
+              <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-white">
+                <FileCode2 className="h-4 w-4 text-amber-400" />
+                {tr('差异主键分页（V2/V3/V4，只读）', 'Diff primary-key pagination (V2/V3/V4, read-only)')}
+              </h3>
+              <p className="text-[11px] text-gray-500">
+                {tr(
+                  '差异总数由服务端 COUNT 返回；按主键区间翻页（页大小 100），不再用固定 LIMIT 100 静默截断。',
+                  'Total diffs come from a server-side COUNT; pages advance by primary-key interval (page size 100), never a silent LIMIT 100.'
+                )}
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {(['v2', 'v3', 'v4'] as const).map((phase) => (
+                  <button
+                    key={phase}
+                    onClick={() => {
+                      setDiffPhase(phase)
+                      setDiffPages([])
+                      setDiffIndex(0)
+                      setDiffError('')
+                    }}
+                    className={`rounded border px-2 py-1 text-xs ${
+                      diffPhase === phase
+                        ? 'border-blue-500/60 bg-blue-500/10 text-blue-300'
+                        : 'border-dark-border text-gray-400 hover:bg-dark-bg'
+                    }`}
+                  >
+                    {phase.toUpperCase()}
+                    {' · '}
+                    {phase === 'v2'
+                      ? tr('源有目标缺', 'missing in target')
+                      : phase === 'v3'
+                        ? tr('目标多余', 'extra in target')
+                        : tr('逐行不一致', 'row mismatch')}
+                  </button>
+                ))}
+                <button
+                  onClick={() => void loadFirstDiffPage()}
+                  disabled={diffBusy}
+                  className="flex items-center gap-1 rounded border border-dark-border px-2 py-1 text-xs text-gray-300 hover:bg-dark-bg disabled:opacity-50"
+                >
+                  {diffBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                  {tr('查询差异', 'Query diffs')}
+                </button>
+                <button
+                  onClick={() => setDiffIndex((index) => Math.max(0, index - 1))}
+                  disabled={diffBusy || diffIndex === 0}
+                  className="rounded border border-dark-border px-2 py-1 text-xs text-gray-300 hover:bg-dark-bg disabled:opacity-50"
+                >
+                  {tr('上一页', 'Previous')}
+                </button>
+                <button
+                  onClick={() => void loadNextDiffPage()}
+                  disabled={diffBusy || !currentDiffPage?.has_more}
+                  className="rounded border border-dark-border px-2 py-1 text-xs text-gray-300 hover:bg-dark-bg disabled:opacity-50"
+                >
+                  {tr('下一页', 'Next')}
+                </button>
+                <button
+                  onClick={() => currentDiffPage && void copyDiffPks(currentDiffPage.pks, 'page')}
+                  disabled={!currentDiffPage}
+                  className="flex items-center gap-1 rounded border border-dark-border px-2 py-1 text-xs text-gray-300 hover:bg-dark-bg disabled:opacity-50"
+                >
+                  <ClipboardCopy className="h-3.5 w-3.5" />
+                  {diffCopied === 'page' ? tr('已复制本页', 'Page copied') : tr('复制本页主键', 'Copy page PKs')}
+                </button>
+                <button
+                  onClick={() => void copyAllDiffPks()}
+                  disabled={diffBusy || !analysis.column}
+                  className="flex items-center gap-1 rounded border border-amber-500/50 px-2 py-1 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-50"
+                >
+                  <ClipboardCopy className="h-3.5 w-3.5" />
+                  {diffCopied === 'all' ? tr('已复制全部', 'All copied') : tr('复制全部差异主键', 'Copy all diff PKs')}
+                </button>
+              </div>
+              {diffError && <div className="mt-2 text-xs text-red-400">{diffError}</div>}
+              {currentDiffPage && (
+                <div className="mt-3 rounded border border-dark-border bg-dark-bg p-3 text-xs">
+                  <div className="flex flex-wrap gap-4 text-gray-300">
+                    <span>
+                      {tr('差异总数', 'Total diffs')}: <span className="font-mono text-white">{currentDiffPage.total}</span>
+                    </span>
+                    <span>
+                      {tr('页码', 'Page')}: <span className="font-mono text-white">{diffIndex + 1}/{diffPages.length}</span>
+                    </span>
+                    <span>
+                      {tr('页大小', 'Page size')}: <span className="font-mono text-white">{currentDiffPage.page_size}</span>
+                    </span>
+                    <span>
+                      {tr('主键', 'PK')}: <span className="font-mono text-white">{currentDiffPage.pk_column}</span>
+                    </span>
+                  </div>
+                  <div className="mt-1 text-gray-400">
+                    {tr('本页主键', 'Page PKs')}: {currentDiffPage.pks.length}
+                    {currentDiffPage.pks.length > 0
+                      ? ` · ${currentDiffPage.pks[0]} ~ ${currentDiffPage.pks[currentDiffPage.pks.length - 1]}`
+                      : ''}
+                  </div>
+                  {currentDiffPage.pks.length > 0 && (
+                    <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-gray-300">
+                      {currentDiffPage.pks.join('\n')}
+                    </pre>
+                  )}
+                  {currentDiffPage.has_more && currentDiffPage.next_last_pk && (
+                    <div className="mt-2 text-gray-500">
+                      {tr('下一页游标（主键区间）', 'Next cursor (PK interval)')}:{' '}
+                      <span className="font-mono">{currentDiffPage.next_last_pk}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

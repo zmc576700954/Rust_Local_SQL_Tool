@@ -197,6 +197,10 @@ pub(crate) struct OpsAnalyzeRequest {
     /// 字段治理：sampled 模式千分比。
     #[serde(default)]
     pub sample_per_mille: Option<u32>,
+    /// 字段治理：空串策略 preserve / to_null / block；缺省 preserve。
+    #[serde(default)]
+    pub empty_string_policy:
+        Option<core_lib::ops::field_migration::types::EmptyStringPolicy>,
 }
 
 impl OpsAnalyzeRequest {
@@ -224,6 +228,7 @@ impl OpsAnalyzeRequest {
                 "declarations": self.declarations,
                 "profile_mode": self.profile_mode,
                 "sample_per_mille": self.sample_per_mille,
+                "empty_string_policy": self.empty_string_policy,
                 "notes": self.notes,
             }));
         }
@@ -324,6 +329,27 @@ pub(crate) async fn ops_analyze(
     Json(req): Json<OpsAnalyzeRequest>,
 ) -> Result<Json<OpsAnalyzeResponse>, AppError> {
     Ok(Json(run_analyze(&state, &headers, req).await?))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct FieldDiffPageBody {
+    #[serde(default)]
+    pub db_id: Option<String>,
+    #[serde(flatten)]
+    pub request: core_lib::ops::field_migration::diff::DiffPageRequest,
+}
+
+/// 字段治理 V2/V3/V4 差异主键分页（只读；返回总数与当前页主键）。
+pub(crate) async fn ops_field_diff_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FieldDiffPageBody>,
+) -> Result<Json<core_lib::ops::field_migration::diff::DiffPage>, AppError> {
+    authorize_write(&state, &headers)?;
+    let ctx = build_ctx(&state, body.db_id.as_deref(), Some(session_id(&headers))).await?;
+    let page =
+        core_lib::ops::field_migration::diff::fetch_page(&ctx, &body.request).await?;
+    Ok(Json(page))
 }
 
 pub(crate) async fn ops_analyze_stream(

@@ -261,6 +261,8 @@ pub async fn collect(
         declaration_evidence,
         target_table,
         target_exists,
+        empty_string_policy: input.empty_string_policy(),
+        target_columns: Vec::new(),
         risks: Vec::new(),
         risk_summary: RiskSummary::default(),
         scripts: Vec::new(),

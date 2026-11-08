@@ -202,6 +202,9 @@ pub fn evaluate(
         evaluate_column(&mut builder, analysis, input, column, policy);
     }
 
+    // ── 空串策略（显式，不允许静默转换）─────────────────────
+    evaluate_empty_string_policy(&mut builder, analysis, input);
+
     // ── 语义声明只增约束 ────────────────────────────────────
     let declarations = analysis.declarations.clone();
     for declaration in &declarations {
@@ -248,6 +251,70 @@ pub fn evaluate(
             || !analysis.dependencies.scan_complete,
         risk_floor: risk_floor.into(),
     };
+}
+
+fn evaluate_empty_string_policy(
+    builder: &mut Builder,
+    analysis: &FieldGovernanceAnalysis,
+    input: &FieldGovernanceInput,
+) {
+    let policy = input.empty_string_policy();
+    let empty_rows: u64 = analysis.columns.iter().map(|column| column.empty_rows).sum();
+    let (level, title, detail, blocks_write, requires_confirmation) = match policy {
+        super::types::EmptyStringPolicy::Preserve => (
+            RiskLevel::Info,
+            "空串策略：保留空串",
+            format!(
+                "策略=preserve；观测空串 {} 行。回填与校验均按原文保留，不使用 NULLIF 抹平。",
+                empty_rows
+            ),
+            false,
+            false,
+        ),
+        super::types::EmptyStringPolicy::ToNull if empty_rows > 0 => (
+            RiskLevel::High,
+            "空串策略：转为 NULL",
+            format!(
+                "策略=to_null；{} 行空串会被显式写成 NULL（违反文档 4.2(1) 默认语义），需要用户确认。",
+                empty_rows
+            ),
+            false,
+            true,
+        ),
+        super::types::EmptyStringPolicy::ToNull => (
+            RiskLevel::Info,
+            "空串策略：转为 NULL（当前无命中）",
+            "策略=to_null；当前数据未观测到空串，但脚本仍会按该策略转换。".into(),
+            false,
+            false,
+        ),
+        super::types::EmptyStringPolicy::Block if empty_rows > 0 => (
+            RiskLevel::Block,
+            "空串策略：命中即阻断",
+            format!(
+                "策略=block；观测空串 {} 行，禁止进入任何写步骤，必须先人工处理空串语义。",
+                empty_rows
+            ),
+            true,
+            true,
+        ),
+        super::types::EmptyStringPolicy::Block => (
+            RiskLevel::Info,
+            "空串策略：命中即阻断（当前无命中）",
+            "策略=block；当前未观测到空串，脚本保持原文但命中即阻断。".into(),
+            false,
+            false,
+        ),
+    };
+    builder.push(
+        "E08_EMPTY_STRING_POLICY",
+        level,
+        title,
+        detail,
+        vec!["E08".into()],
+        blocks_write,
+        requires_confirmation,
+    );
 }
 
 fn evaluate_column(
@@ -1067,6 +1134,8 @@ mod tests {
             declaration_evidence: Vec::new(),
             target_table: "orders_payload_ext".into(),
             target_exists: false,
+            empty_string_policy: crate::ops::field_migration::types::EmptyStringPolicy::Preserve,
+            target_columns: Vec::new(),
             risks: Vec::new(),
             risk_summary: RiskSummary::default(),
             scripts: Vec::new(),
@@ -1137,6 +1206,83 @@ mod tests {
         assert!(has_code(&risks, "E03_SECONDARY_INDEX@payload"));
         assert_eq!(summary.block, 0);
         assert_eq!(summary.high, 1);
+    }
+
+    #[test]
+    fn empty_string_policy_is_explicit_in_risk_report() {
+        let mut analysis = base_analysis();
+        analysis.columns[0].empty_rows = 1000;
+        let input = FieldGovernanceInput {
+            table: "orders".into(),
+            column: Some("payload".into()),
+            empty_string_policy: Some(super::super::types::EmptyStringPolicy::Preserve),
+            ..Default::default()
+        };
+        evaluate(&mut analysis, &input, &OpsPolicy::default());
+        let risk = analysis
+            .risks
+            .iter()
+            .find(|risk| risk.code == "E08_EMPTY_STRING_POLICY")
+            .expect("缺少空串策略风险项");
+        assert_eq!(risk.level, RiskLevel::Info);
+        assert!(risk.detail.contains("preserve"));
+        assert!(!risk.blocks_write);
+    }
+
+    #[test]
+    fn empty_string_policy_to_null_is_high_and_requires_confirmation() {
+        let mut analysis = base_analysis();
+        analysis.columns[0].empty_rows = 1000;
+        let input = FieldGovernanceInput {
+            table: "orders".into(),
+            column: Some("payload".into()),
+            empty_string_policy: Some(super::super::types::EmptyStringPolicy::ToNull),
+            ..Default::default()
+        };
+        evaluate(&mut analysis, &input, &OpsPolicy::default());
+        let risk = analysis
+            .risks
+            .iter()
+            .find(|risk| risk.code == "E08_EMPTY_STRING_POLICY")
+            .expect("缺少空串策略风险项");
+        assert_eq!(risk.level, RiskLevel::High);
+        assert!(risk.requires_user_confirmation);
+    }
+
+    #[test]
+    fn empty_string_policy_block_only_blocks_when_hit() {
+        let mut analysis = base_analysis();
+        analysis.columns[0].empty_rows = 1000;
+        let input = FieldGovernanceInput {
+            table: "orders".into(),
+            column: Some("payload".into()),
+            empty_string_policy: Some(super::super::types::EmptyStringPolicy::Block),
+            ..Default::default()
+        };
+        evaluate(&mut analysis, &input, &OpsPolicy::default());
+        let risk = analysis
+            .risks
+            .iter()
+            .find(|risk| risk.code == "E08_EMPTY_STRING_POLICY")
+            .expect("缺少空串策略风险项");
+        assert_eq!(risk.level, RiskLevel::Block);
+        assert!(risk.blocks_write);
+
+        let mut clean = base_analysis();
+        clean.columns[0].empty_rows = 0;
+        let input = FieldGovernanceInput {
+            table: "orders".into(),
+            column: Some("payload".into()),
+            empty_string_policy: Some(super::super::types::EmptyStringPolicy::Block),
+            ..Default::default()
+        };
+        evaluate(&mut clean, &input, &OpsPolicy::default());
+        let risk = clean
+            .risks
+            .iter()
+            .find(|risk| risk.code == "E08_EMPTY_STRING_POLICY")
+            .expect("缺少空串策略风险项");
+        assert_eq!(risk.level, RiskLevel::Info);
     }
 
     #[test]

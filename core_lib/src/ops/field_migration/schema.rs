@@ -5,11 +5,13 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::sql::util::{quote_ident_mysql, validate_identifier};
 
 use super::types::{ColumnProfile, FieldGovernanceInput, TargetSpec};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetColumn {
     pub name: String,
     pub source_key: Option<String>,

@@ -4,6 +4,7 @@
 //! 不新增任何 `ActionSpec` 写动作，不执行建表/回填/删列。
 
 pub mod dependency;
+pub mod diff;
 pub mod evidence;
 pub mod read_only;
 pub mod risk;
@@ -340,6 +341,8 @@ mod tests {
             declaration_evidence: Vec::new(),
             target_table: "orders_payload_ext".into(),
             target_exists: false,
+            empty_string_policy: EmptyStringPolicy::Preserve,
+            target_columns: Vec::new(),
             risks: vec![FieldRisk {
                 id: "risk-1".into(),
                 code: "E09_INVALID_JSON".into(),

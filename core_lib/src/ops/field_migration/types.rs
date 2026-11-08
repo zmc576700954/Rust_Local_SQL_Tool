@@ -10,6 +10,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::ops::types::hash_json;
 
+use super::schema::TargetColumn;
+
+// ── 空串策略 ───────────────────────────────────────────────
+
+/// 文档 4.2(1)：SQL NULL / 空串 / JSON null 三种语义不可互换。
+/// 默认 `preserve`，任何转换都必须是显式选择，不允许静默抹平。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmptyStringPolicy {
+    /// 保留空串（默认）；回填与校验都按原文比较。
+    #[default]
+    Preserve,
+    /// 显式把空串转成 NULL；高风险，需要用户确认。
+    ToNull,
+    /// 命中空串即阻断，禁止进入写步骤。
+    Block,
+}
+
+impl EmptyStringPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preserve => "preserve",
+            Self::ToNull => "to_null",
+            Self::Block => "block",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Preserve => "保留空串",
+            Self::ToNull => "空串转 NULL",
+            Self::Block => "命中空串即阻断",
+        }
+    }
+}
+
 // ── 输入 ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -31,6 +67,9 @@ pub struct FieldGovernanceInput {
     /// sampled 模式的确定性抽样比例（千分比），受策略上限约束。
     #[serde(default)]
     pub sample_per_mille: Option<u32>,
+    /// 空串处理策略；缺省为 preserve（保留空串）。
+    #[serde(default)]
+    pub empty_string_policy: Option<EmptyStringPolicy>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -55,6 +94,10 @@ impl FieldGovernanceInput {
             self.target = Some(target.normalized());
         }
         self
+    }
+
+    pub fn empty_string_policy(&self) -> EmptyStringPolicy {
+        self.empty_string_policy.unwrap_or_default()
     }
 }
 
@@ -618,6 +661,12 @@ pub struct FieldGovernanceAnalysis {
     pub declaration_evidence: Vec<DeclarationEvidence>,
     pub target_table: String,
     pub target_exists: bool,
+    /// 本次方案采用的空串策略（默认 preserve）。
+    #[serde(default)]
+    pub empty_string_policy: EmptyStringPolicy,
+    /// 脚本实际使用的目标列（含类型），供只读分页校验复用。
+    #[serde(default)]
+    pub target_columns: Vec<TargetColumn>,
     pub risks: Vec<FieldRisk>,
     pub risk_summary: RiskSummary,
     #[serde(default)]

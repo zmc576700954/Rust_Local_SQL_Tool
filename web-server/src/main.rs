@@ -1008,6 +1008,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/ops/analyze", post(ops_handlers::ops_analyze))
         .route(
+            "/ops/field-governance/diff-page",
+            post(ops_handlers::ops_field_diff_page),
+        )
+        .route(
             "/ops/slow-queries",
             get(ops_handlers::ops_slow_queries),
         )
@@ -3356,6 +3360,10 @@ mod tests {
             .route("/tools/go-live/audit", get(go_live_audit_list))
             .route("/ops/session-token", get(ops_handlers::ops_session_token))
             .route("/ops/analyze", post(ops_handlers::ops_analyze))
+            .route(
+                "/ops/field-governance/diff-page",
+                post(ops_handlers::ops_field_diff_page),
+            )
             .route(
                 "/ops/plans/:plan_id/approve",
                 post(ops_handlers::ops_approve),

@@ -263,6 +263,28 @@ interface PerfSyncCheckPayload {
   tier?: string;
 }
 
+export type EmptyStringPolicy = 'preserve' | 'to_null' | 'block'
+
+export interface FieldTargetColumn {
+  name: string
+  source_key?: string | null
+  sql_type: string
+  nullable: boolean
+  required: boolean
+  note?: string | null
+}
+
+export interface FieldDiffPage {
+  phase: string
+  total: number
+  page_size: number
+  pk_column: string
+  last_pk?: string | null
+  next_last_pk?: string | null
+  has_more: boolean
+  pks: string[]
+}
+
 interface TransferConfigPayload {
   source_type: string;
   source_path?: string | null;
@@ -519,7 +541,21 @@ export const api = {
     declarations?: Array<Record<string, unknown>>
     profile_mode?: string
     sample_per_mille?: number
+    empty_string_policy?: EmptyStringPolicy
   }) => client.post('/ops/analyze', payload, { headers: await opsWriteHeaders() }).then(res => res.data),
+  // 字段治理 V2/V3/V4 差异主键分页（只读）
+  opsFieldDiffPage: async (payload: {
+    db_id?: string
+    table: string
+    column: string
+    target_table: string
+    pk_column?: string
+    target_columns: FieldTargetColumn[]
+    empty_string_policy?: EmptyStringPolicy
+    phase: 'v2' | 'v3' | 'v4'
+    last_pk?: string | null
+    page_size?: number
+  }) => client.post('/ops/field-governance/diff-page', payload, { headers: await opsWriteHeaders() }).then(res => res.data as FieldDiffPage),
   opsSlowQueries: async (params: { db_id?: string; sort?: string; limit?: number }) =>
     client.get('/ops/slow-queries', { params, headers: await opsWriteHeaders() }).then(res => res.data),
   opsListPlans: (limit = 20) => client.get('/ops/plans', { params: { limit } }).then(res => res.data),

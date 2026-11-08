@@ -9,7 +9,8 @@ use crate::sql::util::{escape_sql_string, quote_ident_mysql};
 use super::evidence::json_path;
 use super::schema::{build_target_columns, create_table_sql, TargetColumn};
 use super::types::{
-    DryRunCheck, DryRunReport, FieldGovernanceAnalysis, FieldGovernanceInput, ManualScript,
+    DryRunCheck, DryRunReport, EmptyStringPolicy, FieldGovernanceAnalysis, FieldGovernanceInput,
+    ManualScript,
 };
 
 pub fn generate(
@@ -48,6 +49,8 @@ pub fn generate(
         .map(|column| column.column_type.clone())
         .unwrap_or_else(|| "BIGINT".into());
     let target_columns = build_target_columns(input, &profile);
+    analysis.empty_string_policy = input.empty_string_policy();
+    analysis.target_columns = target_columns.clone();
     let source = format!(
         "{}.{}",
         quote_ident_mysql(&analysis.db_name),
@@ -75,6 +78,7 @@ pub fn generate(
         &source_column,
         &pk,
         &target_columns,
+        analysis.empty_string_policy,
     );
     let verify_sql = build_verify_sql(
         &source,
@@ -82,6 +86,7 @@ pub fn generate(
         &source_column,
         &pk,
         &target_columns,
+        analysis.empty_string_policy,
     );
     let rollback_sql = build_rollback_sql(&destination, &pk);
     let retire_sql = build_retire_sql(&source, &source_column, &profile.column);
@@ -113,6 +118,11 @@ pub fn generate(
                 "按主键区间分批；每批独立事务，失败只重跑该批。".into(),
                 "ON DUPLICATE KEY UPDATE 保证幂等。".into(),
                 "必须替换 :last_pk / :end_pk / :batch_size 占位符。".into(),
+                format!(
+                    "空串策略={}（{}）；SQL NULL 与空串语义不同，脚本不得静默转换。",
+                    analysis.empty_string_policy.as_str(),
+                    analysis.empty_string_policy.label()
+                ),
                 if analysis.dependencies.single_column_pk.is_none() {
                     "源表没有单列主键：分片不安全，禁止自动回填。".into()
                 } else {
@@ -130,7 +140,13 @@ pub fn generate(
             irreversible: false,
             notes: vec![
                 "行数 + 主键集合 + 规范化解码逐行比对。".into(),
-                "NULL / 空串 / JSON null 归一化后再比较。".into(),
+                "SQL NULL / 空串 / JSON null 严格区分，不做合并归一。".into(),
+                format!(
+                    "空串策略={}（{}）；页大小由 :page_size 指定，不再固定截断。",
+                    analysis.empty_string_policy.as_str(),
+                    analysis.empty_string_policy.label()
+                ),
+                "差异主键按主键区间分页；:last_pk 传上一页最后一个主键。".into(),
                 "校验失败必须阻断后续下线步骤。".into(),
             ],
         },
@@ -186,21 +202,34 @@ fn build_backfill_sql(
     source_column: &str,
     pk: &str,
     columns: &[TargetColumn],
+    empty_string_policy: EmptyStringPolicy,
 ) -> String {
     let mut select_exprs = vec![pk.to_string()];
     let mut insert_columns = vec![pk.to_string()];
     let mut update_exprs = Vec::new();
     for column in columns {
         insert_columns.push(quote_ident_mysql(&column.name));
-        select_exprs.push(backfill_expr(source_column, column));
+        select_exprs.push(backfill_expr(source_column, column, empty_string_policy));
         update_exprs.push(format!(
             "{} = VALUES({})",
             quote_ident_mysql(&column.name),
             quote_ident_mysql(&column.name)
         ));
     }
+    let policy_comment = match empty_string_policy {
+        EmptyStringPolicy::Preserve => {
+            "-- 空串策略 preserve：保留空串，不使用 NULLIF 抹平；空串与 NULL 是不同语义。\n"
+        }
+        EmptyStringPolicy::ToNull => {
+            "-- 空串策略 to_null：已显式选择把空串转成 NULL（高风险，需用户确认）。\n"
+        }
+        EmptyStringPolicy::Block => {
+            "-- 空串策略 block：命中空串即阻断；存在空串时禁止执行本脚本。\n"
+        }
+    };
     format!(
         "-- 阶段 L3：分批回填（草案；本工具不执行）\n\
+         {policy_comment}\
          -- 每批一个事务；:last_pk / :end_pk / :batch_size 由人工替换。\n\
          INSERT INTO {destination} ({})\n\
          SELECT {}\n\
@@ -226,16 +255,41 @@ fn is_numeric_sql_type(sql_type: &str) -> bool {
     .any(|prefix| upper.starts_with(prefix))
 }
 
-fn backfill_expr(source_column: &str, column: &TargetColumn) -> String {
+fn is_text_sql_type(sql_type: &str) -> bool {
+    let upper = sql_type.trim().to_ascii_uppercase();
+    upper.starts_with("VARCHAR")
+        || upper.starts_with("CHAR")
+        || upper.ends_with("TEXT")
+        || upper.starts_with("TEXT")
+}
+
+/// `to_null` 是唯一允许把空串变成 NULL 的路径；preserve/block 都保持原文。
+fn apply_empty_string_policy(expr: String, policy: EmptyStringPolicy) -> String {
+    match policy {
+        EmptyStringPolicy::ToNull => format!("NULLIF({expr}, '')"),
+        EmptyStringPolicy::Preserve | EmptyStringPolicy::Block => expr,
+    }
+}
+
+fn backfill_expr(
+    source_column: &str,
+    column: &TargetColumn,
+    empty_string_policy: EmptyStringPolicy,
+) -> String {
     let Some(key) = column.source_key.as_deref() else {
-        return source_column.to_string();
+        let raw = source_column.to_string();
+        return if is_text_sql_type(&column.sql_type) {
+            apply_empty_string_policy(raw, empty_string_policy)
+        } else {
+            raw
+        };
     };
     let path = escape_sql_string(&json_path(key));
     let base = format!("JSON_EXTRACT({source_column}, '{path}')");
     let unquoted = format!("JSON_UNQUOTE({base})");
     let upper = column.sql_type.to_ascii_uppercase();
-    let value = if upper.starts_with("VARCHAR") || upper.starts_with("CHAR") || upper.ends_with("TEXT") {
-        format!("NULLIF({unquoted}, '')")
+    let value = if is_text_sql_type(&column.sql_type) {
+        apply_empty_string_policy(unquoted, empty_string_policy)
     } else if upper.starts_with("BIGINT")
         || upper.starts_with("INT")
         || upper.starts_with("SMALLINT")
@@ -261,26 +315,27 @@ fn backfill_expr(source_column: &str, column: &TargetColumn) -> String {
     )
 }
 
-fn build_verify_sql(
-    source: &str,
-    destination: &str,
+fn mismatch_condition(
     source_column: &str,
-    pk: &str,
     columns: &[TargetColumn],
+    empty_string_policy: EmptyStringPolicy,
 ) -> String {
     let mut comparisons = Vec::new();
     for column in columns {
         let target_column = quote_ident_mysql(&column.name);
         if let Some(key) = column.source_key.as_deref() {
             let path = escape_sql_string(&json_path(key));
+            let present = format!(
+                "COALESCE(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}'), 0)"
+            );
             let source_token = format!("JSON_UNQUOTE(JSON_EXTRACT(s.{source_column}, '{path}'))");
             let source_type = format!("JSON_TYPE(JSON_EXTRACT(s.{source_column}, '{path}'))");
             if is_numeric_sql_type(&column.sql_type) {
                 // 文档 4.2(3)：数值按十进制词元比较，禁止先转 f64；
                 // 1 与 1.0 经 DECIMAL 规范化后应判为一致。
                 comparisons.push(format!(
-                    "(COALESCE(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}'), 0) = 0 AND t.{target_column} IS NOT NULL)\n\
-                     OR (COALESCE(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}'), 0) = 1\n\
+                    "({present} = 0 AND t.{target_column} IS NOT NULL)\n\
+                     OR ({present} = 1\n\
                          AND CASE\n\
                            WHEN {source_type} IN ('INTEGER', 'DOUBLE', 'BOOLEAN') THEN\n\
                              t.{target_column} IS NULL\n\
@@ -292,13 +347,49 @@ fn build_verify_sql(
                          END)"
                 ));
             } else {
-                comparisons.push(format!(
-                    "(COALESCE(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}'), 0) = 0 AND t.{target_column} IS NOT NULL)\n\
-                     OR (COALESCE(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}'), 0) = 1\n\
-                         AND COALESCE(NULLIF({source_token}, ''), '<NULL>')\n\
-                           <> COALESCE(CAST(t.{target_column} AS CHAR), '<NULL>'))"
-                ));
+                // 文档 4.2(1)：SQL NULL 与空串严格区分。
+                // 旧写法用 COALESCE(NULLIF(token,''), '<NULL>') 会把两者抹平，
+                // 导致“目标把空串写成 NULL”无法被发现。
+                let strict = match empty_string_policy {
+                    EmptyStringPolicy::ToNull => format!(
+                        "({present} = 0 AND t.{target_column} IS NOT NULL)\n\
+                         OR ({present} = 1 AND (\n\
+                             (({source_token} IS NULL OR {source_token} = '') AND t.{target_column} IS NOT NULL)\n\
+                             OR ({source_token} IS NOT NULL AND {source_token} <> '' AND\n\
+                                 (t.{target_column} IS NULL\n\
+                                  OR CAST(t.{target_column} AS BINARY) <> CAST({source_token} AS BINARY))\n\
+                             )\n\
+                           ))"
+                    ),
+                    EmptyStringPolicy::Preserve | EmptyStringPolicy::Block => format!(
+                        "({present} = 0 AND t.{target_column} IS NOT NULL)\n\
+                         OR ({present} = 1 AND (\n\
+                             ({source_token} IS NULL AND t.{target_column} IS NOT NULL)\n\
+                             OR ({source_token} IS NOT NULL AND\n\
+                                 (t.{target_column} IS NULL\n\
+                                  OR CAST(t.{target_column} AS BINARY) <> CAST({source_token} AS BINARY))\n\
+                             )\n\
+                           ))"
+                    ),
+                };
+                comparisons.push(strict);
             }
+        } else if is_text_sql_type(&column.sql_type) {
+            // 标量列：NULL-safe 且按二进制原文比较，空串 ≠ NULL。
+            let strict = match empty_string_policy {
+                EmptyStringPolicy::ToNull => format!(
+                    "((s.{source_column} IS NULL OR s.{source_column} = '') AND t.{target_column} IS NOT NULL)\n\
+                     OR (s.{source_column} IS NOT NULL AND s.{source_column} <> '' AND\n\
+                         (t.{target_column} IS NULL\n\
+                          OR CAST(s.{source_column} AS BINARY) <> CAST(t.{target_column} AS BINARY)))"
+                ),
+                EmptyStringPolicy::Preserve | EmptyStringPolicy::Block => format!(
+                    "NOT ((s.{source_column} IS NULL AND t.{target_column} IS NULL)\n\
+                          OR (s.{source_column} IS NOT NULL AND t.{target_column} IS NOT NULL\n\
+                              AND CAST(s.{source_column} AS BINARY) = CAST(t.{target_column} AS BINARY)))"
+                ),
+            };
+            comparisons.push(strict);
         } else {
             comparisons.push(format!(
                 "COALESCE(CAST(s.{source_column} AS CHAR), '<NULL>') \
@@ -306,26 +397,129 @@ fn build_verify_sql(
             ));
         }
     }
-    let mismatch = if comparisons.is_empty() {
+    if comparisons.is_empty() {
         "FALSE".to_string()
     } else {
         comparisons.join("\n       OR ")
-    };
+    }
+}
+
+/// V2/V3/V4 的差异主键选择语句；调用方可再追加主键区间与页大小。
+pub(crate) fn diff_select(
+    phase: &str,
+    source: &str,
+    destination: &str,
+    source_column: &str,
+    pk: &str,
+    columns: &[TargetColumn],
+    empty_string_policy: EmptyStringPolicy,
+) -> String {
+    match phase {
+        "v2" => format!(
+            "SELECT s.{pk} AS pk_value FROM {source} s LEFT JOIN {destination} t ON t.{pk} = s.{pk} \
+             WHERE t.{pk} IS NULL"
+        ),
+        "v3" => format!(
+            "SELECT t.{pk} AS pk_value FROM {destination} t LEFT JOIN {source} s ON s.{pk} = t.{pk} \
+             WHERE s.{pk} IS NULL"
+        ),
+        "v4" => {
+            let mismatch = mismatch_condition(source_column, columns, empty_string_policy);
+            format!(
+                "SELECT s.{pk} AS pk_value FROM {source} s JOIN {destination} t ON t.{pk} = s.{pk} \
+                 WHERE {mismatch}"
+            )
+        }
+        _ => format!("SELECT s.{pk} AS pk_value FROM {source} s WHERE 0"),
+    }
+}
+
+/// 差异总数（不截断）。
+pub(crate) fn diff_total_sql(select: &str) -> String {
+    format!("SELECT COUNT(*) AS diff_total FROM (\n{select}\n) AS diff")
+}
+
+/// 按主键区间分页；`last_pk` 传上一页最后一个主键（首次为空），`page_size` 为页大小。
+pub(crate) fn diff_page_sql(
+    select: &str,
+    key_expr: &str,
+    last_pk: Option<&str>,
+    page_size: &str,
+) -> String {
+    match last_pk {
+        Some(last) => format!(
+            "{select}\n  AND {key_expr} > {last}\nORDER BY {key_expr}\nLIMIT {page_size}"
+        ),
+        None => format!("{select}\nORDER BY {key_expr}\nLIMIT {page_size}"),
+    }
+}
+
+fn build_verify_sql(
+    source: &str,
+    destination: &str,
+    source_column: &str,
+    pk: &str,
+    columns: &[TargetColumn],
+    empty_string_policy: EmptyStringPolicy,
+) -> String {
+    let v2 = diff_select(
+        "v2",
+        source,
+        destination,
+        source_column,
+        pk,
+        columns,
+        empty_string_policy,
+    );
+    let v3 = diff_select(
+        "v3",
+        source,
+        destination,
+        source_column,
+        pk,
+        columns,
+        empty_string_policy,
+    );
+    let v4 = diff_select(
+        "v4",
+        source,
+        destination,
+        source_column,
+        pk,
+        columns,
+        empty_string_policy,
+    );
+    let policy_note = format!(
+        "空串策略={}（{}）；SQL NULL / 空串 / JSON null 严格区分。",
+        empty_string_policy.as_str(),
+        empty_string_policy.label()
+    );
+    let s_key = format!("s.{pk}");
+    let t_key = format!("t.{pk}");
     format!(
         "-- 阶段 verify：只读校验，不写库。\n\
+         -- {policy_note}\n\
          -- V1 行数（源表与目标表；目标表可能只含已回填部分）\n\
          SELECT (SELECT COUNT(*) FROM {source}) AS source_rows, \
          (SELECT COUNT(*) FROM {destination}) AS target_rows;\n\n\
-         -- V2 源表有、目标表缺失的主键（最多 100 条）\n\
-         SELECT s.{pk} FROM {source} s LEFT JOIN {destination} t ON t.{pk} = s.{pk} \
-         WHERE t.{pk} IS NULL LIMIT 100;\n\n\
-         -- V3 目标表多余的主键（最多 100 条）\n\
-         SELECT t.{pk} FROM {destination} t LEFT JOIN {source} s ON s.{pk} = t.{pk} \
-         WHERE s.{pk} IS NULL LIMIT 100;\n\n\
-         -- V4 规范化后逐行比对（NULL / 空串 / JSON null 归一化；最多 100 条）\n\
-         SELECT s.{pk} FROM {source} s JOIN {destination} t ON t.{pk} = s.{pk}\n\
-         WHERE {mismatch}\n\
-         LIMIT 100;"
+         -- V2 count（源表有、目标表缺失的差异总数；不截断）\n\
+         {};\n\n\
+         -- V2 page（差异主键分页；:last_pk 传上一页最后一个主键，首次从最小主键开始）\n\
+         {};\n\n\
+         -- V3 count（目标表多余主键的差异总数；不截断）\n\
+         {};\n\n\
+         -- V3 page（差异主键分页；:last_pk 同上）\n\
+         {};\n\n\
+         -- V4 count（规范化逐行比对的差异总数；不截断）\n\
+         {};\n\n\
+         -- V4 page（差异主键分页；:last_pk 同上）\n\
+         {};",
+        diff_total_sql(&v2),
+        diff_page_sql(&v2, &s_key, Some(":last_pk"), ":page_size"),
+        diff_total_sql(&v3),
+        diff_page_sql(&v3, &t_key, Some(":last_pk"), ":page_size"),
+        diff_total_sql(&v4),
+        diff_page_sql(&v4, &s_key, Some(":last_pk"), ":page_size"),
     )
 }
 
@@ -491,6 +685,8 @@ mod tests {
             declaration_evidence: Vec::new(),
             target_table: "orders_payload_ext".into(),
             target_exists: false,
+            empty_string_policy: FieldGovernanceInput::default().empty_string_policy(),
+            target_columns: Vec::new(),
             risks: Vec::new(),
             risk_summary: RiskSummary::default(),
             scripts: Vec::new(),
@@ -610,6 +806,78 @@ mod tests {
         // 否则“源 NULL + 目标非 NULL”会被漏判。
         assert!(verify.sql.contains("COALESCE(JSON_CONTAINS_PATH(s.`payload`"));
         assert!(!verify.sql.contains("CAST(t.`theme` AS DECIMAL"));
+    }
+
+    #[test]
+    fn backfill_preserves_empty_string_by_default() {
+        let mut analysis = analysis();
+        generate(&snapshot(), &mut analysis, &input());
+        let backfill = analysis
+            .scripts
+            .iter()
+            .find(|script| script.kind == "backfill")
+            .unwrap();
+        assert!(backfill.sql.contains("空串策略 preserve"));
+        assert!(!backfill.sql.contains("NULLIF(JSON_UNQUOTE"));
+        assert!(!backfill.sql.contains("NULLIF(`payload`"));
+        assert!(backfill.sql.contains("JSON_UNQUOTE(JSON_EXTRACT(`payload`"));
+        assert_eq!(analysis.empty_string_policy, EmptyStringPolicy::Preserve);
+        assert!(!analysis.target_columns.is_empty());
+    }
+
+    #[test]
+    fn backfill_to_null_is_explicit_and_never_silent() {
+        let mut analysis = analysis();
+        let mut inp = input();
+        inp.empty_string_policy = Some(EmptyStringPolicy::ToNull);
+        generate(&snapshot(), &mut analysis, &inp);
+        let backfill = analysis
+            .scripts
+            .iter()
+            .find(|script| script.kind == "backfill")
+            .unwrap();
+        assert!(backfill.sql.contains("空串策略 to_null"));
+        assert!(backfill.sql.contains("NULLIF(JSON_UNQUOTE(JSON_EXTRACT(`payload`"));
+        assert_eq!(analysis.empty_string_policy, EmptyStringPolicy::ToNull);
+    }
+
+    #[test]
+    fn backfill_block_keeps_source_but_marks_script_blocked() {
+        let mut analysis = analysis();
+        let mut inp = input();
+        inp.empty_string_policy = Some(EmptyStringPolicy::Block);
+        generate(&snapshot(), &mut analysis, &inp);
+        let backfill = analysis
+            .scripts
+            .iter()
+            .find(|script| script.kind == "backfill")
+            .unwrap();
+        assert!(backfill.sql.contains("空串策略 block"));
+        assert!(!backfill.sql.contains("NULLIF(JSON_UNQUOTE"));
+        assert!(!backfill.sql.contains("NULLIF(`payload`"));
+    }
+
+    #[test]
+    fn verify_sql_paginates_without_fixed_limit_and_keeps_empty_vs_null() {
+        let mut analysis = analysis();
+        generate(&snapshot(), &mut analysis, &input());
+        let verify = analysis
+            .scripts
+            .iter()
+            .find(|script| script.kind == "verify")
+            .unwrap();
+        assert!(!verify.sql.contains("LIMIT 100;"));
+        assert!(verify.sql.contains("-- V2 count"));
+        assert!(verify.sql.contains("-- V2 page"));
+        assert!(verify.sql.contains("-- V3 count"));
+        assert!(verify.sql.contains("-- V4 count"));
+        assert!(verify.sql.contains("COUNT(*) AS diff_total"));
+        assert!(verify.sql.contains(":last_pk"));
+        assert!(verify.sql.contains(":page_size"));
+        // 字符串列不再用 COALESCE(NULLIF(...), '<NULL>') 抹平空串与 NULL。
+        assert!(!verify
+            .sql
+            .contains("COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.`payload`, '$.\"theme\"'))"));
     }
 
     #[test]
