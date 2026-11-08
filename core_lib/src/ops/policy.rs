@@ -41,6 +41,12 @@ pub struct OpsPolicy {
     /// 字段治理：最多分析多少个 JSON key（超过则视为结构不稳定）。
     #[serde(default = "default_field_max_json_keys")]
     pub field_max_json_keys: usize,
+    /// 字段治理 S2：是否允许分批回填。默认仅在非生产环境开启。
+    #[serde(default = "default_field_allow_backfill")]
+    pub field_allow_backfill: bool,
+    /// 字段治理 S2：生产环境回填的独立开关；默认关闭。
+    #[serde(default)]
+    pub field_allow_prod_backfill: bool,
 }
 
 fn default_field_profile_max_rows() -> u64 {
@@ -67,6 +73,10 @@ fn default_field_max_json_keys() -> usize {
     100
 }
 
+fn default_field_allow_backfill() -> bool {
+    true
+}
+
 impl Default for OpsPolicy {
     fn default() -> Self {
         Self {
@@ -84,6 +94,8 @@ impl Default for OpsPolicy {
             field_migration_max_bytes: default_field_migration_max_bytes(),
             field_sample_per_mille: default_field_sample_per_mille(),
             field_max_json_keys: default_field_max_json_keys(),
+            field_allow_backfill: default_field_allow_backfill(),
+            field_allow_prod_backfill: false,
         }
     }
 }
@@ -120,6 +132,12 @@ impl OpsPolicy {
         if env_flag("LOCAL_AI_SQL_OPS_ALLOW_PROD_APPLY") {
             self.allow_prod_apply = true;
         }
+        if env_flag("LOCAL_AI_SQL_OPS_ALLOW_BACKFILL") {
+            self.field_allow_backfill = true;
+        }
+        if env_flag("LOCAL_AI_SQL_OPS_ALLOW_PROD_BACKFILL") {
+            self.field_allow_prod_backfill = true;
+        }
         self
     }
 
@@ -147,6 +165,39 @@ impl OpsPolicy {
             return Err(OpsError::Policy(
                 "生产环境默认禁止一键执行。需要显式开启 allow_prod_apply。".into(),
             ));
+        }
+        Ok(())
+    }
+
+    /// 字段回填闸门：与索引一键执行相互独立。
+    /// 默认仅非生产环境可用；生产必须同时开启 `field_allow_prod_backfill`
+    /// 并在请求中显式确认生产环境。
+    pub fn authorize_backfill(
+        &self,
+        read_only_connection: bool,
+        production_confirmed: bool,
+    ) -> Result<(), OpsError> {
+        if read_only_connection {
+            return Err(OpsError::Policy(
+                "当前连接为只读模式，禁止执行字段回填".into(),
+            ));
+        }
+        if !self.field_allow_backfill {
+            return Err(OpsError::Policy(
+                "字段回填未开启（field_allow_backfill=false）".into(),
+            ));
+        }
+        if self.is_prod() {
+            if !self.field_allow_prod_backfill {
+                return Err(OpsError::Policy(
+                    "生产环境默认禁止字段回填。需要显式开启 field_allow_prod_backfill。".into(),
+                ));
+            }
+            if !production_confirmed {
+                return Err(OpsError::Policy(
+                    "生产环境回填需要在请求中显式确认 production_confirmed=true".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -186,5 +237,26 @@ mod tests {
         assert!(policy.authorize_apply(false, false).is_err());
         policy.allow_prod_apply = true;
         assert!(policy.authorize_apply(false, false).is_ok());
+    }
+
+    #[test]
+    fn backfill_is_enabled_by_default_only_outside_prod() {
+        let policy = OpsPolicy::default();
+        assert!(policy.authorize_backfill(false, false).is_ok());
+        assert!(policy.authorize_backfill(true, false).is_err());
+
+        let mut prod = OpsPolicy {
+            environment: "prod".into(),
+            ..Default::default()
+        };
+        assert!(prod.authorize_backfill(false, false).is_err());
+        prod.field_allow_prod_backfill = true;
+        // 生产开关打开后仍要求请求侧显式确认。
+        assert!(prod.authorize_backfill(false, false).is_err());
+        assert!(prod.authorize_backfill(false, true).is_ok());
+
+        let mut disabled = OpsPolicy::default();
+        disabled.field_allow_backfill = false;
+        assert!(disabled.authorize_backfill(false, false).is_err());
     }
 }

@@ -14,6 +14,12 @@ use core_lib::error::AppError;
 use core_lib::ops::approval::ApprovalStore;
 use core_lib::ops::ddl_compiler;
 use core_lib::ops::executor;
+use core_lib::ops::field_migration::backfill::{self, PreparedBackfill};
+use core_lib::ops::field_migration::migration_store::{
+    BackfillConfig, MigrationJob, MigrationPhase, MigrationStatus, CONTROL_ABORT,
+    CONTROL_PAUSE, CONTROL_RUN,
+};
+use core_lib::ops::field_migration::types::FieldGovernanceAnalysis;
 use core_lib::ops::index_advisor::IndexAdvisorInput;
 use core_lib::ops::local_token::HEADER as OPS_TOKEN_HEADER;
 use core_lib::ops::perf_diagnostics::{self, SlowQueryScan};
@@ -21,6 +27,7 @@ use core_lib::ops::policy::OpsPolicy;
 use core_lib::ops::types::{
     ActionSpec, AuditRecord, EvidencePack, ExecutionReport, OpsPlan, PlanStatus, PlanSummary,
 };
+use core_lib::ops::OpsContext;
 
 use crate::is_read_only_connection;
 use crate::resolve_db_client_for_request;
@@ -306,6 +313,15 @@ async fn run_analyze(
     }
 
     state.ops.plans.write().await.insert(plan.clone())?;
+    if plan.scenario_id == "field-governance" {
+        // S2 启动回填时需要在服务端取回完整分析证据；只保留字段治理场景，避免无界增长。
+        state
+            .ops
+            .evidence
+            .write()
+            .await
+            .insert(plan.plan_id.clone(), evidence.clone());
+    }
     audit_event(
         state,
         "ops.plan.created",
@@ -350,6 +366,473 @@ pub(crate) async fn ops_field_diff_page(
     let page =
         core_lib::ops::field_migration::diff::fetch_page(&ctx, &body.request).await?;
     Ok(Json(page))
+}
+
+// ── S2 字段回填 ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct FieldBackfillOptions {
+    #[serde(default)]
+    pub batch_size: Option<u64>,
+    #[serde(default)]
+    pub batch_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub max_rows_per_second: Option<u64>,
+    #[serde(default)]
+    pub production_confirmed: Option<bool>,
+    #[serde(default)]
+    pub confirmed_high_risks: Vec<String>,
+}
+
+impl FieldBackfillOptions {
+    fn config(&self) -> BackfillConfig {
+        let defaults = BackfillConfig::default();
+        BackfillConfig {
+            batch_size: self.batch_size.unwrap_or(defaults.batch_size),
+            batch_interval_ms: self
+                .batch_interval_ms
+                .unwrap_or(defaults.batch_interval_ms),
+            max_rows_per_second: self
+                .max_rows_per_second
+                .unwrap_or(defaults.max_rows_per_second),
+        }
+    }
+
+    fn production_confirmed(&self) -> bool {
+        self.production_confirmed.unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FieldBackfillApproveBody {
+    pub plan_id: String,
+    #[serde(default)]
+    pub plan_hash: Option<String>,
+    #[serde(flatten)]
+    pub options: FieldBackfillOptions,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FieldBackfillStartBody {
+    pub plan_id: String,
+    pub approval_token: String,
+    #[serde(default)]
+    pub plan_hash: Option<String>,
+    #[serde(flatten)]
+    pub options: FieldBackfillOptions,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct FieldBackfillResumeBody {
+    #[serde(default)]
+    pub approval_token: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct FieldBackfillListQuery {
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FieldBackfillApproveResponse {
+    pub approval_id: String,
+    pub token: String,
+    pub expires_at: i64,
+    pub migration_hash: String,
+    pub plan_id: String,
+    pub plan_hash: String,
+    pub config: BackfillConfig,
+    pub high_risks: Vec<core_lib::ops::field_migration::types::FieldRisk>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FieldBackfillListResponse {
+    pub jobs: Vec<MigrationJob>,
+}
+
+async fn prepare_field_backfill(
+    state: &AppState,
+    headers: &HeaderMap,
+    plan_id: &str,
+    plan_hash: Option<&str>,
+    options: &FieldBackfillOptions,
+    require_confirmations: bool,
+) -> Result<(OpsPlan, PreparedBackfill, OpsContext, OpsPolicy, bool), AppError> {
+    let plan = state
+        .ops
+        .plans
+        .read()
+        .await
+        .get(plan_id)
+        .ok_or_else(|| AppError::BadRequest(format!("计划 {plan_id} 不存在或已过期")))?;
+    if plan.scenario_id != "field-governance" {
+        return Err(AppError::BadRequest(
+            "该计划不是字段治理计划，不能启动回填".into(),
+        ));
+    }
+    if let Some(expected_hash) = plan_hash {
+        if expected_hash != plan.plan_hash {
+            return Err(AppError::BadRequest(
+                "plan_hash 与当前计划不一致，请重新分析".into(),
+            ));
+        }
+    }
+    let evidence = state
+        .ops
+        .evidence
+        .read()
+        .await
+        .get(plan_id)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "服务端未保留该计划的完整分析证据（可能重启过），请重新执行只读分析".into(),
+            )
+        })?;
+    let analysis: FieldGovernanceAnalysis = evidence
+        .extra
+        .clone()
+        .ok_or_else(|| AppError::BadRequest("计划缺少字段治理扩展证据".into()))
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|err| AppError::BadRequest(format!("扩展证据解析失败: {err}")))
+        })?;
+    let db_id = if plan.db_id.trim().is_empty() {
+        None
+    } else {
+        Some(plan.db_id.as_str())
+    };
+    let ctx = build_ctx(state, db_id, Some(session_id(headers))).await?;
+    if ctx.db_name != plan.db_name {
+        return Err(AppError::BadRequest(format!(
+            "当前连接库 {} 与计划库 {} 不一致",
+            ctx.db_name, plan.db_name
+        )));
+    }
+    let policy = state.ops.policy.read().await.clone();
+    let production_confirmed = options.production_confirmed();
+    policy.authorize_backfill(ctx.is_read_only, production_confirmed)?;
+    let prepared = backfill::prepare(&plan, &analysis, &policy, options.config())?;
+    if require_confirmations {
+        let missing = prepared
+            .high_risks
+            .iter()
+            .filter(|risk| !options.confirmed_high_risks.iter().any(|id| id == &risk.id))
+            .map(|risk| risk.id.clone())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "以下 HIGH 风险未确认，禁止回填: {}",
+                missing.join(", ")
+            )));
+        }
+    }
+    Ok((plan, prepared, ctx, policy, production_confirmed))
+}
+
+pub(crate) async fn ops_field_backfill_approve(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FieldBackfillApproveBody>,
+) -> Result<Json<FieldBackfillApproveResponse>, AppError> {
+    authorize_write(&state, &headers)?;
+    let session = session_id(&headers);
+    let (plan, prepared, ctx, policy, production_confirmed) = prepare_field_backfill(
+        &state,
+        &headers,
+        &body.plan_id,
+        body.plan_hash.as_deref(),
+        &body.options,
+        true,
+    )
+    .await?;
+    let (token, record) = state.ops.approvals.write().await.issue_field(
+        &plan,
+        &prepared.migration_hash,
+        "backfill",
+        policy.approval_ttl_secs,
+        Some(session.clone()),
+    )?;
+    audit_event(
+        &state,
+        "field_migration.backfill.approved",
+        "ok",
+        serde_json::json!({
+            "approval_id": record.approval_id,
+            "plan_id": plan.plan_id,
+            "plan_hash": plan.plan_hash,
+            "migration_hash": prepared.migration_hash,
+            "db_id": ctx.db_id,
+            "db_name": ctx.db_name,
+            "production_confirmed": production_confirmed,
+            "batch_size": prepared.config.batch_size,
+            "batch_interval_ms": prepared.config.batch_interval_ms,
+            "max_rows_per_second": prepared.config.max_rows_per_second,
+            "high_risks": prepared.high_risks.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+        }),
+    );
+    Ok(Json(FieldBackfillApproveResponse {
+        approval_id: record.approval_id,
+        token,
+        expires_at: record.expires_at,
+        migration_hash: prepared.migration_hash,
+        plan_id: plan.plan_id,
+        plan_hash: plan.plan_hash,
+        config: prepared.config,
+        high_risks: prepared.high_risks,
+    }))
+}
+
+pub(crate) async fn ops_field_backfill_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FieldBackfillStartBody>,
+) -> Result<Json<MigrationJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let (plan, prepared, ctx, policy, production_confirmed) = prepare_field_backfill(
+        &state,
+        &headers,
+        &body.plan_id,
+        body.plan_hash.as_deref(),
+        &body.options,
+        false,
+    )
+    .await?;
+    let record = state.ops.approvals.write().await.consume_field(
+        &body.approval_token,
+        &plan,
+        &prepared.migration_hash,
+        "backfill",
+    )?;
+
+    let active = state
+        .ops
+        .migrations
+        .list(Some(&plan.plan_id), 50)
+        .await
+        .into_iter()
+        .find(|job| job.is_active_status());
+    if let Some(job) = active {
+        return Err(AppError::BadRequest(format!(
+            "该计划已有运行中的回填任务 {}（状态 {}）",
+            job.job_id,
+            job.status.as_str()
+        )));
+    }
+
+    let mut job = backfill::new_job(&plan, &prepared, production_confirmed);
+    job.approval_id = Some(record.approval_id.clone());
+    let job_id = job.job_id.clone();
+    state.ops.migrations.insert(job.clone()).await?;
+    let hub = state.ops.migrations.clone();
+    hub.set_control(&job_id, CONTROL_RUN).await;
+    hub.mark_active(&job_id).await;
+    audit_event(
+        &state,
+        "field_migration.backfill.started",
+        "ok",
+        serde_json::json!({
+            "job_id": job_id,
+            "plan_id": plan.plan_id,
+            "approval_id": record.approval_id,
+            "migration_hash": prepared.migration_hash,
+            "batch_size": prepared.config.batch_size,
+        }),
+    );
+    tokio::spawn(async move {
+        backfill::run_job(job_id, ctx, hub, policy).await;
+    });
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_backfill_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<MigrationJob>, AppError> {
+    let hub = state.ops.migrations.clone();
+    let mut job = hub.get(&job_id).await?;
+    if job.status == MigrationStatus::Running && !hub.is_active(&job_id).await {
+        job = hub
+            .update(&job_id, |job| {
+                job.status = MigrationStatus::Interrupted;
+                job.phase = MigrationPhase::Interrupted;
+                job.last_error = Some("后台任务已停止，可从 checkpoint 续跑".into());
+            })
+            .await?;
+    }
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_backfill_list(
+    State(state): State<AppState>,
+    Query(query): Query<FieldBackfillListQuery>,
+) -> Result<Json<FieldBackfillListResponse>, AppError> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let jobs = state
+        .ops
+        .migrations
+        .list(query.plan_id.as_deref(), limit)
+        .await;
+    Ok(Json(FieldBackfillListResponse { jobs }))
+}
+
+pub(crate) async fn ops_field_backfill_pause(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<Json<MigrationJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let hub = state.ops.migrations.clone();
+    let job = hub.get(&job_id).await?;
+    if job.status.is_finished() {
+        return Err(AppError::BadRequest(format!(
+            "任务已结束（{}），不能暂停",
+            job.status.as_str()
+        )));
+    }
+    hub.set_control(&job_id, CONTROL_PAUSE).await;
+    let job = hub
+        .update(&job_id, |job| {
+            if matches!(
+                job.status,
+                MigrationStatus::Pending | MigrationStatus::Running
+            ) {
+                job.status = MigrationStatus::Paused;
+                job.phase = MigrationPhase::Paused;
+            }
+        })
+        .await?;
+    audit_event(
+        &state,
+        "field_migration.backfill.paused",
+        "ok",
+        serde_json::json!({ "job_id": job_id, "checkpoint": job.checkpoint }),
+    );
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_backfill_resume(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    Json(body): Json<FieldBackfillResumeBody>,
+) -> Result<Json<MigrationJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let hub = state.ops.migrations.clone();
+    let job = hub.get(&job_id).await?;
+    if hub.is_active(&job_id).await {
+        return Err(AppError::BadRequest("任务仍在运行，无需继续".into()));
+    }
+    match job.status {
+        MigrationStatus::Completed | MigrationStatus::Aborted => {
+            return Err(AppError::BadRequest(format!(
+                "任务已结束（{}），不能继续",
+                job.status.as_str()
+            )));
+        }
+        MigrationStatus::Interrupted | MigrationStatus::Blocked => {
+            let token = body.approval_token.as_deref().unwrap_or("").trim();
+            if token.is_empty() {
+                return Err(AppError::BadRequest(
+                    "中断/阻断后的续跑需要新的审批令牌".into(),
+                ));
+            }
+            state.ops.approvals.write().await.consume_field_binding(
+                token,
+                &job.plan_id,
+                &job.plan_hash,
+                &job.db_fingerprint,
+                &job.migration_hash,
+                "backfill",
+            )?;
+        }
+        _ => {}
+    }
+    let db_id = if job.db_id.trim().is_empty() {
+        None
+    } else {
+        Some(job.db_id.as_str())
+    };
+    let ctx = build_ctx(&state, db_id, Some(session_id(&headers))).await?;
+    let policy = state.ops.policy.read().await.clone();
+    policy.authorize_backfill(ctx.is_read_only, job.production_confirmed)?;
+    hub.set_control(&job_id, CONTROL_RUN).await;
+    hub.mark_active(&job_id).await;
+    let job = hub
+        .update(&job_id, |job| {
+            job.status = MigrationStatus::Running;
+            job.phase = MigrationPhase::Backfilling;
+            if job.started_at == 0 {
+                job.started_at = core_lib::ops::types::now();
+            }
+            job.finished_at = None;
+            job.last_error = None;
+            job.blocking = None;
+            job.progress.resume_after_pk = job
+                .checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.last_pk.clone());
+        })
+        .await?;
+    audit_event(
+        &state,
+        "field_migration.backfill.resumed",
+        "ok",
+        serde_json::json!({
+            "job_id": job_id,
+            "checkpoint": job.checkpoint,
+            "resume_after_pk": job.progress.resume_after_pk,
+        }),
+    );
+    tokio::spawn(async move {
+        backfill::run_job(job_id, ctx, hub, policy).await;
+    });
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_backfill_abort(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<Json<MigrationJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let hub = state.ops.migrations.clone();
+    let job = hub.get(&job_id).await?;
+    if job.status.is_finished() {
+        return Ok(Json(job));
+    }
+    hub.set_control(&job_id, CONTROL_ABORT).await;
+    // 若正在执行批 SQL，立即 KILL QUERY；执行器会把它收敛为 aborted。
+    if let Some(connection_id) = job.progress.connection_id {
+        let db_id = if job.db_id.trim().is_empty() {
+            None
+        } else {
+            Some(job.db_id.as_str())
+        };
+        if let Ok(ctx) = build_ctx(&state, db_id, Some(session_id(&headers))).await {
+            let _ = ctx.db_client.kill_query(connection_id).await;
+        }
+    }
+    let job = if hub.is_active(&job_id).await {
+        job
+    } else {
+        hub.update(&job_id, |job| {
+            job.status = MigrationStatus::Aborted;
+            job.phase = MigrationPhase::Aborted;
+            job.finished_at = Some(core_lib::ops::types::now());
+        })
+        .await?
+    };
+    audit_event(
+        &state,
+        "field_migration.backfill.abort_requested",
+        "ok",
+        serde_json::json!({ "job_id": job_id, "connection_id": job.progress.connection_id }),
+    );
+    Ok(Json(job))
 }
 
 pub(crate) async fn ops_analyze_stream(

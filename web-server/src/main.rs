@@ -1012,6 +1012,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(ops_handlers::ops_field_diff_page),
         )
         .route(
+            "/ops/field-governance/backfill",
+            get(ops_handlers::ops_field_backfill_list)
+                .post(ops_handlers::ops_field_backfill_start),
+        )
+        .route(
+            "/ops/field-governance/backfill/approve",
+            post(ops_handlers::ops_field_backfill_approve),
+        )
+        .route(
+            "/ops/field-governance/backfill/:job_id",
+            get(ops_handlers::ops_field_backfill_status),
+        )
+        .route(
+            "/ops/field-governance/backfill/:job_id/pause",
+            post(ops_handlers::ops_field_backfill_pause),
+        )
+        .route(
+            "/ops/field-governance/backfill/:job_id/resume",
+            post(ops_handlers::ops_field_backfill_resume),
+        )
+        .route(
+            "/ops/field-governance/backfill/:job_id/abort",
+            post(ops_handlers::ops_field_backfill_abort),
+        )
+        .route(
             "/ops/slow-queries",
             get(ops_handlers::ops_slow_queries),
         )
@@ -3363,6 +3388,31 @@ mod tests {
             .route(
                 "/ops/field-governance/diff-page",
                 post(ops_handlers::ops_field_diff_page),
+            )
+            .route(
+                "/ops/field-governance/backfill",
+                get(ops_handlers::ops_field_backfill_list)
+                    .post(ops_handlers::ops_field_backfill_start),
+            )
+            .route(
+                "/ops/field-governance/backfill/approve",
+                post(ops_handlers::ops_field_backfill_approve),
+            )
+            .route(
+                "/ops/field-governance/backfill/:job_id",
+                get(ops_handlers::ops_field_backfill_status),
+            )
+            .route(
+                "/ops/field-governance/backfill/:job_id/pause",
+                post(ops_handlers::ops_field_backfill_pause),
+            )
+            .route(
+                "/ops/field-governance/backfill/:job_id/resume",
+                post(ops_handlers::ops_field_backfill_resume),
+            )
+            .route(
+                "/ops/field-governance/backfill/:job_id/abort",
+                post(ops_handlers::ops_field_backfill_abort),
             )
             .route(
                 "/ops/plans/:plan_id/approve",

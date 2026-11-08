@@ -1,15 +1,18 @@
 //! ops 运行时：场景注册表、计划/审批存储、策略、审计与本机令牌。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
 use crate::ops::approval::ApprovalStore;
 use crate::ops::audit::AuditLog;
+use crate::ops::field_migration::migration_store::MigrationHub;
 use crate::ops::inspection::InspectionStore;
 use crate::ops::local_token::LocalToken;
 use crate::ops::plan_store::PlanStore;
 use crate::ops::policy::{default_policy_path, OpsPolicy};
 use crate::ops::registry::ScenarioRegistry;
+use crate::ops::types::EvidencePack;
 
 pub struct OpsRuntime {
     pub registry: ScenarioRegistry,
@@ -18,6 +21,10 @@ pub struct OpsRuntime {
     pub policy: RwLock<OpsPolicy>,
     pub audit: AuditLog,
     pub inspections: RwLock<InspectionStore>,
+    /// 分析证据（内存）。S2 启动回填时用来取回完整 `FieldGovernanceAnalysis`。
+    pub evidence: RwLock<HashMap<String, EvidencePack>>,
+    /// S2 回填任务与 checkpoint。
+    pub migrations: MigrationHub,
     pub local_token: LocalToken,
     pub data_dir: PathBuf,
     pub policy_path: PathBuf,
@@ -31,6 +38,8 @@ impl OpsRuntime {
         let policy = OpsPolicy::load_or_default(&policy_path).with_env_overrides();
         Self {
             registry: ScenarioRegistry::builtin(),
+            evidence: RwLock::new(HashMap::new()),
+            migrations: MigrationHub::new(Some(dir.join("field-migration-jobs.json"))),
             plans: RwLock::new(PlanStore::new(Some(dir.join("plans.json")))),
             approvals: RwLock::new(ApprovalStore::new(Some(dir.join("approvals.json")))),
             policy: RwLock::new(policy),
@@ -45,6 +54,10 @@ impl OpsRuntime {
     pub fn new(data_dir: PathBuf, policy: OpsPolicy, token: LocalToken) -> Self {
         Self {
             registry: ScenarioRegistry::builtin(),
+            evidence: RwLock::new(HashMap::new()),
+            migrations: MigrationHub::new(Some(
+                data_dir.join("field-migration-jobs.json"),
+            )),
             plans: RwLock::new(PlanStore::new(Some(data_dir.join("plans.json")))),
             approvals: RwLock::new(ApprovalStore::new(Some(data_dir.join("approvals.json")))),
             policy: RwLock::new(policy),
@@ -62,6 +75,8 @@ impl OpsRuntime {
     pub fn for_test() -> Self {
         Self {
             registry: ScenarioRegistry::builtin(),
+            evidence: RwLock::new(HashMap::new()),
+            migrations: MigrationHub::for_test(),
             plans: RwLock::new(PlanStore::new(None)),
             approvals: RwLock::new(ApprovalStore::new(None)),
             policy: RwLock::new(OpsPolicy::default()),

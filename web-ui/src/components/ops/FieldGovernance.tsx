@@ -9,13 +9,22 @@ import {
   FileCode2,
   Loader2,
   Lock,
+  Pause,
+  Play,
   Plus,
   RefreshCw,
   ShieldAlert,
+  Square,
   Trash2,
 } from 'lucide-react'
 import { api } from '../../api'
-import type { EmptyStringPolicy, FieldDiffPage, FieldTargetColumn } from '../../api'
+import type {
+  EmptyStringPolicy,
+  FieldBackfillOptionsPayload,
+  FieldDiffPage,
+  FieldMigrationJob,
+  FieldTargetColumn,
+} from '../../api'
 import { tr } from '../../i18n'
 import type { SchemaResponse, TableWithDetails } from '../../types'
 
@@ -191,7 +200,7 @@ interface FieldGovernanceAnalysis {
 }
 
 interface AnalyzeResponse {
-  plan: { plan_hash: string; diagnosis: string }
+  plan: { plan_id: string; plan_hash: string; diagnosis: string }
   evidence: { db_name: string; table: string; extra?: FieldGovernanceAnalysis | null }
 }
 
@@ -263,6 +272,28 @@ function riskLevelLabel(level: RiskLevel): string {
   return tr('提示', 'INFO')
 }
 
+function migrationStatusClass(status: FieldMigrationJob['status']): string {
+  if (status === 'completed') return 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+  if (status === 'blocked' || status === 'aborted') return 'border-red-500/50 bg-red-500/10 text-red-300'
+  if (status === 'interrupted' || status === 'paused') return 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+  if (status === 'running') return 'border-blue-500/50 bg-blue-500/10 text-blue-300'
+  return 'border-dark-border bg-dark-bg text-gray-300'
+}
+
+function migrationStatusLabel(status: FieldMigrationJob['status']): string {
+  const labels: Record<FieldMigrationJob['status'], [string, string]> = {
+    pending: ['待启动', 'PENDING'],
+    running: ['运行中', 'RUNNING'],
+    paused: ['已暂停', 'PAUSED'],
+    interrupted: ['已中断（可续跑）', 'INTERRUPTED'],
+    blocked: ['已阻断', 'BLOCKED'],
+    completed: ['已完成', 'COMPLETED'],
+    aborted: ['已中止', 'ABORTED'],
+  }
+  const pair = labels[status]
+  return pair ? tr(pair[0], pair[1]) : status
+}
+
 function evidenceStatusClass(status: string): string {
   if (status === 'collected') return 'text-emerald-400'
   if (status === 'partial') return 'text-amber-400'
@@ -314,6 +345,18 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
   const [diffError, setDiffError] = useState('')
   const [diffCopied, setDiffCopied] = useState('')
 
+  const [planId, setPlanId] = useState('')
+  const [planHash, setPlanHash] = useState('')
+  const [backfillBatchSize, setBackfillBatchSize] = useState('1000')
+  const [backfillIntervalMs, setBackfillIntervalMs] = useState('0')
+  const [backfillMaxRps, setBackfillMaxRps] = useState('0')
+  const [backfillProdConfirmed, setBackfillProdConfirmed] = useState(false)
+  const [backfillConfirmedRisks, setBackfillConfirmedRisks] = useState<string[]>([])
+  const [backfillJob, setBackfillJob] = useState<FieldMigrationJob | null>(null)
+  const [backfillBusy, setBackfillBusy] = useState(false)
+  const [backfillError, setBackfillError] = useState('')
+  const [backfillNotice, setBackfillNotice] = useState('')
+
   useEffect(() => {
     let cancelled = false
     if (!dbId) {
@@ -340,6 +383,21 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
       cancelled = true
     }
   }, [dbId])
+
+  useEffect(() => {
+    const jobId = backfillJob?.job_id
+    const status = backfillJob?.status
+    if (!jobId || (status !== 'running' && status !== 'pending')) return
+    const timer = window.setInterval(() => {
+      api
+        .opsFieldBackfillStatus(jobId)
+        .then(setBackfillJob)
+        .catch(() => {
+          // 轮询失败静默，下一次继续
+        })
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [backfillJob?.job_id, backfillJob?.status])
 
   const currentTable: TableWithDetails | undefined = useMemo(
     () => schema?.tables?.find((item) => item.table_name === table),
@@ -432,6 +490,20 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
       setDiffPages([])
       setDiffIndex(0)
       setDiffError('')
+      setPlanId(resp.plan.plan_id)
+      setPlanHash(resp.plan.plan_hash)
+      setBackfillJob(null)
+      setBackfillError('')
+      setBackfillNotice('')
+      setBackfillConfirmedRisks([])
+      api
+        .opsFieldBackfillList({ plan_id: resp.plan.plan_id, limit: 1 })
+        .then((data) => {
+          if (data?.jobs?.length) setBackfillJob(data.jobs[0])
+        })
+        .catch(() => {
+          // 历史任务读取失败不阻断分析结果展示
+        })
       setNotice(
         tr(
           `分析完成：阻断 ${extra.risk_summary.block} / 高风险 ${extra.risk_summary.high} / 提示 ${extra.risk_summary.info}`,
@@ -569,11 +641,172 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
     }
   }
 
+  const backfillOptions = (): FieldBackfillOptionsPayload => ({
+    batch_size: Number(backfillBatchSize) || undefined,
+    batch_interval_ms: Number(backfillIntervalMs) || 0,
+    max_rows_per_second: Number(backfillMaxRps) || 0,
+    production_confirmed: backfillProdConfirmed || undefined,
+    confirmed_high_risks: backfillConfirmedRisks,
+  })
+
+  const handleBackfillApprove = async () => {
+    if (!planId) {
+      setBackfillError(tr('请先完成只读分析，获取计划 ID', 'Run the read-only analysis first'))
+      return
+    }
+    setBackfillBusy(true)
+    setBackfillError('')
+    setBackfillNotice('')
+    try {
+      const approval = await api.opsFieldBackfillApprove({
+        plan_id: planId,
+        plan_hash: planHash || undefined,
+        ...backfillOptions(),
+      })
+      setBackfillNotice(
+        tr(
+          `审批已签发：${approval.approval_id}（到期 ${new Date(approval.expires_at * 1000).toLocaleString()}）`,
+          `Approval issued: ${approval.approval_id} (expires ${new Date(approval.expires_at * 1000).toLocaleString()})`
+        )
+      )
+    } catch (err) {
+      setBackfillError(describeError(err))
+    } finally {
+      setBackfillBusy(false)
+    }
+  }
+
+  const handleBackfillStart = async () => {
+    if (!planId) {
+      setBackfillError(tr('请先完成只读分析，获取计划 ID', 'Run the read-only analysis first'))
+      return
+    }
+    setBackfillBusy(true)
+    setBackfillError('')
+    setBackfillNotice('')
+    try {
+      const options = backfillOptions()
+      const approval = await api.opsFieldBackfillApprove({
+        plan_id: planId,
+        plan_hash: planHash || undefined,
+        ...options,
+      })
+      const job = await api.opsFieldBackfillStart({
+        plan_id: planId,
+        approval_token: approval.token,
+        plan_hash: planHash || undefined,
+        ...options,
+      })
+      setBackfillJob(job)
+      setBackfillNotice(
+        tr(`回填任务已启动：${job.job_id}`, `Backfill job started: ${job.job_id}`)
+      )
+    } catch (err) {
+      setBackfillError(describeError(err))
+    } finally {
+      setBackfillBusy(false)
+    }
+  }
+
+  const handleBackfillRefresh = async () => {
+    if (!backfillJob) return
+    setBackfillError('')
+    try {
+      const job = await api.opsFieldBackfillStatus(backfillJob.job_id)
+      setBackfillJob(job)
+    } catch (err) {
+      setBackfillError(describeError(err))
+    }
+  }
+
+  const handleBackfillPause = async () => {
+    if (!backfillJob) return
+    setBackfillBusy(true)
+    setBackfillError('')
+    try {
+      setBackfillJob(await api.opsFieldBackfillPause(backfillJob.job_id))
+      setBackfillNotice(tr('已请求暂停：将在当前批次结束后生效', 'Pause requested: takes effect after the current batch'))
+    } catch (err) {
+      setBackfillError(describeError(err))
+    } finally {
+      setBackfillBusy(false)
+    }
+  }
+
+  const handleBackfillResume = async () => {
+    if (!backfillJob) return
+    setBackfillBusy(true)
+    setBackfillError('')
+    setBackfillNotice('')
+    try {
+      const needsNewToken =
+        backfillJob.status === 'interrupted' || backfillJob.status === 'blocked'
+      let token: string | undefined
+      if (needsNewToken) {
+        if (!planId) throw new Error(tr('计划 ID 丢失，请重新分析', 'Plan ID missing; re-run analysis'))
+        const approval = await api.opsFieldBackfillApprove({
+          plan_id: planId,
+          plan_hash: planHash || undefined,
+          ...backfillOptions(),
+        })
+        token = approval.token
+      }
+      const job = await api.opsFieldBackfillResume(backfillJob.job_id, token)
+      setBackfillJob(job)
+      setBackfillNotice(
+        tr(
+          `已从 ${job.progress.resume_after_pk ?? '起点'} 续跑（第 ${job.progress.current_batch} 批）`,
+          `Resumed after ${job.progress.resume_after_pk ?? 'start'} (batch ${job.progress.current_batch})`
+        )
+      )
+    } catch (err) {
+      setBackfillError(describeError(err))
+    } finally {
+      setBackfillBusy(false)
+    }
+  }
+
+  const handleBackfillAbort = async () => {
+    if (!backfillJob || !window.confirm(tr('确认中止回填？已写入的批次不会回滚。', 'Abort the backfill? Batches already written are kept.'))) {
+      return
+    }
+    setBackfillBusy(true)
+    setBackfillError('')
+    try {
+      setBackfillJob(await api.opsFieldBackfillAbort(backfillJob.job_id))
+      setBackfillNotice(tr('回填已中止', 'Backfill aborted'))
+    } catch (err) {
+      setBackfillError(describeError(err))
+    } finally {
+      setBackfillBusy(false)
+    }
+  }
+
+  const copyBlockingPks = async () => {
+    const pks = backfillJob?.blocking?.pks || []
+    if (pks.length === 0) return
+    const ok = await copyText(pks.join('\n'))
+    if (!ok) {
+      setBackfillError(tr('复制失败，请手动选择主键', 'Copy failed; select the primary keys manually'))
+      return
+    }
+    setBackfillNotice(tr('差异主键已复制', 'Diff PKs copied'))
+    window.setTimeout(() => setBackfillNotice(''), 2000)
+  }
+
   const blockRisks = (analysis?.risks || []).filter((risk) => risk.level === 'block')
   const highRisks = (analysis?.risks || []).filter((risk) => risk.level === 'high')
   const infoRisks = (analysis?.risks || []).filter((risk) => risk.level === 'info')
   const irreversibleScripts = (analysis?.scripts || []).filter((script) => script.irreversible)
   const currentDiffPage = diffPages[diffIndex]
+  const migrationActive =
+    backfillJob != null &&
+    (backfillJob.status === 'running' || backfillJob.status === 'paused' || backfillJob.status === 'pending')
+  const backfillResumable =
+    backfillJob != null &&
+    (backfillJob.status === 'interrupted' ||
+      backfillJob.status === 'paused' ||
+      backfillJob.status === 'blocked')
 
   return (
     <div className="flex flex-col gap-4">
@@ -1383,6 +1616,311 @@ export function FieldGovernance({ dbId }: FieldGovernanceProps) {
                     <div className="mt-2 text-gray-500">
                       {tr('下一页游标（主键区间）', 'Next cursor (PK interval)')}:{' '}
                       <span className="font-mono">{currentDiffPage.next_last_pk}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {analysis.column && (analysis.target_columns || []).length > 0 && (
+            <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
+              <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-white">
+                <Play className="h-4 w-4 text-emerald-400" />
+                {tr('回填执行（S2：分批 + checkpoint）', 'Backfill execution (S2: batches + checkpoint)')}
+              </h3>
+              <p className="text-[11px] text-gray-500">
+                {tr(
+                  '仅对目标表执行 CREATE，源表只读；每批写入前后做 V1-V4 校验，失败即停在该批。下线（DROP COLUMN）没有执行入口，只保留脚本。',
+                  'Only CREATE runs on the target; the source stays read-only. Every batch is verified (V1-V4) before and after writing, and a failure stops at that batch. Retirement (DROP COLUMN) has no execution entry and stays script-only.'
+                )}
+              </p>
+
+              <div className="mt-3 grid gap-2 md:grid-cols-4">
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-400">{tr('批大小', 'Batch size')}</label>
+                  <input
+                    value={backfillBatchSize}
+                    onChange={(event) => setBackfillBatchSize(event.target.value)}
+                    inputMode="numeric"
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 font-mono text-xs text-white outline-none"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-400">{tr('批间隔（毫秒）', 'Batch interval (ms)')}</label>
+                  <input
+                    value={backfillIntervalMs}
+                    onChange={(event) => setBackfillIntervalMs(event.target.value)}
+                    inputMode="numeric"
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 font-mono text-xs text-white outline-none"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs text-gray-400">{tr('行/秒上限（0=不限）', 'Rows/sec cap (0 = unlimited)')}</label>
+                  <input
+                    value={backfillMaxRps}
+                    onChange={(event) => setBackfillMaxRps(event.target.value)}
+                    inputMode="numeric"
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 font-mono text-xs text-white outline-none"
+                  />
+                </div>
+                <label className="flex items-start gap-2 self-end text-xs text-gray-400">
+                  <input
+                    type="checkbox"
+                    checked={backfillProdConfirmed}
+                    onChange={(event) => setBackfillProdConfirmed(event.target.checked)}
+                    className="mt-0.5"
+                  />
+                  {tr('生产库显式确认（需策略开关）', 'Explicit production confirmation (policy switch required)')}
+                </label>
+              </div>
+
+              {highRisks.length > 0 && (
+                <div className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
+                  <div className="text-amber-300">{tr('HIGH 风险需逐项确认后才能启动', 'Every HIGH risk must be confirmed before start')}</div>
+                  <ul className="mt-1 space-y-1">
+                    {highRisks.map((risk) => (
+                      <li key={risk.id} className="text-amber-200/90">
+                        <label className="flex items-start gap-2">
+                          <input
+                            type="checkbox"
+                            checked={backfillConfirmedRisks.includes(risk.id)}
+                            onChange={(event) =>
+                              setBackfillConfirmedRisks((prev) =>
+                                event.target.checked
+                                  ? [...prev, risk.id]
+                                  : prev.filter((id) => id !== risk.id)
+                              )
+                            }
+                            className="mt-0.5"
+                          />
+                          <span>
+                            <span className="mr-1 rounded bg-black/20 px-1 font-mono">{risk.code}</span>
+                            {risk.title}
+                          </span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {(blockRisks.length > 0 || analysis.risk_summary.undetermined_write_block) && (
+                <div className="mt-2 rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-xs text-red-300">
+                  {tr('存在阻断项或不可判定项，回填不允许启动。', 'Blocking/undetermined items present; backfill cannot start.')}
+                </div>
+              )}
+
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => void handleBackfillStart()}
+                  disabled={
+                    backfillBusy ||
+                    migrationActive ||
+                    blockRisks.length > 0 ||
+                    analysis.risk_summary.undetermined_write_block
+                  }
+                  className="flex items-center gap-1 rounded bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {backfillBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                  {tr('审批并启动回填', 'Approve & start backfill')}
+                </button>
+                <button
+                  onClick={() => void handleBackfillApprove()}
+                  disabled={backfillBusy}
+                  className="rounded border border-dark-border px-2 py-1 text-xs text-gray-300 hover:bg-dark-bg disabled:opacity-50"
+                >
+                  {tr('仅签发审批令牌', 'Issue approval token only')}
+                </button>
+                <button
+                  onClick={() => void handleBackfillRefresh()}
+                  disabled={!backfillJob || backfillBusy}
+                  className="flex items-center gap-1 rounded border border-dark-border px-2 py-1 text-xs text-gray-300 hover:bg-dark-bg disabled:opacity-50"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  {tr('刷新进度', 'Refresh')}
+                </button>
+                <button
+                  onClick={() => void handleBackfillPause()}
+                  disabled={!backfillJob || backfillJob.status !== 'running' || backfillBusy}
+                  className="flex items-center gap-1 rounded border border-amber-500/50 px-2 py-1 text-xs text-amber-300 hover:bg-amber-500/10 disabled:opacity-50"
+                >
+                  <Pause className="h-3.5 w-3.5" />
+                  {tr('暂停', 'Pause')}
+                </button>
+                <button
+                  onClick={() => void handleBackfillResume()}
+                  disabled={!backfillResumable || backfillBusy}
+                  className="flex items-center gap-1 rounded border border-blue-500/50 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/10 disabled:opacity-50"
+                >
+                  <Play className="h-3.5 w-3.5" />
+                  {tr('继续（从 checkpoint）', 'Resume (from checkpoint)')}
+                </button>
+                <button
+                  onClick={() => void handleBackfillAbort()}
+                  disabled={
+                    !backfillJob || backfillJob.status === 'completed' || backfillJob.status === 'aborted' || backfillBusy
+                  }
+                  className="flex items-center gap-1 rounded border border-red-500/50 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                >
+                  <Square className="h-3.5 w-3.5" />
+                  {tr('中止', 'Abort')}
+                </button>
+              </div>
+
+              {(backfillError || backfillNotice) && (
+                <div className={`mt-2 text-xs ${backfillError ? 'text-red-400' : 'text-emerald-400'}`}>
+                  {backfillError || backfillNotice}
+                </div>
+              )}
+
+              {backfillJob && (
+                <div className="mt-3 rounded border border-dark-border bg-dark-bg p-3 text-xs">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className={`rounded border px-2 py-0.5 font-mono ${migrationStatusClass(backfillJob.status)}`}>
+                      {migrationStatusLabel(backfillJob.status)}
+                    </span>
+                    <span className="font-mono text-gray-500">{backfillJob.job_id}</span>
+                    <span className="text-gray-400">
+                      {tr('阶段', 'Phase')}: <span className="font-mono text-white">{backfillJob.phase}</span>
+                    </span>
+                    <span className="text-gray-400">
+                      {tr('运行次数', 'Runs')}: <span className="font-mono text-white">{backfillJob.run_count}</span>
+                    </span>
+                  </div>
+
+                  <div className="mt-2 grid gap-2 md:grid-cols-4">
+                    <div className="rounded border border-dark-border bg-dark-panel p-2 text-gray-300">
+                      {tr('预期行数', 'Expected')}: <span className="font-mono text-white">{backfillJob.progress.expected_rows}</span>
+                    </div>
+                    <div className="rounded border border-emerald-500/40 bg-emerald-500/10 p-2 text-emerald-300">
+                      {tr('成功行数', 'Success')}: <span className="font-mono">{backfillJob.progress.success_rows}</span>
+                    </div>
+                    <div className={`rounded border p-2 ${backfillJob.progress.failed_rows > 0 ? 'border-red-500/40 bg-red-500/10 text-red-300' : 'border-dark-border bg-dark-panel text-gray-300'}`}>
+                      {tr('失败行数', 'Failed')}: <span className="font-mono">{backfillJob.progress.failed_rows}</span>
+                    </div>
+                    <div className="rounded border border-dark-border bg-dark-panel p-2 text-gray-300">
+                      {tr('剩余行数', 'Remaining')}: <span className="font-mono text-white">{backfillJob.progress.remaining_rows}</span>
+                    </div>
+                    <div className="rounded border border-dark-border bg-dark-panel p-2 text-gray-300">
+                      {tr('当前批', 'Current batch')}:{' '}
+                      <span className="font-mono text-white">{backfillJob.progress.current_batch}</span> /{' '}
+                      <span className="font-mono">{backfillJob.progress.total_batches}</span>
+                    </div>
+                    <div className="rounded border border-dark-border bg-dark-panel p-2 text-gray-300">
+                      {tr('最近批次主键', 'Last batch PK')}:{' '}
+                      <span className="font-mono text-white">{backfillJob.progress.last_pk ?? '-'}</span>
+                    </div>
+                    <div className="rounded border border-dark-border bg-dark-panel p-2 text-gray-300">
+                      {tr('续跑起点（checkpoint）', 'Resume point (checkpoint)')}:{' '}
+                      <span className="font-mono text-white">{backfillJob.progress.resume_after_pk ?? '-'}</span>
+                    </div>
+                    <div className="rounded border border-dark-border bg-dark-panel p-2 text-gray-300">
+                      {tr('已完成批次', 'Checkpoint batches')}:{' '}
+                      <span className="font-mono text-white">{backfillJob.checkpoint?.completed_batches ?? 0}</span>
+                      {' · '}
+                      {tr('已写入', 'written')}:{' '}
+                      <span className="font-mono text-white">{backfillJob.checkpoint?.written_rows ?? 0}</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap gap-4 text-gray-400">
+                    <span>
+                      {tr('批配置', 'Batch config')}:{' '}
+                      <span className="font-mono text-white">
+                        {backfillJob.config.batch_size}/{backfillJob.config.batch_interval_ms}ms/{backfillJob.config.max_rows_per_second}rps
+                      </span>
+                    </span>
+                    {backfillJob.checkpoint?.last_pk != null && (
+                      <span>
+                        {tr('checkpoint 主键', 'Checkpoint PK')}:{' '}
+                        <span className="font-mono text-white">{backfillJob.checkpoint.last_pk}</span>
+                      </span>
+                    )}
+                    {backfillJob.last_error && <span className="text-red-400">{backfillJob.last_error}</span>}
+                  </div>
+
+                  {backfillJob.blocking && (
+                    <div className="mt-3 rounded border-2 border-red-500/60 bg-red-500/10 p-2 text-red-200">
+                      <div className="flex flex-wrap items-center gap-2 font-semibold text-red-300">
+                        <ShieldAlert className="h-4 w-4" />
+                        {tr('已阻断，未继续后续批次', 'Blocked; later batches were not run')}
+                        <span className="rounded bg-black/20 px-1 font-mono">
+                          {tr('批', 'batch')} {backfillJob.blocking.batch_no}
+                        </span>
+                        <span className="rounded bg-black/20 px-1 font-mono">{backfillJob.blocking.phase}</span>
+                        {backfillJob.blocking.last_pk != null && (
+                          <span className="rounded bg-black/20 px-1 font-mono">
+                            {backfillJob.blocking.last_pk} → {backfillJob.blocking.end_pk ?? '...'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1">{backfillJob.blocking.message}</div>
+                      <div className="mt-1 font-mono text-red-300">
+                        {tr('差异数', 'diffs')}={backfillJob.blocking.total_diffs}
+                        {backfillJob.blocking.verify
+                          ? ` · V1=${backfillJob.blocking.verify.source_rows}/${backfillJob.blocking.verify.target_rows} V2=${backfillJob.blocking.verify.v2} V3=${backfillJob.blocking.verify.v3} V4=${backfillJob.blocking.verify.v4}`
+                          : ''}
+                      </div>
+                      {backfillJob.blocking.pks.length > 0 && (
+                        <>
+                          <div className="mt-2 flex items-center justify-between gap-2">
+                            <span>
+                              {tr('定位主键', 'Locating PKs')}（{backfillJob.blocking.pks.length}
+                              {backfillJob.blocking.has_more ? '+' : ''}）
+                            </span>
+                            <button
+                              onClick={() => void copyBlockingPks()}
+                              className="flex items-center gap-1 rounded border border-red-500/50 px-2 py-0.5 text-red-200 hover:bg-red-500/20"
+                            >
+                              <ClipboardCopy className="h-3.5 w-3.5" />
+                              {tr('复制主键', 'Copy PKs')}
+                            </button>
+                          </div>
+                          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-red-200">
+                            {backfillJob.blocking.pks.join('\n')}
+                          </pre>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {backfillJob.recent_batches.length > 0 && (
+                    <div className="mt-3 overflow-x-auto">
+                      <table className="w-full min-w-[720px] text-left text-xs">
+                        <thead className="text-gray-400">
+                          <tr className="border-b border-dark-border">
+                            <th className="px-2 py-1">{tr('批', 'Batch')}</th>
+                            <th className="px-2 py-1">{tr('区间', 'Range')}</th>
+                            <th className="px-2 py-1">{tr('写入', 'Written')}</th>
+                            <th className="px-2 py-1">{tr('V1', 'V1')}</th>
+                            <th className="px-2 py-1">V2/V3/V4</th>
+                            <th className="px-2 py-1">{tr('校验', 'Verified')}</th>
+                            <th className="px-2 py-1">{tr('耗时', 'Duration')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {backfillJob.recent_batches.slice(-20).map((batch) => (
+                            <tr key={batch.batch_no} className="border-b border-dark-border/60 font-mono">
+                              <td className="px-2 py-1 text-gray-300">{batch.batch_no}</td>
+                              <td className="px-2 py-1 text-gray-400">
+                                {batch.last_pk ?? '-'} → {batch.end_pk}
+                              </td>
+                              <td className="px-2 py-1 text-gray-300">{batch.written_rows}</td>
+                              <td className="px-2 py-1 text-gray-400">
+                                {batch.verify.source_rows}/{batch.verify.target_rows}
+                              </td>
+                              <td className={`px-2 py-1 ${batch.verify.v2 + batch.verify.v3 + batch.verify.v4 > 0 ? 'text-red-400' : 'text-gray-400'}`}>
+                                {batch.verify.v2}/{batch.verify.v3}/{batch.verify.v4}
+                              </td>
+                              <td className={`px-2 py-1 ${batch.verified ? 'text-emerald-400' : 'text-red-400'}`}>
+                                {batch.verified ? 'PASS' : 'FAIL'}
+                              </td>
+                              <td className="px-2 py-1 text-gray-500">{batch.duration_ms}ms</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
                   )}
                 </div>

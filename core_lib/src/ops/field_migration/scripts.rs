@@ -196,14 +196,12 @@ pub fn generate(
     analysis.dry_run = dry_run_report(&analysis.scripts);
 }
 
-fn build_backfill_sql(
-    source: &str,
-    destination: &str,
+fn backfill_parts(
     source_column: &str,
     pk: &str,
     columns: &[TargetColumn],
     empty_string_policy: EmptyStringPolicy,
-) -> String {
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut select_exprs = vec![pk.to_string()];
     let mut insert_columns = vec![pk.to_string()];
     let mut update_exprs = Vec::new();
@@ -216,6 +214,19 @@ fn build_backfill_sql(
             quote_ident_mysql(&column.name)
         ));
     }
+    (insert_columns, select_exprs, update_exprs)
+}
+
+fn build_backfill_sql(
+    source: &str,
+    destination: &str,
+    source_column: &str,
+    pk: &str,
+    columns: &[TargetColumn],
+    empty_string_policy: EmptyStringPolicy,
+) -> String {
+    let (insert_columns, select_exprs, update_exprs) =
+        backfill_parts(source_column, pk, columns, empty_string_policy);
     let policy_comment = match empty_string_policy {
         EmptyStringPolicy::Preserve => {
             "-- 空串策略 preserve：保留空串，不使用 NULLIF 抹平；空串与 NULL 是不同语义。\n"
@@ -237,6 +248,39 @@ fn build_backfill_sql(
          WHERE {pk} > :last_pk AND {pk} <= :end_pk\n\
          ORDER BY {pk}\n\
          LIMIT :batch_size\n\
+         ON DUPLICATE KEY UPDATE {};",
+        insert_columns.join(", "),
+        select_exprs.join(",\n       "),
+        update_exprs.join(", ")
+    )
+}
+
+/// S2 执行器专用：边界已是安全字面量（整数或转义后的字符串），首批判可不带下界。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_backfill_batch_sql(
+    source: &str,
+    destination: &str,
+    source_column: &str,
+    pk: &str,
+    columns: &[TargetColumn],
+    empty_string_policy: EmptyStringPolicy,
+    last_pk_literal: Option<&str>,
+    end_pk_literal: &str,
+    limit: u64,
+) -> String {
+    let (insert_columns, select_exprs, update_exprs) =
+        backfill_parts(source_column, pk, columns, empty_string_policy);
+    let where_clause = match last_pk_literal {
+        Some(last) => format!("{pk} > {last} AND {pk} <= {end_pk_literal}"),
+        None => format!("{pk} <= {end_pk_literal}"),
+    };
+    format!(
+        "INSERT INTO {destination} ({})\n\
+         SELECT {}\n\
+         FROM {source}\n\
+         WHERE {where_clause}\n\
+         ORDER BY {pk}\n\
+         LIMIT {limit}\n\
          ON DUPLICATE KEY UPDATE {};",
         insert_columns.join(", "),
         select_exprs.join(",\n       "),

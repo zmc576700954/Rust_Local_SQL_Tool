@@ -285,6 +285,155 @@ export interface FieldDiffPage {
   pks: string[]
 }
 
+// ── 字段回填（S2 执行链路） ──────────────────────────────
+
+export type MigrationStatus =
+  | 'pending'
+  | 'running'
+  | 'paused'
+  | 'interrupted'
+  | 'blocked'
+  | 'completed'
+  | 'aborted'
+
+export type MigrationPhase =
+  | 'pending'
+  | 'preflight'
+  | 'backfilling'
+  | 'verifying'
+  | 'completed'
+  | 'paused'
+  | 'interrupted'
+  | 'blocked'
+  | 'aborted'
+
+export interface FieldBackfillConfig {
+  batch_size: number
+  batch_interval_ms: number
+  max_rows_per_second: number
+}
+
+export interface FieldBatchVerify {
+  source_rows: number
+  target_rows: number
+  v2: number
+  v3: number
+  v4: number
+}
+
+export interface FieldCheckpoint {
+  completed_batches: number
+  last_pk?: string | null
+  written_rows: number
+  verified: boolean
+  verify?: FieldBatchVerify | null
+  updated_at: number
+}
+
+export interface FieldBatchRecord {
+  batch_no: number
+  last_pk?: string | null
+  end_pk: string
+  source_rows: number
+  written_rows: number
+  verified: boolean
+  verify: FieldBatchVerify
+  duration_ms: number
+  at: number
+}
+
+export interface FieldDiffDetail {
+  phase: string
+  total: number
+  pks: string[]
+  has_more: boolean
+}
+
+export interface FieldBlockingDetail {
+  batch_no: number
+  last_pk?: string | null
+  end_pk?: string | null
+  phase: string
+  total_diffs: number
+  pks: string[]
+  has_more: boolean
+  differences: FieldDiffDetail[]
+  verify?: FieldBatchVerify | null
+  message: string
+}
+
+export interface FieldMigrationProgress {
+  expected_rows: number
+  processed_rows: number
+  success_rows: number
+  failed_rows: number
+  remaining_rows: number
+  total_batches: number
+  current_batch: number
+  resume_after_pk?: string | null
+  current_first_pk?: string | null
+  last_pk?: string | null
+  connection_id?: number | null
+}
+
+export interface FieldMigrationJob {
+  job_id: string
+  plan_id: string
+  plan_hash: string
+  migration_hash: string
+  approval_id?: string | null
+  db_id: string
+  db_name: string
+  db_fingerprint: string
+  spec: {
+    source_table: string
+    source_column: string
+    target_table: string
+    pk_column: string
+    pk_kind?: 'integer' | 'text' | null
+    target_columns: FieldTargetColumn[]
+    empty_string_policy: EmptyStringPolicy
+    create_table_sql?: string | null
+  }
+  config: FieldBackfillConfig
+  status: MigrationStatus
+  phase: MigrationPhase
+  production_confirmed: boolean
+  checkpoint?: FieldCheckpoint | null
+  progress: FieldMigrationProgress
+  blocking?: FieldBlockingDetail | null
+  recent_batches: FieldBatchRecord[]
+  source_schema_hash: string
+  target_schema_hash: string
+  target_created_by_job: boolean
+  expected_rows: number
+  created_at: number
+  updated_at: number
+  started_at: number
+  finished_at?: number | null
+  last_error?: string | null
+  run_count: number
+}
+
+export interface FieldBackfillOptionsPayload {
+  batch_size?: number
+  batch_interval_ms?: number
+  max_rows_per_second?: number
+  production_confirmed?: boolean
+  confirmed_high_risks?: string[]
+}
+
+export interface FieldBackfillApproveResponse {
+  approval_id: string
+  token: string
+  expires_at: number
+  migration_hash: string
+  plan_id: string
+  plan_hash: string
+  config: FieldBackfillConfig
+  high_risks: Array<{ id: string; code: string; title: string; detail: string }>
+}
+
 interface TransferConfigPayload {
   source_type: string;
   source_path?: string | null;
@@ -556,6 +705,40 @@ export const api = {
     last_pk?: string | null
     page_size?: number
   }) => client.post('/ops/field-governance/diff-page', payload, { headers: await opsWriteHeaders() }).then(res => res.data as FieldDiffPage),
+  // 字段回填执行（S2）：审批令牌 → 启动 → 进度/暂停/继续/中止
+  opsFieldBackfillApprove: async (payload: {
+    plan_id: string
+    plan_hash?: string
+  } & FieldBackfillOptionsPayload) =>
+    client.post('/ops/field-governance/backfill/approve', payload, { headers: await opsWriteHeaders() })
+      .then(res => res.data as FieldBackfillApproveResponse),
+  opsFieldBackfillStart: async (payload: {
+    plan_id: string
+    approval_token: string
+    plan_hash?: string
+  } & FieldBackfillOptionsPayload) =>
+    client.post('/ops/field-governance/backfill', payload, { headers: await opsWriteHeaders() })
+      .then(res => res.data as FieldMigrationJob),
+  opsFieldBackfillList: async (params: { plan_id?: string; limit?: number }) =>
+    client.get('/ops/field-governance/backfill', { params, headers: { 'x-silent-error': '1' } })
+      .then(res => res.data as { jobs: FieldMigrationJob[] }),
+  opsFieldBackfillStatus: async (jobId: string) =>
+    client.get(`/ops/field-governance/backfill/${encodeURIComponent(jobId)}`, {
+      headers: { 'x-silent-error': '1' },
+      timeout: JOB_POLL_REQUEST_TIMEOUT_MS,
+    }).then(res => res.data as FieldMigrationJob),
+  opsFieldBackfillPause: async (jobId: string) =>
+    client.post(`/ops/field-governance/backfill/${encodeURIComponent(jobId)}/pause`, {}, {
+      headers: await opsWriteHeaders(),
+    }).then(res => res.data as FieldMigrationJob),
+  opsFieldBackfillResume: async (jobId: string, approvalToken?: string) =>
+    client.post(`/ops/field-governance/backfill/${encodeURIComponent(jobId)}/resume`, approvalToken ? { approval_token: approvalToken } : {}, {
+      headers: await opsWriteHeaders(),
+    }).then(res => res.data as FieldMigrationJob),
+  opsFieldBackfillAbort: async (jobId: string) =>
+    client.post(`/ops/field-governance/backfill/${encodeURIComponent(jobId)}/abort`, {}, {
+      headers: await opsWriteHeaders(),
+    }).then(res => res.data as FieldMigrationJob),
   opsSlowQueries: async (params: { db_id?: string; sort?: string; limit?: number }) =>
     client.get('/ops/slow-queries', { params, headers: await opsWriteHeaders() }).then(res => res.data),
   opsListPlans: (limit = 20) => client.get('/ops/plans', { params: { limit } }).then(res => res.data),

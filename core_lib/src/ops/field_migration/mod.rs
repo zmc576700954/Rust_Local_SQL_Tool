@@ -1,11 +1,14 @@
-//! 字段治理 / 拆表迁移 —— S1 只读切片。
+//! 字段治理 / 拆表迁移。
 //!
-//! 本场景只做：证据采集（E01-E14）→ 三档风险报告 → dry-run 脚本包。
-//! 不新增任何 `ActionSpec` 写动作，不执行建表/回填/删列。
+//! S1：证据采集（E01-E14）→ 三档风险报告 → dry-run 脚本包。
+//! S2：独立回填执行器（分批 / checkpoint / 限速 / 批校验 / 审计），
+//! 不接入索引 `Executor`、不复用 `DdlEngine`，且没有任何 DROP COLUMN 执行路径。
 
+pub mod backfill;
 pub mod dependency;
 pub mod diff;
 pub mod evidence;
+pub mod migration_store;
 pub mod read_only;
 pub mod risk;
 pub mod schema;
