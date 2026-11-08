@@ -23,6 +23,48 @@ pub struct OpsPolicy {
     pub ddl_timeout_secs: u64,
     /// MySQL 在线 DDL 的 lock_wait_timeout（秒）。
     pub lock_wait_timeout_secs: u64,
+    /// 字段治理：full 剖面允许的最大估算行数；超出自动降为 sampled。
+    #[serde(default = "default_field_profile_max_rows")]
+    pub field_profile_max_rows: u64,
+    /// 字段治理：full 剖面允许的最大数据量（字节）。
+    #[serde(default = "default_field_profile_max_bytes")]
+    pub field_profile_max_bytes: u64,
+    /// 字段治理：自动回填（S2 起）允许的最大行数；S1 仅用于风险分级。
+    #[serde(default = "default_field_migration_max_rows")]
+    pub field_migration_max_rows: u64,
+    /// 字段治理：自动回填允许的最大数据量（字节）。
+    #[serde(default = "default_field_migration_max_bytes")]
+    pub field_migration_max_bytes: u64,
+    /// 字段治理：sampled 模式的确定性抽样比例（千分比）。
+    #[serde(default = "default_field_sample_per_mille")]
+    pub field_sample_per_mille: u32,
+    /// 字段治理：最多分析多少个 JSON key（超过则视为结构不稳定）。
+    #[serde(default = "default_field_max_json_keys")]
+    pub field_max_json_keys: usize,
+}
+
+fn default_field_profile_max_rows() -> u64 {
+    5_000_000
+}
+
+fn default_field_profile_max_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+fn default_field_migration_max_rows() -> u64 {
+    2_000_000
+}
+
+fn default_field_migration_max_bytes() -> u64 {
+    5 * 1024 * 1024 * 1024
+}
+
+fn default_field_sample_per_mille() -> u32 {
+    100
+}
+
+fn default_field_max_json_keys() -> usize {
+    100
 }
 
 impl Default for OpsPolicy {
@@ -36,6 +78,12 @@ impl Default for OpsPolicy {
             allow_large_table: false,
             ddl_timeout_secs: 600,
             lock_wait_timeout_secs: 5,
+            field_profile_max_rows: default_field_profile_max_rows(),
+            field_profile_max_bytes: default_field_profile_max_bytes(),
+            field_migration_max_rows: default_field_migration_max_rows(),
+            field_migration_max_bytes: default_field_migration_max_bytes(),
+            field_sample_per_mille: default_field_sample_per_mille(),
+            field_max_json_keys: default_field_max_json_keys(),
         }
     }
 }

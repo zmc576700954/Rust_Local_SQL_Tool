@@ -1,0 +1,1148 @@
+import { useEffect, useMemo, useState } from 'react'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  ClipboardCopy,
+  Database,
+  FileCode2,
+  Loader2,
+  Lock,
+  Plus,
+  RefreshCw,
+  ShieldAlert,
+  Trash2,
+} from 'lucide-react'
+import { api } from '../../api'
+import { tr } from '../../i18n'
+import type { SchemaResponse, TableWithDetails } from '../../types'
+
+interface FieldGovernanceProps {
+  dbId?: string
+}
+
+type RiskLevel = 'info' | 'high' | 'block'
+
+interface FieldRisk {
+  id: string
+  code: string
+  level: RiskLevel
+  title: string
+  detail: string
+  evidence_refs?: string[]
+  blocks_write: boolean
+  requires_user_confirmation: boolean
+}
+
+interface RiskSummary {
+  block: number
+  high: number
+  info: number
+  undetermined_write_block: boolean
+  risk_floor: string
+}
+
+interface EvidenceItem {
+  id: string
+  title: string
+  status: string
+  mode: string
+  summary: string
+  sql?: string[]
+  details?: unknown
+}
+
+interface EvidenceGap {
+  evidence_id: string
+  reason: string
+}
+
+interface ColumnProfile {
+  column: string
+  data_type: string
+  column_type: string
+  nullable: boolean
+  column_key?: string | null
+  profile_mode: string
+  sample_per_mille?: number | null
+  rows_profiled: number
+  null_rows: number
+  empty_rows: number
+  max_char_length: number
+  max_byte_length: number
+  untrimmed_rows: number
+  control_char_rows: number
+  distinct_rows: number
+  distinct_binary_rows: number
+  json_valid_rows: number
+  json_invalid_rows: number
+  json_object_rows: number
+  json_array_rows: number
+  json_scalar_rows: number
+  json_other_rows: number
+  json_keys?: string[]
+  json_key_presence?: Array<{ key: string; rows: number; ratio: number }>
+  json_key_types?: Array<{ key: string; types: Record<string, number> }>
+  json_profiled: boolean
+  notes?: string[]
+}
+
+interface Declaration {
+  id: string
+  source: string
+  verified: boolean
+  column?: string | null
+  purpose?: string | null
+  expected_top_level?: string | null
+  expected_keys?: string[]
+  required_keys?: string[]
+  consumers?: string[]
+  unique_keys?: string[]
+  uniqueness_expected?: boolean
+  cutover_mode?: string | null
+  retention_days?: number | null
+}
+
+interface DeclarationEvidence {
+  declaration_id: string
+  kind: string
+  key_set?: string[]
+  rows: number
+  detail?: string
+}
+
+interface ManualScript {
+  id: string
+  title: string
+  kind: string
+  phase: string
+  sql: string
+  executable: boolean
+  irreversible: boolean
+  notes?: string[]
+}
+
+interface DryRunCheck {
+  script_id: string
+  check: string
+  status: string
+  detail: string
+}
+
+interface DryRunReport {
+  executed_against_database: boolean
+  passed: boolean
+  checks: DryRunCheck[]
+  note: string
+}
+
+interface DependencyEvidence {
+  primary_key_columns?: string[]
+  single_column_pk?: string | null
+  indexes?: Array<{ name: string; unique: boolean; primary: boolean; index_type: string; columns: string[] }>
+  foreign_keys?: Array<{ constraint_name: string; direction: string; table: string; column: string }>
+  generated_columns?: Array<{ name: string; expression: string; extra: string }>
+  objects?: Array<{ kind: string; name: string; matched_columns: string[] }>
+  source_triggers?: string[]
+  scan_complete: boolean
+  gaps?: string[]
+}
+
+interface EnvironmentEvidence {
+  version?: string | null
+  version_comment?: string | null
+  engine?: string | null
+  table_collation?: string | null
+  partitioned: boolean
+  read_only: boolean
+  long_transactions: number
+  version_supports_json: boolean
+}
+
+interface FieldGovernanceAnalysis {
+  db_name: string
+  table: string
+  column?: string | null
+  analyzed_columns: string[]
+  profile_mode: string
+  sample_per_mille?: number | null
+  estimated_rows?: number | null
+  data_length?: number | null
+  index_length?: number | null
+  row_count: number
+  columns: ColumnProfile[]
+  dependencies: DependencyEvidence
+  environment: EnvironmentEvidence
+  evidence: EvidenceItem[]
+  gaps: EvidenceGap[]
+  declarations?: Declaration[]
+  declaration_hash: string
+  declaration_evidence?: DeclarationEvidence[]
+  target_table: string
+  target_exists: boolean
+  risks: FieldRisk[]
+  risk_summary: RiskSummary
+  scripts: ManualScript[]
+  dry_run: DryRunReport
+}
+
+interface AnalyzeResponse {
+  plan: { plan_hash: string; diagnosis: string }
+  evidence: { db_name: string; table: string; extra?: FieldGovernanceAnalysis | null }
+}
+
+interface MappingDraft {
+  source_key: string
+  target_column: string
+  target_type: string
+  required: boolean
+}
+
+interface DeclarationDraft {
+  purpose: string
+  expected_top_level: string
+  expected_keys: string
+  required_keys: string
+  consumers: string
+  unique_keys: string
+  uniqueness_expected: boolean
+  target_nullable: 'inherit' | 'nullable' | 'not_null'
+  empty_string_means: string
+  cutover_mode: string
+  retention_days: string
+}
+
+function emptyDeclaration(): DeclarationDraft {
+  return {
+    purpose: '',
+    expected_top_level: '',
+    expected_keys: '',
+    required_keys: '',
+    consumers: '',
+    unique_keys: '',
+    uniqueness_expected: false,
+    target_nullable: 'inherit',
+    empty_string_means: '',
+    cutover_mode: '',
+    retention_days: '',
+  }
+}
+
+function splitCsv(value: string): string[] {
+  return value
+    .split(/[,，\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function describeError(error: unknown): string {
+  if (!error) return ''
+  if (typeof error === 'string') return error
+  const anyError = error as { message?: string; response?: { data?: { message?: string; error?: string } } }
+  return (
+    anyError.response?.data?.message ||
+    anyError.response?.data?.error ||
+    anyError.message ||
+    String(error)
+  )
+}
+
+function riskLevelClass(level: RiskLevel): string {
+  if (level === 'block') return 'border-red-500/60 bg-red-500/10 text-red-300'
+  if (level === 'high') return 'border-amber-500/50 bg-amber-500/10 text-amber-300'
+  return 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+}
+
+function riskLevelLabel(level: RiskLevel): string {
+  if (level === 'block') return tr('阻断', 'BLOCK')
+  if (level === 'high') return tr('高风险', 'HIGH')
+  return tr('提示', 'INFO')
+}
+
+function evidenceStatusClass(status: string): string {
+  if (status === 'collected') return 'text-emerald-400'
+  if (status === 'partial') return 'text-amber-400'
+  return 'text-red-400'
+}
+
+async function copyText(text: string): Promise<boolean> {
+  if (!text) return false
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // fall through to the legacy path
+  }
+  return false
+}
+
+export function FieldGovernance({ dbId }: FieldGovernanceProps) {
+  const [schema, setSchema] = useState<SchemaResponse | null>(null)
+  const [schemaError, setSchemaError] = useState('')
+  const [loadingSchema, setLoadingSchema] = useState(false)
+
+  const [table, setTable] = useState('')
+  const [column, setColumn] = useState('')
+  const [profileMode, setProfileMode] = useState<'auto' | 'full' | 'sampled'>('auto')
+  const [samplePerMille, setSamplePerMille] = useState('100')
+
+  const [targetTable, setTargetTable] = useState('')
+  const [pkColumn, setPkColumn] = useState('')
+  const [targetCollation, setTargetCollation] = useState('')
+  const [residualJson, setResidualJson] = useState(false)
+  const [mappings, setMappings] = useState<MappingDraft[]>([])
+  const [declarations, setDeclarations] = useState<DeclarationDraft[]>([emptyDeclaration()])
+
+  const [analysis, setAnalysis] = useState<FieldGovernanceAnalysis | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [expandedEvidence, setExpandedEvidence] = useState<string | null>(null)
+  const [copiedScript, setCopiedScript] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    if (!dbId) {
+      setSchema(null)
+      return
+    }
+    setLoadingSchema(true)
+    setSchemaError('')
+    api
+      .getSchema(dbId)
+      .then((resp: SchemaResponse) => {
+        if (cancelled) return
+        setSchema(resp)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setSchema(null)
+        setSchemaError(describeError(err))
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSchema(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [dbId])
+
+  const currentTable: TableWithDetails | undefined = useMemo(
+    () => schema?.tables?.find((item) => item.table_name === table),
+    [schema, table]
+  )
+
+  const tableOptions = useMemo(
+    () => (schema?.tables || []).map((item) => item.table_name),
+    [schema]
+  )
+
+  const columnOptions = useMemo(
+    () => (currentTable?.columns || []).map((item) => item.column_name),
+    [currentTable]
+  )
+
+  useEffect(() => {
+    setColumn('')
+    setMappings([])
+  }, [table])
+
+  const handleAnalyze = async () => {
+    if (!table.trim()) {
+      setError(tr('请先选择源表', 'Please select a source table'))
+      return
+    }
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      const payloadDeclarations = declarations
+        .filter((item) => item.purpose.trim() || item.required_keys.trim() || item.expected_keys.trim())
+        .map((item) => {
+          const declaration: Record<string, unknown> = {}
+          if (item.purpose.trim()) declaration.purpose = item.purpose.trim()
+          if (item.expected_top_level.trim()) declaration.expected_top_level = item.expected_top_level.trim()
+          const expectedKeys = splitCsv(item.expected_keys)
+          if (expectedKeys.length > 0) declaration.expected_keys = expectedKeys
+          const requiredKeys = splitCsv(item.required_keys)
+          if (requiredKeys.length > 0) declaration.required_keys = requiredKeys
+          const consumers = splitCsv(item.consumers)
+          if (consumers.length > 0) declaration.consumers = consumers
+          const uniqueKeys = splitCsv(item.unique_keys)
+          if (uniqueKeys.length > 0) declaration.unique_keys = uniqueKeys
+          if (item.uniqueness_expected) declaration.uniqueness_expected = true
+          if (item.target_nullable !== 'inherit') {
+            declaration.target_nullable = item.target_nullable === 'nullable'
+          }
+          if (item.empty_string_means.trim()) declaration.empty_string_means = item.empty_string_means.trim()
+          if (item.cutover_mode.trim()) declaration.cutover_mode = item.cutover_mode.trim()
+          const retention = Number(item.retention_days)
+          if (Number.isFinite(retention) && retention > 0) declaration.retention_days = retention
+          if (column.trim()) declaration.column = column.trim()
+          return declaration
+        })
+
+      const targetMappings = mappings
+        .filter((item) => item.target_column.trim())
+        .map((item) => ({
+          source_key: item.source_key.trim() || undefined,
+          target_column: item.target_column.trim(),
+          target_type: item.target_type.trim() || undefined,
+          required: item.required || undefined,
+        }))
+
+      const target: Record<string, unknown> = {}
+      if (targetTable.trim()) target.table = targetTable.trim()
+      if (pkColumn.trim()) target.pk_column = pkColumn.trim()
+      if (targetCollation.trim()) target.collation = targetCollation.trim()
+      target.residual_json = residualJson
+      if (targetMappings.length > 0) target.mappings = targetMappings
+
+      const resp: AnalyzeResponse = await api.opsAnalyze({
+        scenario_id: 'field-governance',
+        db_id: dbId,
+        table: table.trim(),
+        column: column.trim() || undefined,
+        target,
+        declarations: payloadDeclarations,
+        profile_mode: profileMode,
+        sample_per_mille: profileMode === 'sampled' ? Number(samplePerMille) || undefined : undefined,
+      })
+      const extra = resp?.evidence?.extra || null
+      if (!extra) {
+        setError(tr('后端未返回字段治理证据', 'Backend returned no field-governance evidence'))
+        return
+      }
+      setAnalysis(extra)
+      setNotice(
+        tr(
+          `分析完成：阻断 ${extra.risk_summary.block} / 高风险 ${extra.risk_summary.high} / 提示 ${extra.risk_summary.info}`,
+          `Analysis complete: block ${extra.risk_summary.block} / high ${extra.risk_summary.high} / info ${extra.risk_summary.info}`
+        )
+      )
+    } catch (err) {
+      setError(describeError(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleCopy = async (script: ManualScript) => {
+    const ok = await copyText(script.sql)
+    if (ok) {
+      setCopiedScript(script.id)
+      window.setTimeout(() => setCopiedScript(''), 2000)
+    } else {
+      setError(tr('复制失败，请手动选择脚本内容', 'Copy failed; select the script manually'))
+    }
+  }
+
+  const addMapping = () => {
+    setMappings((prev) => [...prev, { source_key: '', target_column: '', target_type: '', required: false }])
+  }
+
+  const updateMapping = (index: number, patch: Partial<MappingDraft>) => {
+    setMappings((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)))
+  }
+
+  const addDeclaration = () => setDeclarations((prev) => [...prev, emptyDeclaration()])
+
+  const updateDeclaration = (index: number, patch: Partial<DeclarationDraft>) => {
+    setDeclarations((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)))
+  }
+
+  const blockRisks = (analysis?.risks || []).filter((risk) => risk.level === 'block')
+  const highRisks = (analysis?.risks || []).filter((risk) => risk.level === 'high')
+  const infoRisks = (analysis?.risks || []).filter((risk) => risk.level === 'info')
+  const irreversibleScripts = (analysis?.scripts || []).filter((script) => script.irreversible)
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-white">
+              {tr('字段治理 · 只读分析', 'Field governance · read-only analysis')}
+            </h2>
+            <p className="mt-1 text-xs text-gray-400">
+              {tr(
+                '采集 E01-E14 证据 → 三档风险（阻断 / 高风险 / 提示）→ dry-run 脚本包。本页只生成脚本，不执行任何写库操作。',
+                'Collect E01-E14 evidence → three-tier risk (block / high / info) → dry-run script pack. This page only generates scripts and never writes to the database.'
+              )}
+            </p>
+          </div>
+          <span className="flex items-center gap-1 rounded border border-emerald-500/40 px-2 py-1 text-xs text-emerald-300">
+            <Lock className="h-3.5 w-3.5" />
+            {tr('只读 + dry-run', 'Read-only + dry-run')}
+          </span>
+        </div>
+      </div>
+
+      {(error || notice) && (
+        <div
+          className={`rounded-lg border p-3 text-sm ${
+            error
+              ? 'border-red-500/40 bg-red-500/10 text-red-300'
+              : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+          }`}
+        >
+          {error || notice}
+        </div>
+      )}
+
+      <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-white">{tr('源表与目标', 'Source and target')}</h3>
+          <button
+            onClick={() => {
+              if (!dbId) return
+              setLoadingSchema(true)
+              api
+                .getSchema(dbId)
+                .then(setSchema)
+                .catch((err: unknown) => setSchemaError(describeError(err)))
+                .finally(() => setLoadingSchema(false))
+            }}
+            className="flex items-center gap-1 rounded border border-dark-border px-2 py-1 text-xs text-gray-400 hover:bg-dark-bg"
+          >
+            {loadingSchema ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {tr('刷新表结构', 'Refresh schema')}
+          </button>
+        </div>
+
+        {schemaError && <div className="mt-2 text-xs text-red-400">{schemaError}</div>}
+
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-400">{tr('源表', 'Source table')}</label>
+            <select
+              value={table}
+              onChange={(event) => setTable(event.target.value)}
+              className="h-9 rounded border border-dark-border bg-dark-bg px-2 font-mono text-sm text-white outline-none focus:border-blue-500"
+            >
+              <option value="">{tr('请选择表', 'Select a table')}</option>
+              {tableOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-400">{tr('源列（留空 = 整表盘点）', 'Source column (empty = whole-table inventory)')}</label>
+            <select
+              value={column}
+              onChange={(event) => setColumn(event.target.value)}
+              className="h-9 rounded border border-dark-border bg-dark-bg px-2 font-mono text-sm text-white outline-none focus:border-blue-500"
+            >
+              <option value="">{tr('整表字段盘点', 'Whole-table inventory')}</option>
+              {columnOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-400">{tr('目标表（留空自动推断）', 'Target table (empty = inferred)')}</label>
+            <input
+              value={targetTable}
+              onChange={(event) => setTargetTable(event.target.value)}
+              placeholder="orders_payload_ext"
+              className="h-9 rounded border border-dark-border bg-dark-bg px-2 font-mono text-sm text-white outline-none focus:border-blue-500"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-400">{tr('目标主键列（留空沿用源表）', 'Target PK column (empty = source)')}</label>
+            <input
+              value={pkColumn}
+              onChange={(event) => setPkColumn(event.target.value)}
+              placeholder="id"
+              className="h-9 rounded border border-dark-border bg-dark-bg px-2 font-mono text-sm text-white outline-none focus:border-blue-500"
+            />
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-gray-400">{tr('剖面模式', 'Profile mode')}</label>
+            <select
+              value={profileMode}
+              onChange={(event) => setProfileMode(event.target.value as 'auto' | 'full' | 'sampled')}
+              className="h-8 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none"
+            >
+              <option value="auto">auto</option>
+              <option value="full">full</option>
+              <option value="sampled">sampled</option>
+            </select>
+          </div>
+          {profileMode === 'sampled' && (
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-400">{tr('抽样千分比', 'Sample per mille')}</label>
+              <input
+                value={samplePerMille}
+                onChange={(event) => setSamplePerMille(event.target.value)}
+                inputMode="numeric"
+                className="h-8 w-20 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none"
+              />
+            </div>
+          )}
+          <label className="flex items-center gap-2 text-xs text-gray-400">
+            <input type="checkbox" checked={residualJson} onChange={(event) => setResidualJson(event.target.checked)} />
+            {tr('允许 residual JSON 兜底', 'Allow residual JSON column')}
+          </label>
+          <input
+            value={targetCollation}
+            onChange={(event) => setTargetCollation(event.target.value)}
+            placeholder={tr('目标排序规则（可选）', 'Target collation (optional)')}
+            className="h-8 w-56 rounded border border-dark-border bg-dark-bg px-2 font-mono text-xs text-white outline-none"
+          />
+        </div>
+
+        <div className="mt-4 rounded border border-dark-border bg-dark-bg p-3">
+          <div className="flex items-center justify-between">
+            <h4 className="text-xs font-semibold text-gray-300">{tr('目标列映射', 'Target column mappings')}</h4>
+            <button
+              onClick={addMapping}
+              className="flex items-center gap-1 rounded border border-dark-border px-2 py-1 text-xs text-gray-400 hover:bg-dark-panel"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              {tr('添加映射', 'Add mapping')}
+            </button>
+          </div>
+          {mappings.length === 0 ? (
+            <p className="mt-2 text-xs text-gray-500">
+              {tr('未配置映射时，后端按 JSON key 推断目标列草案。', 'Without mappings the backend infers target columns from JSON keys.')}
+            </p>
+          ) : (
+            <div className="mt-2 flex flex-col gap-2">
+              {mappings.map((mapping, index) => (
+                <div key={index} className="grid gap-2 md:grid-cols-[1fr_1fr_1fr_auto_auto]">
+                  <input
+                    value={mapping.source_key}
+                    onChange={(event) => updateMapping(index, { source_key: event.target.value })}
+                    placeholder={tr('源 JSON key', 'Source JSON key')}
+                    className="h-8 rounded border border-dark-border bg-dark-panel px-2 font-mono text-xs text-white outline-none"
+                  />
+                  <input
+                    value={mapping.target_column}
+                    onChange={(event) => updateMapping(index, { target_column: event.target.value })}
+                    placeholder={tr('目标列名', 'Target column')}
+                    className="h-8 rounded border border-dark-border bg-dark-panel px-2 font-mono text-xs text-white outline-none"
+                  />
+                  <input
+                    value={mapping.target_type}
+                    onChange={(event) => updateMapping(index, { target_type: event.target.value })}
+                    placeholder={tr('目标类型（可选）', 'Target type (optional)')}
+                    className="h-8 rounded border border-dark-border bg-dark-panel px-2 font-mono text-xs text-white outline-none"
+                  />
+                  <label className="flex items-center gap-1 text-xs text-gray-400">
+                    <input
+                      type="checkbox"
+                      checked={mapping.required}
+                      onChange={(event) => updateMapping(index, { required: event.target.checked })}
+                    />
+                    {tr('必填', 'Required')}
+                  </label>
+                  <button
+                    onClick={() => setMappings((prev) => prev.filter((_, i) => i !== index))}
+                    className="flex items-center justify-center rounded border border-dark-border px-2 text-gray-400 hover:bg-dark-panel"
+                    aria-label={tr('删除映射', 'Remove mapping')}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-4 rounded border border-dark-border bg-dark-bg p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h4 className="text-xs font-semibold text-gray-300">{tr('语义描述', 'Semantic declarations')}</h4>
+              <p className="mt-1 text-[11px] text-gray-500">
+                {tr(
+                  '语义描述作为「带 ID 的未验证声明」：只会追加约束，不会降低任何风险等级。',
+                  'Declarations are unverified claims with IDs: they only add constraints and never lower a risk level.'
+                )}
+              </p>
+            </div>
+            <button
+              onClick={addDeclaration}
+              className="flex items-center gap-1 rounded border border-dark-border px-2 py-1 text-xs text-gray-400 hover:bg-dark-panel"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              {tr('添加声明', 'Add declaration')}
+            </button>
+          </div>
+          <div className="mt-3 flex flex-col gap-3">
+            {declarations.map((declaration, index) => (
+              <div key={index} className="rounded border border-dark-border bg-dark-panel p-3">
+                <div className="grid gap-2 md:grid-cols-2">
+                  <input
+                    value={declaration.purpose}
+                    onChange={(event) => updateDeclaration(index, { purpose: event.target.value })}
+                    placeholder={tr('用途（例如：只存用户偏好）', 'Purpose (e.g. user preferences only)')}
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none md:col-span-2"
+                  />
+                  <input
+                    value={declaration.expected_keys}
+                    onChange={(event) => updateDeclaration(index, { expected_keys: event.target.value })}
+                    placeholder={tr('预期 key（逗号分隔）', 'Expected keys (comma separated)')}
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 font-mono text-xs text-white outline-none"
+                  />
+                  <input
+                    value={declaration.required_keys}
+                    onChange={(event) => updateDeclaration(index, { required_keys: event.target.value })}
+                    placeholder={tr('必填 key（逗号分隔）', 'Required keys (comma separated)')}
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 font-mono text-xs text-white outline-none"
+                  />
+                  <input
+                    value={declaration.consumers}
+                    onChange={(event) => updateDeclaration(index, { consumers: event.target.value })}
+                    placeholder={tr('消费方（逗号分隔）', 'Consumers (comma separated)')}
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none"
+                  />
+                  <input
+                    value={declaration.unique_keys}
+                    onChange={(event) => updateDeclaration(index, { unique_keys: event.target.value })}
+                    placeholder={tr('唯一 key（逗号分隔）', 'Unique keys (comma separated)')}
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 font-mono text-xs text-white outline-none"
+                  />
+                  <select
+                    value={declaration.target_nullable}
+                    onChange={(event) =>
+                      updateDeclaration(index, { target_nullable: event.target.value as DeclarationDraft['target_nullable'] })
+                    }
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none"
+                  >
+                    <option value="inherit">{tr('目标可空性：沿用', 'Nullability: inherit')}</option>
+                    <option value="nullable">{tr('目标可空', 'Nullable')}</option>
+                    <option value="not_null">{tr('目标 NOT NULL', 'Target NOT NULL')}</option>
+                  </select>
+                  <select
+                    value={declaration.empty_string_means}
+                    onChange={(event) => updateDeclaration(index, { empty_string_means: event.target.value })}
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none"
+                  >
+                    <option value="">{tr('空串含义：未声明', 'Empty string: undeclared')}</option>
+                    <option value="null">{tr('空串等价 NULL', 'Empty means NULL')}</option>
+                    <option value="empty">{tr('空串是有效值', 'Empty is valid')}</option>
+                    <option value="invalid">{tr('空串非法', 'Empty is invalid')}</option>
+                  </select>
+                  <select
+                    value={declaration.cutover_mode}
+                    onChange={(event) => updateDeclaration(index, { cutover_mode: event.target.value })}
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none"
+                  >
+                    <option value="">{tr('切换方式：未声明', 'Cutover: undeclared')}</option>
+                    <option value="stop_write">{tr('停写切换', 'Stop-write cutover')}</option>
+                    <option value="dual_write">{tr('双写', 'Dual write')}</option>
+                  </select>
+                  <input
+                    value={declaration.retention_days}
+                    onChange={(event) => updateDeclaration(index, { retention_days: event.target.value })}
+                    placeholder={tr('保留天数（可选）', 'Retention days (optional)')}
+                    inputMode="numeric"
+                    className="h-8 rounded border border-dark-border bg-dark-bg px-2 text-xs text-white outline-none"
+                  />
+                  <label className="flex items-center gap-2 text-xs text-gray-400">
+                    <input
+                      type="checkbox"
+                      checked={declaration.uniqueness_expected}
+                      onChange={(event) => updateDeclaration(index, { uniqueness_expected: event.target.checked })}
+                    />
+                    {tr('声明 key 唯一', 'Declare key uniqueness')}
+                  </label>
+                </div>
+                <div className="mt-2 flex justify-end">
+                  <button
+                    onClick={() => setDeclarations((prev) => prev.filter((_, i) => i !== index))}
+                    className="flex items-center gap-1 rounded border border-dark-border px-2 py-1 text-xs text-gray-400 hover:bg-dark-bg"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {tr('删除', 'Remove')}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <button
+            onClick={() => void handleAnalyze()}
+            disabled={busy}
+            className="flex h-9 items-center gap-2 rounded bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
+            {tr('采集证据并生成风险报告', 'Collect evidence & build risk report')}
+          </button>
+        </div>
+      </div>
+
+      {analysis && (
+        <>
+          {(blockRisks.length > 0 || analysis.risk_summary.undetermined_write_block) && (
+            <div className="rounded-lg border-2 border-red-500/60 bg-red-500/10 p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-red-300">
+                <ShieldAlert className="h-5 w-5" />
+                {tr('存在阻断项：任何写步骤都必须停止', 'Blocking items found: all write steps must stop')}
+              </div>
+              <p className="mt-1 text-xs text-red-200/80">
+                {tr(
+                  '阻断项与不可判定项在 S1 中只做展示；后续阶段不得跳过这些阻断直接进入写库。',
+                  'Blocking and undetermined items are display-only in S1; later stages must not skip them.'
+                )}
+              </p>
+              {analysis.risk_summary.undetermined_write_block && (
+                <div className="mt-2 rounded border border-red-500/50 bg-red-500/10 px-2 py-1 text-xs text-red-300">
+                  {tr('不可判定 → 按阻断处理（证据缺口 / 抽样 / 依赖扫描不完整）', 'Undetermined → treated as blocking (evidence gaps / sampling / incomplete dependency scan)')}
+                </div>
+              )}
+              {blockRisks.length > 0 && (
+                <ul className="mt-2 space-y-1 text-xs text-red-200">
+                  {blockRisks.map((risk) => (
+                    <li key={risk.id}>
+                      <span className="mr-2 rounded bg-red-500/20 px-1.5 py-0.5 font-mono text-red-300">{risk.code}</span>
+                      {risk.title}：{risk.detail}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {irreversibleScripts.length > 0 && (
+            <div className="rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-xs text-amber-300">
+              <div className="flex items-center gap-2 font-semibold">
+                <AlertTriangle className="h-4 w-4" />
+                {tr('不可逆步骤（执行前必须显式确认）', 'Irreversible steps (explicit confirmation required)')}
+              </div>
+              <ul className="mt-1 space-y-1">
+                {irreversibleScripts.map((script) => (
+                  <li key={script.id}>
+                    {script.title}（{script.phase}）；{tr('本页不会执行', 'not executed on this page')}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
+            <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
+              <FileCode2 className="h-4 w-4 text-blue-400" />
+              {tr('风险报告', 'Risk report')}
+            </h3>
+            <div className="grid gap-2 text-xs md:grid-cols-4">
+              <div className="rounded border border-red-500/40 bg-red-500/10 p-2 text-red-300">
+                {tr('阻断', 'Block')}: {analysis.risk_summary.block}
+              </div>
+              <div className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-amber-300">
+                {tr('高风险', 'High')}: {analysis.risk_summary.high}
+              </div>
+              <div className="rounded border border-sky-500/40 bg-sky-500/10 p-2 text-sky-300">
+                {tr('提示', 'Info')}: {analysis.risk_summary.info}
+              </div>
+              <div className="rounded border border-dark-border bg-dark-bg p-2 text-gray-300">
+                {tr('风险下限', 'Risk floor')}: {analysis.risk_summary.risk_floor}
+              </div>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              {[blockRisks, highRisks, infoRisks].map((group, index) => (
+                <div key={index} className="rounded border border-dark-border bg-dark-bg p-3 text-xs">
+                  <div className="mb-2 text-gray-400">
+                    {index === 0 ? tr('阻断', 'Block') : index === 1 ? tr('高风险', 'High') : tr('提示', 'Info')}（{group.length}）
+                  </div>
+                  {group.length === 0 ? (
+                    <div className="text-gray-500">{tr('无', 'None')}</div>
+                  ) : (
+                    <ul className="space-y-1">
+                      {group.map((risk) => (
+                        <li key={risk.id} className={`rounded border px-2 py-1 ${riskLevelClass(risk.level)}`}>
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span className="rounded bg-black/20 px-1 font-mono">{risk.code}</span>
+                            <span className="font-semibold">{risk.title}</span>
+                            <span className="text-[10px] uppercase opacity-80">{riskLevelLabel(risk.level)}</span>
+                          </div>
+                          <div className="mt-0.5 opacity-80">{risk.detail}</div>
+                          </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
+            <h3 className="mb-3 text-sm font-semibold text-white">{tr('证据（E01-E14）', 'Evidence (E01-E14)')}</h3>
+            <div className="grid gap-2 text-xs md:grid-cols-2">
+              <div className="rounded border border-dark-border bg-dark-bg p-2 text-gray-300">
+                {analysis.db_name}.{analysis.table}
+                {analysis.column ? ` · ${analysis.column}` : ` · ${tr('整表盘点', 'whole-table inventory')}`}
+              </div>
+              <div className="rounded border border-dark-border bg-dark-bg p-2 text-gray-300">
+                {tr('剖面', 'Profile')}: {analysis.profile_mode}
+                {analysis.sample_per_mille ? ` (${analysis.sample_per_mille}‰)` : ''} · {tr('行数', 'rows')}: {analysis.row_count}
+              </div>
+            </div>
+            {analysis.gaps.length > 0 && (
+              <div className="mt-2 rounded border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-300">
+                {tr('证据缺口（不可判定）', 'Evidence gaps (undetermined)')}:
+                {analysis.gaps.map((gap) => ` ${gap.evidence_id}: ${gap.reason}`).join(';')}
+              </div>
+            )}
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full min-w-[720px] text-left text-xs">
+                <thead className="text-gray-400">
+                  <tr className="border-b border-dark-border">
+                    <th className="px-2 py-1">ID</th>
+                    <th className="px-2 py-1">{tr('证据', 'Evidence')}</th>
+                    <th className="px-2 py-1">{tr('状态', 'Status')}</th>
+                    <th className="px-2 py-1">{tr('模式', 'Mode')}</th>
+                    <th className="px-2 py-1">{tr('摘要', 'Summary')}</th>
+                    <th className="px-2 py-1" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {analysis.evidence.map((item) => (
+                    <tr key={item.id} className="border-b border-dark-border/60 align-top">
+                      <td className="px-2 py-1 font-mono text-gray-300">{item.id}</td>
+                      <td className="px-2 py-1 text-gray-300">{item.title}</td>
+                      <td className={`px-2 py-1 font-mono ${evidenceStatusClass(item.status)}`}>{item.status}</td>
+                      <td className="px-2 py-1 font-mono text-gray-500">{item.mode}</td>
+                      <td className="px-2 py-1 text-gray-400">{item.summary}</td>
+                      <td className="px-2 py-1">
+                        {Boolean(item.sql?.length || item.details) && (
+                          <button
+                            onClick={() => setExpandedEvidence(expandedEvidence === item.id ? null : item.id)}
+                            className="flex items-center gap-1 text-gray-400 hover:text-gray-200"
+                          >
+                            {expandedEvidence === item.id ? (
+                              <ChevronUp className="h-3.5 w-3.5" />
+                            ) : (
+                              <ChevronDown className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {expandedEvidence && (
+              <div className="mt-2 rounded border border-dark-border bg-dark-bg p-2">
+                {(() => {
+                  const item = analysis.evidence.find((entry) => entry.id === expandedEvidence)
+                  if (!item) return null
+                  return (
+                    <div className="space-y-2 text-xs">
+                      {(item.sql || []).map((sql, index) => (
+                        <pre key={index} className="overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-gray-300">
+                          {sql}
+                        </pre>
+                      ))}
+                      {item.details != null && (
+                        <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-gray-400">
+                          {JSON.stringify(item.details, null, 2)}
+                        </pre>
+                      )}
+                    </div>
+                  )
+                })()}
+              </div>
+            )}
+
+            {analysis.columns.length > 0 && (
+              <div className="mt-4 overflow-x-auto">
+                <h4 className="mb-2 text-xs font-semibold text-gray-300">{tr('列剖面', 'Column profiles')}</h4>
+                <table className="w-full min-w-[900px] text-left text-xs">
+                  <thead className="text-gray-400">
+                    <tr className="border-b border-dark-border">
+                      <th className="px-2 py-1">{tr('列', 'Column')}</th>
+                      <th className="px-2 py-1">{tr('类型', 'Type')}</th>
+                      <th className="px-2 py-1">{tr('可空', 'Nullable')}</th>
+                      <th className="px-2 py-1">{tr('NULL', 'NULL')}</th>
+                      <th className="px-2 py-1">{tr('空串', 'Empty')}</th>
+                      <th className="px-2 py-1">{tr('最大字符', 'Max chars')}</th>
+                      <th className="px-2 py-1">{tr('非法 JSON', 'Invalid JSON')}</th>
+                      <th className="px-2 py-1">{tr('JSON keys', 'JSON keys')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {analysis.columns.map((entry) => (
+                      <tr key={entry.column} className="border-b border-dark-border/60">
+                        <td className="px-2 py-1 font-mono text-gray-200">{entry.column}</td>
+                        <td className="px-2 py-1 font-mono text-gray-400">{entry.column_type}</td>
+                        <td className="px-2 py-1 text-gray-400">{entry.nullable ? 'YES' : 'NO'}</td>
+                        <td className="px-2 py-1 text-gray-400">{entry.null_rows}</td>
+                        <td className="px-2 py-1 text-gray-400">{entry.empty_rows}</td>
+                        <td className="px-2 py-1 text-gray-400">{entry.max_char_length}</td>
+                        <td className={`px-2 py-1 font-mono ${entry.json_invalid_rows > 0 ? 'text-red-400' : 'text-gray-500'}`}>
+                          {entry.json_invalid_rows}
+                        </td>
+                        <td className="px-2 py-1 font-mono text-gray-500">
+                          {(entry.json_keys || []).length > 0 ? (entry.json_keys || []).join(', ') : '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="mt-4 grid gap-3 text-xs md:grid-cols-2">
+              <div className="rounded border border-dark-border bg-dark-bg p-2">
+                <div className="mb-1 text-gray-400">{tr('依赖对象', 'Dependencies')}</div>
+                <div className="text-gray-300">
+                  {tr('索引', 'Indexes')}: {(analysis.dependencies.indexes || []).length} ·{' '}
+                  {tr('外键', 'Foreign keys')}: {(analysis.dependencies.foreign_keys || []).length} ·{' '}
+                  {tr('生成列', 'Generated')}: {(analysis.dependencies.generated_columns || []).length} ·{' '}
+                  {tr('视图/触发/例程', 'Views/triggers/routines')}: {(analysis.dependencies.objects || []).length}
+                </div>
+                <div className={`mt-1 ${analysis.dependencies.scan_complete ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {tr('扫描完整', 'Scan complete')}: {analysis.dependencies.scan_complete ? 'true' : 'false'}
+                </div>
+              </div>
+              <div className="rounded border border-dark-border bg-dark-bg p-2">
+                <div className="mb-1 text-gray-400">{tr('环境', 'Environment')}</div>
+                <div className="text-gray-300">
+                  {tr('引擎', 'Engine')}: {analysis.environment.engine || '-'} · {tr('排序规则', 'Collation')}:{' '}
+                  {analysis.environment.table_collation || '-'}
+                </div>
+                <div className="mt-1 text-gray-400">
+                  {tr('只读实例', 'Read only')}: {analysis.environment.read_only ? 'yes' : 'no'} ·{' '}
+                  {tr('分区表', 'Partitioned')}: {analysis.environment.partitioned ? 'yes' : 'no'} ·{' '}
+                  {tr('长事务', 'Long transactions')}: {analysis.environment.long_transactions}
+                </div>
+              </div>
+            </div>
+
+            {(analysis.declarations || []).length > 0 && (
+              <div className="mt-4 rounded border border-dark-border bg-dark-bg p-3 text-xs">
+                <div className="text-gray-400">{tr('语义声明（未验证，只增约束）', 'Semantic declarations (unverified, constraints only)')}</div>
+                <ul className="mt-2 space-y-1">
+                  {(analysis.declarations || []).map((declaration) => (
+                    <li key={declaration.id} className="text-gray-300">
+                      <span className="font-mono text-gray-500">{declaration.id}</span> · {declaration.source} ·{' '}
+                      {declaration.verified ? tr('已验证', 'verified') : tr('未验证', 'unverified')}
+                      {declaration.purpose ? ` · ${declaration.purpose}` : ''}
+                    </li>
+                  ))}
+                </ul>
+                {(analysis.declaration_evidence || []).length > 0 && (
+                  <ul className="mt-2 space-y-1 text-gray-400">
+                    {(analysis.declaration_evidence || []).map((evidence, index) => (
+                      <li key={`${evidence.declaration_id}-${index}`}>
+                        {evidence.declaration_id} / {evidence.kind}: rows={evidence.rows}
+                        {evidence.key_set?.length ? ` keys=${evidence.key_set.join(',')}` : ''} {evidence.detail}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
+            <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
+              <FileCode2 className="h-4 w-4 text-emerald-400" />
+              {tr('Dry-run 脚本包（只生成，不执行）', 'Dry-run script pack (generated, never executed)')}
+            </h3>
+            {analysis.scripts.length === 0 ? (
+              <p className="text-xs text-gray-500">
+                {tr('整表盘点模式不生成脚本；请选择具体源列。', 'Whole-table inventory generates no scripts; select a specific source column.')}
+              </p>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {analysis.scripts.map((script) => (
+                  <div
+                    key={script.id}
+                    className={`rounded border p-3 ${
+                      script.irreversible ? 'border-red-500/50 bg-red-500/10' : 'border-dark-border bg-dark-bg'
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-semibold text-gray-200">{script.title}</span>
+                        <span className="rounded border border-dark-border px-1.5 py-0.5 font-mono text-gray-400">
+                          {script.kind}
+                        </span>
+                        <span className="rounded border border-dark-border px-1.5 py-0.5 font-mono text-gray-400">
+                          {tr('阶段', 'phase')}: {script.phase}
+                        </span>
+                        <span className="rounded border border-emerald-500/40 px-1.5 py-0.5 text-emerald-300">
+                          executable=false
+                        </span>
+                        {script.irreversible && (
+                          <span className="flex items-center gap-1 rounded border border-red-500/60 bg-red-500/20 px-1.5 py-0.5 font-semibold text-red-300">
+                            <AlertTriangle className="h-3.5 w-3.5" />
+                            {tr('不可逆', 'IRREVERSIBLE')}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => void handleCopy(script)}
+                        className="flex items-center gap-1 rounded border border-dark-border px-2 py-1 text-xs text-gray-300 hover:bg-dark-panel"
+                      >
+                        {copiedScript === script.id ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> : <ClipboardCopy className="h-3.5 w-3.5" />}
+                        {copiedScript === script.id ? tr('已复制', 'Copied') : tr('复制', 'Copy')}
+                      </button>
+                    </div>
+                    {(script.notes || []).length > 0 && (
+                      <ul className="mt-2 space-y-1 text-[11px] text-gray-500">
+                        {(script.notes || []).map((note, index) => (
+                          <li key={index}>- {note}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded border border-dark-border bg-dark-bg p-2 font-mono text-[11px] text-gray-300">
+                      {script.sql}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-4 rounded border border-dark-border bg-dark-bg p-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-gray-400">{tr('dry-run 检查', 'Dry-run checks')}</span>
+                <span className={analysis.dry_run.passed ? 'text-emerald-400' : 'text-red-400'}>
+                  {analysis.dry_run.passed ? tr('通过', 'PASS') : tr('未通过', 'FAIL')} ·{' '}
+                  {tr('未连接数据库', 'not executed against DB')}: {analysis.dry_run.executed_against_database ? 'false' : 'true'}
+                </span>
+              </div>
+              {(analysis.dry_run.checks || []).length > 0 && (
+                <ul className="mt-2 space-y-1">
+                  {analysis.dry_run.checks.map((check, index) => (
+                    <li key={`${check.script_id}-${index}`} className="text-gray-400">
+                      <span
+                        className={
+                          check.status === 'pass'
+                            ? 'text-emerald-400'
+                            : check.status === 'fail'
+                              ? 'text-red-400'
+                              : 'text-amber-400'
+                        }
+                      >
+                        {check.status}
+                      </span>{' '}
+                      · {check.script_id} / {check.check}: {check.detail}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="mt-2 text-gray-500">{analysis.dry_run.note}</div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}

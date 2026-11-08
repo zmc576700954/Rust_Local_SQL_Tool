@@ -13,6 +13,7 @@ import { api } from '../../api'
 import { tr } from '../../i18n'
 import { InspectionCenter } from './InspectionCenter'
 import { PerfDiagnostics } from './PerfDiagnostics'
+import { FieldGovernance } from './FieldGovernance'
 
 interface OpsCenterProps {
   dbId?: string
@@ -169,7 +170,7 @@ function statusClass(status: string): string {
   return 'text-amber-400'
 }
 
-type OpsView = 'advisor' | 'perf' | 'inspection'
+type OpsView = 'advisor' | 'perf' | 'inspection' | 'field'
 
 function OpsViewTabs({ view, onChange }: { view: OpsView; onChange: (view: OpsView) => void }) {
   return (
@@ -203,6 +204,16 @@ function OpsViewTabs({ view, onChange }: { view: OpsView; onChange: (view: OpsVi
         }`}
       >
         {tr('定期巡检', 'Periodic inspection')}
+      </button>
+      <button
+        onClick={() => onChange('field')}
+        className={`rounded border px-3 py-1.5 text-xs ${
+          view === 'field'
+            ? 'border-sky-500/50 bg-sky-500/10 text-sky-300'
+            : 'border-dark-border text-gray-400 hover:bg-dark-panel'
+        }`}
+      >
+        {tr('字段治理', 'Field governance')}
       </button>
     </div>
   )
@@ -438,6 +449,15 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
       <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
         <OpsViewTabs view={view} onChange={setView} />
         <InspectionCenter dbId={dbId} dbType={dbType} />
+      </div>
+    )
+  }
+
+  if (view === 'field') {
+    return (
+      <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
+        <OpsViewTabs view={view} onChange={setView} />
+        <FieldGovernance dbId={dbId} />
       </div>
     )
   }

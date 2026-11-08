@@ -513,6 +513,12 @@ export const api = {
     sample_sql?: string
     explain_analyze?: boolean
     explain_analyze_timeout_ms?: number
+    // 字段治理（只读分析）：源列、目标映射、语义声明、剖面模式
+    column?: string
+    target?: Record<string, unknown>
+    declarations?: Array<Record<string, unknown>>
+    profile_mode?: string
+    sample_per_mille?: number
   }) => client.post('/ops/analyze', payload, { headers: await opsWriteHeaders() }).then(res => res.data),
   opsSlowQueries: async (params: { db_id?: string; sort?: string; limit?: number }) =>
     client.get('/ops/slow-queries', { params, headers: await opsWriteHeaders() }).then(res => res.data),

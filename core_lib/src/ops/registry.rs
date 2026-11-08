@@ -43,6 +43,9 @@ pub struct OpsContext {
     pub audit: Option<Arc<AuditLog>>,
     /// 调用方会话标识，写入审计。
     pub session_id: Option<String>,
+    /// 本次请求实际生效的运维策略。字段治理等需要在证据采集阶段
+    /// 使用策略阈值（如 full 剖面上限）；其他场景可忽略。
+    pub policy: Option<Arc<OpsPolicy>>,
 }
 
 impl OpsContext {
@@ -60,12 +63,18 @@ impl OpsContext {
             is_read_only,
             audit: None,
             session_id: None,
+            policy: None,
         }
     }
 
     pub fn with_audit(mut self, audit: Option<Arc<AuditLog>>, session_id: Option<String>) -> Self {
         self.audit = audit;
         self.session_id = session_id;
+        self
+    }
+
+    pub fn with_policy(mut self, policy: Arc<OpsPolicy>) -> Self {
+        self.policy = Some(policy);
         self
     }
 
@@ -123,9 +132,11 @@ impl ScenarioRegistry {
     pub fn builtin() -> Self {
         let index_advisor = super::index_advisor::IndexAdvisorScenario::new();
         let perf_diagnostics = super::perf_diagnostics::PerfDiagnosticsScenario::new();
+        let field_governance = super::field_migration::FieldGovernanceScenario::new();
         let descriptors = vec![
             index_advisor.descriptor().clone(),
             perf_diagnostics.descriptor().clone(),
+            field_governance.descriptor().clone(),
             // 首期仅开放 MySQL。PG/SQLite 标为实验性，继续只读，不出计划。
             ScenarioDescriptor {
                 id: "pg-index-advisor".into(),
@@ -154,18 +165,13 @@ impl ScenarioRegistry {
                 risk_ceiling: RiskClass::L0,
                 allowed_actions: vec![],
             },
-            ScenarioDescriptor {
-                id: "field-governance".into(),
-                title: "字段治理（后续阶段规划）".into(),
-                description: "阶段 0 不实现字段治理 / JSON 拆表迁移。".into(),
-                engines: vec![],
-                status: ScenarioStatus::Disabled,
-                risk_ceiling: RiskClass::L0,
-                allowed_actions: vec![],
-            },
         ];
         Self {
-            scenarios: vec![Box::new(index_advisor), Box::new(perf_diagnostics)],
+            scenarios: vec![
+                Box::new(index_advisor),
+                Box::new(perf_diagnostics),
+                Box::new(field_governance),
+            ],
             descriptors,
         }
     }

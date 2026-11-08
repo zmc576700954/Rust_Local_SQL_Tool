@@ -182,6 +182,21 @@ pub(crate) struct OpsAnalyzeRequest {
     /// 性能诊断：EXPLAIN ANALYZE 会话超时，默认 5000ms。
     #[serde(default)]
     pub explain_analyze_timeout_ms: Option<u64>,
+    /// 字段治理：源列；为空表示整表字段盘点。
+    #[serde(default)]
+    pub column: Option<String>,
+    /// 字段治理：目标表/列映射/排序规则/residual JSON。
+    #[serde(default)]
+    pub target: Option<serde_json::Value>,
+    /// 字段治理：用户语义描述数组（带 ID 的未验证声明）。
+    #[serde(default)]
+    pub declarations: Option<serde_json::Value>,
+    /// 字段治理：auto / full / sampled。
+    #[serde(default)]
+    pub profile_mode: Option<String>,
+    /// 字段治理：sampled 模式千分比。
+    #[serde(default)]
+    pub sample_per_mille: Option<u32>,
 }
 
 impl OpsAnalyzeRequest {
@@ -195,6 +210,21 @@ impl OpsAnalyzeRequest {
                 "explain_analyze": self.explain_analyze.unwrap_or(false),
                 "explain_analyze_timeout_ms": self.explain_analyze_timeout_ms,
                 "use_llm": self.use_llm.unwrap_or(false),
+            }));
+        }
+        if scenario_id == "field-governance" {
+            let table = self
+                .table
+                .filter(|t| !t.trim().is_empty())
+                .ok_or_else(|| AppError::BadRequest("字段治理缺少 table".into()))?;
+            return Ok(serde_json::json!({
+                "table": table,
+                "column": self.column,
+                "target": self.target,
+                "declarations": self.declarations,
+                "profile_mode": self.profile_mode,
+                "sample_per_mille": self.sample_per_mille,
+                "notes": self.notes,
             }));
         }
         let table = self
@@ -255,11 +285,14 @@ async fn run_analyze(
 
     let use_llm = req.use_llm.unwrap_or(false);
     let db_id = req.db_id.clone();
-    let ctx = build_ctx(state, db_id.as_deref(), Some(session_id(headers))).await?;
+    // 先读策略，让需要在证据采集阶段使用阈值的场景（字段治理）拿到生效值。
+    let policy = state.ops.policy.read().await.clone();
+    let ctx = build_ctx(state, db_id.as_deref(), Some(session_id(headers)))
+        .await?
+        .with_policy(std::sync::Arc::new(policy.clone()));
     let input_value = req.into_input(&scenario_id)?;
 
     let evidence = scenario.collect_evidence(&ctx, &input_value).await?;
-    let policy = state.ops.policy.read().await.clone();
     let mut plan = scenario.build_plan(&ctx.identity(), &evidence, &input_value, &policy)?;
     if use_llm {
         // 复用 ai/ 下已有模型调用栈；模型输出仍要过服务端编译校验。

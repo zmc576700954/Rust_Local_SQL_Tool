@@ -791,6 +791,7 @@ pub async fn collect_evidence(
         collected_at: crate::ops::types::now(),
         notes,
         perf: Some(perf),
+        extra: None,
     })
 }
 

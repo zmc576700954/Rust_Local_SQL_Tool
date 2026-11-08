@@ -12,6 +12,7 @@ pub mod audit;
 pub mod ddl_compiler;
 pub mod error;
 pub mod executor;
+pub mod field_migration;
 pub mod index_advisor;
 pub mod inspection;
 pub mod local_token;

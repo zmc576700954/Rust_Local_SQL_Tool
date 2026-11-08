@@ -370,6 +370,10 @@ pub struct EvidencePack {
     pub notes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perf: Option<PerfEvidence>,
+    /// 场景扩展证据（字段治理的 E01-E14）。只有该场景会填充；
+    /// 结构固定为 `field_migration::FieldGovernanceAnalysis`，避免把本类型撑大。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<serde_json::Value>,
 }
 
 impl EvidencePack {
@@ -383,6 +387,7 @@ impl EvidencePack {
             index_usage: &self.index_usage,
             workload_sql: &self.workload_sql,
             perf: &self.perf,
+            extra: &self.extra,
         })
     }
 }
@@ -398,6 +403,8 @@ struct EvidenceHashView<'a> {
     workload_sql: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     perf: &'a Option<PerfEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra: &'a Option<serde_json::Value>,
 }
 
 // ── 计划模型 ───────────────────────────────────────────────
