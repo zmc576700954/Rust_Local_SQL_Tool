@@ -62,6 +62,19 @@ pub enum AppError {
     PayloadTooLarge(String),
     #[error("Resource limit exceeded: {0}")]
     ResourceLimit(String),
+    #[error("Export memory limit exceeded: used={used}B limit={limit}B rows_written={rows_written}")]
+    ExportMemoryLimit {
+        limit: u64,
+        used: u64,
+        rows_written: u64,
+    },
+    #[error("Export too large: estimated_rows={estimated_rows} avg_row_bytes={avg_row_bytes} estimated_bytes={estimated_bytes} max_bytes={max_bytes}")]
+    ExportTooLarge {
+        estimated_rows: u64,
+        avg_row_bytes: u64,
+        estimated_bytes: u64,
+        max_bytes: u64,
+    },
     #[error("Too many requests: {0}")]
     TooManyRequests(String),
     #[error("Internal server error: {0}")]
@@ -268,6 +281,43 @@ impl IntoResponse for AppError {
                     "Resource limit exceeded"
                 },
                 msg.clone(),
+            ),
+            AppError::ExportMemoryLimit {
+                limit,
+                used,
+                rows_written,
+            } => (
+                StatusCode::INSUFFICIENT_STORAGE,
+                "ERR_EXPORT_MEMORY_LIMIT",
+                "resource_limit",
+                if zh {
+                    "导出内存超限"
+                } else {
+                    "Export memory limit exceeded"
+                },
+                format!(
+                    "used={}B, limit={}B, rows_written={}",
+                    used, limit, rows_written
+                ),
+            ),
+            AppError::ExportTooLarge {
+                estimated_rows,
+                avg_row_bytes,
+                estimated_bytes,
+                max_bytes,
+            } => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "ERR_EXPORT_TOO_LARGE",
+                "resource_limit",
+                if zh {
+                    "导出数据量超过安全阈值"
+                } else {
+                    "Export size exceeds the safety threshold"
+                },
+                format!(
+                    "estimated_rows={}, avg_row_bytes={}, estimated_bytes={}, max_bytes={}",
+                    estimated_rows, avg_row_bytes, estimated_bytes, max_bytes
+                ),
             ),
             AppError::TooManyRequests(msg) => (
                 StatusCode::TOO_MANY_REQUESTS,

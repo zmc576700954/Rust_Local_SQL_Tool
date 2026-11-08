@@ -797,6 +797,72 @@ impl MockDataGenerator {
     }
 }
 
+/// 导出内存预算：统计流式导出过程中「已缓冲字节」的峰值。
+///
+/// 流式导出每次只保留当前行的编码结果，正常情况下 `used` 只有几十 KB。
+/// 超过 `limit` 时立即失败，避免异常宽行把进程内存打满。
+#[derive(Debug, Clone)]
+pub struct MemoryBudget {
+    limit: u64,
+    used: u64,
+    peak: u64,
+}
+
+impl MemoryBudget {
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            used: 0,
+            peak: 0,
+        }
+    }
+
+    /// 预留 `bytes` 字节；超过上限时返回当前已用量与上限，不改变状态。
+    pub fn reserve(&mut self, bytes: u64) -> Result<(), (u64, u64)> {
+        let next = self.used.saturating_add(bytes);
+        if next > self.limit {
+            return Err((next, self.limit));
+        }
+        self.used = next;
+        self.peak = self.peak.max(self.used);
+        Ok(())
+    }
+
+    pub fn release(&mut self, bytes: u64) {
+        self.used = self.used.saturating_sub(bytes);
+    }
+
+    pub fn used(&self) -> u64 {
+        self.used
+    }
+
+    pub fn peak(&self) -> u64 {
+        self.peak
+    }
+
+    pub fn limit(&self) -> u64 {
+        self.limit
+    }
+}
+
+/// 导出前对「行数 × 平均行宽」的估算结果。
+#[derive(Debug, Clone, Copy)]
+pub struct ExportEstimate {
+    pub rows: u64,
+    pub avg_row_bytes: u64,
+}
+
+impl ExportEstimate {
+    pub fn estimated_bytes(&self) -> u64 {
+        self.rows.saturating_mul(self.avg_row_bytes)
+    }
+
+    /// 估算体积是否明显超过安全阈值（导出文件上限）。
+    pub fn exceeds(&self, max_bytes: u64) -> bool {
+        self.rows > 0 && self.estimated_bytes() > max_bytes
+    }
+}
+
 pub struct DataExporter;
 
 impl DataExporter {
@@ -975,6 +1041,50 @@ mod tests {
         assert_eq!(
             sql,
             "('{\"k\":\"值😀\"}', '1234567890123456789.123456789012345678', '\\x0102');\n"
+        );
+    }
+
+    #[test]
+    fn memory_budget_tracks_peak_and_rejects_overflow() {
+        let mut budget = MemoryBudget::new(1024);
+        assert!(budget.reserve(600).is_ok());
+        assert!(budget.reserve(400).is_ok());
+        assert_eq!(budget.used(), 1000);
+        assert_eq!(budget.peak(), 1000);
+        // 超限：状态不变，返回需要量与上限。
+        assert_eq!(budget.reserve(25), Err((1025, 1024)));
+        assert_eq!(budget.used(), 1000);
+        budget.release(1000);
+        assert_eq!(budget.used(), 0);
+        assert_eq!(budget.peak(), 1000);
+        // 释放后可继续使用，峰值保持历史最大值。
+        assert!(budget.reserve(1024).is_ok());
+        assert_eq!(budget.peak(), 1024);
+    }
+
+    #[test]
+    fn export_estimate_flags_only_clearly_oversized_results() {
+        let est = ExportEstimate {
+            rows: 500_000,
+            avg_row_bytes: 200,
+        };
+        assert_eq!(est.estimated_bytes(), 100_000_000);
+        assert!(!est.exceeds(500 * 1024 * 1024));
+        assert!(est.exceeds(50 * 1024 * 1024));
+        // 空表不触发拒绝。
+        assert!(!ExportEstimate {
+            rows: 0,
+            avg_row_bytes: 0
+        }
+        .exceeds(1));
+        // 饱和乘法不溢出。
+        assert_eq!(
+            ExportEstimate {
+                rows: u64::MAX,
+                avg_row_bytes: 2
+            }
+            .estimated_bytes(),
+            u64::MAX
         );
     }
 

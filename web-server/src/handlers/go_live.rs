@@ -1,6 +1,6 @@
 //! GoLive handler — pre-deployment checks, job orchestration, and report generation.
 
-use super::util::{require_file_transfer_client, row_to_json};
+use super::util::{pg_row_to_json_with_catalog, require_file_transfer_client, row_to_json};
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -236,6 +236,12 @@ pub async fn export_job_start(
     };
     require_file_transfer_client(&db_client, "导出任务")?;
 
+    // 同一时刻只允许一个导出任务，避免并发导出叠加内存。
+    let export_permit = super::util::acquire_export_slot(&state)?;
+    // 启动阶段按目录统计估算体积，明显超过文件上限时直接拒绝。
+    let estimate = super::util::estimate_export_size(&db_client, &req.table_name).await;
+    super::util::ensure_export_estimate(estimate.as_ref(), limits.max_file_bytes)?;
+
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
 
@@ -262,6 +268,7 @@ pub async fn export_job_start(
     let req_clone = req;
     let handle = tokio::spawn(async move {
         let _permit = permit;
+        let _export_permit = export_permit;
         let limits = state_clone.limits.clone();
         update_tool_job(&state_clone, &job_id_clone, |j| {
             j.status = ToolJobStatus::Running;
@@ -304,6 +311,7 @@ pub async fn export_job_start(
                 &req_clone,
                 &data_path,
                 limits.max_file_bytes,
+                limits.max_export_memory_bytes,
             )
             .await?;
             let elapsed_ms = t_job.elapsed().as_millis();
@@ -352,10 +360,42 @@ pub async fn export_job_start(
             }
             Err(e) => {
                 let elapsed_ms = t_job.elapsed().as_millis();
+                let detail = match &e {
+                    AppError::ExportMemoryLimit {
+                        limit,
+                        used,
+                        rows_written,
+                    } => Some(serde_json::json!({
+                        "code": "ERR_EXPORT_MEMORY_LIMIT",
+                        "limit_bytes": limit,
+                        "used_bytes": used,
+                        "rows_written": rows_written,
+                        "file_retained": false,
+                    })),
+                    AppError::ExportTooLarge {
+                        estimated_rows,
+                        avg_row_bytes,
+                        estimated_bytes,
+                        max_bytes,
+                    } => Some(serde_json::json!({
+                        "code": "ERR_EXPORT_TOO_LARGE",
+                        "estimated_rows": estimated_rows,
+                        "avg_row_bytes": avg_row_bytes,
+                        "estimated_bytes": estimated_bytes,
+                        "max_bytes": max_bytes,
+                        "file_retained": false,
+                    })),
+                    _ => None,
+                };
+                if detail.is_some() {
+                    // 失败时不保留半成品文件，避免被误当作完整导出。
+                    let _ = tokio::fs::remove_file(&data_path).await;
+                }
                 update_tool_job(&state_clone, &job_id_clone, |j| {
                     j.status = ToolJobStatus::Error;
                     j.elapsed_ms = Some(elapsed_ms);
                     j.error = Some(e.to_string());
+                    j.result = detail;
                     j.progress.message = Some("export failed".to_string());
                 })
                 .await;
@@ -1477,7 +1517,16 @@ pub async fn run_go_live_job(
                                 db_id: None,
                             };
 
-                            let _stats = run_export_job(client, &nop_state, &dummy_job_id, &export_req, &export_path, limits.max_file_bytes).await?;
+                            let _stats = run_export_job(
+                                client,
+                                &nop_state,
+                                &dummy_job_id,
+                                &export_req,
+                                &export_path,
+                                limits.max_file_bytes,
+                                limits.max_export_memory_bytes,
+                            )
+                            .await?;
                             let data = tokio::fs::read(&export_path)
                                 .await
                                 .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -1729,6 +1778,8 @@ pub async fn write_stats_chunk(
     line_count: &mut u64,
     hasher: &mut sha2::Sha256,
     max_bytes: u64,
+    budget: &mut core_lib::tools::MemoryBudget,
+    rows_written: u64,
     buf: &[u8],
 ) -> Result<(), AppError> {
     use sha2::Digest;
@@ -1741,11 +1792,18 @@ pub async fn write_stats_chunk(
             max_bytes
         )));
     }
-    writer
-        .write_all(buf)
-        .await
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
-    *bytes += buf.len() as u64;
+    let n = buf.len() as u64;
+    if let Err((used, limit)) = budget.reserve(n) {
+        return Err(AppError::ExportMemoryLimit {
+            limit,
+            used,
+            rows_written,
+        });
+    }
+    let result = writer.write_all(buf).await;
+    budget.release(n);
+    result.map_err(|e| AppError::InternalError(e.to_string()))?;
+    *bytes += n;
     *line_count += buf.iter().filter(|b| **b == b'\n').count() as u64;
     hasher.update(buf);
     Ok(())
@@ -1774,19 +1832,23 @@ pub async fn fetch_table_columns(
     Ok(cols)
 }
 
-/// PostgreSQL / SQLite 导出：通过统一查询层（文本协议）一次性取回结果，
-/// 再按与 MySQL 相同的 DataExporter 写文件。
+/// PostgreSQL 导出：按简单查询协议逐行读取，边读边写。
 ///
-/// 注意：整表一次性取回，内存随行数线性增长；MySQL 路径才是流式导出。
+/// 与 MySQL 路径一致，不再把所有行预取成 `Vec<Value>`；常驻内存只与
+/// 「当前行 + 写缓冲」相关，与总行数无关。
 async fn run_export_job_text_protocol(
     db_client: &DbClient,
+    state: &AppState,
+    job_id: &str,
     req: &ExportJobStartRequest,
     data_path: &str,
     max_bytes: u64,
+    memory_limit: u64,
     export_type: &str,
     is_excel_compat: bool,
 ) -> Result<ExportStats, AppError> {
     use sha2::Digest;
+    use sqlx::Row;
     use tokio::io::AsyncWriteExt;
 
     let db_type = db_client.db_type.clone();
@@ -1851,13 +1913,42 @@ async fn run_export_job_text_protocol(
         "SELECT * FROM {}{}{}{}",
         table_ident, where_sql, order_sql, limit_sql
     );
-    let result = db_client
+    // 表头与自定义类型目录一次读出：空表也能输出正确的列名，且流式循环
+    // 不再需要额外的池连接（SSH 隧道下连接池上限为 1，二次取连接会卡死）。
+    let pool = db_client
         .pool
-        .fetch_all_result(&data_sql)
-        .await
+        .pg()
         .map_err(|e| AppError::InternalError(e.to_string()))?;
-    let headers = result.columns.clone();
-    let rows = result.to_objects();
+    let header_rows = sqlx::query(
+        "SELECT a.attname::text AS column_name, \
+                a.atttypid::int4 AS type_oid, \
+                format_type(a.atttypid, NULL) AS type_name, \
+                t.typtype::text AS type_kind, \
+                COALESCE((SELECT et.typtype::text FROM pg_type et WHERE et.oid = t.typelem), '') AS elem_type_kind \
+         FROM pg_attribute a \
+         JOIN pg_type t ON t.oid = a.atttypid \
+         WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY a.attnum",
+    )
+    .bind(&table_ident)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let mut headers: Vec<String> = Vec::with_capacity(header_rows.len());
+    let mut catalog: std::collections::HashMap<u32, core_lib::sql_util::PgTypeMeta> =
+        std::collections::HashMap::new();
+    for row in &header_rows {
+        headers.push(row.try_get("column_name").unwrap_or_default());
+        let oid: i32 = row.try_get("type_oid").unwrap_or(0);
+        catalog.insert(
+            oid as u32,
+            core_lib::sql_util::PgTypeMeta {
+                type_name: row.try_get("type_name").unwrap_or_default(),
+                type_kind: row.try_get("type_kind").unwrap_or_default(),
+                elem_type_kind: row.try_get("elem_type_kind").unwrap_or_default(),
+            },
+        );
+    }
 
     let file = tokio::fs::File::create(data_path)
         .await
@@ -1866,6 +1957,8 @@ async fn run_export_job_text_protocol(
     let mut bytes: u64 = 0;
     let mut line_count: u64 = 0;
     let mut hasher = sha2::Sha256::new();
+    let mut budget = core_lib::tools::MemoryBudget::new(memory_limit);
+    let mut rows_written: u64 = 0;
 
     if is_excel_compat {
         write_stats_chunk(
@@ -1874,6 +1967,8 @@ async fn run_export_job_text_protocol(
             &mut line_count,
             &mut hasher,
             max_bytes,
+            &mut budget,
+            rows_written,
             b"\xEF\xBB\xBF",
         )
         .await?;
@@ -1887,6 +1982,8 @@ async fn run_export_job_text_protocol(
             &mut line_count,
             &mut hasher,
             max_bytes,
+            &mut budget,
+            rows_written,
             header.as_bytes(),
         )
         .await?;
@@ -1900,6 +1997,8 @@ async fn run_export_job_text_protocol(
             &mut line_count,
             &mut hasher,
             max_bytes,
+            &mut budget,
+            rows_written,
             s.as_bytes(),
         )
         .await?;
@@ -1918,6 +2017,8 @@ async fn run_export_job_text_protocol(
             &mut line_count,
             &mut hasher,
             max_bytes,
+            &mut budget,
+            rows_written,
             header.as_bytes(),
         )
         .await?;
@@ -1939,6 +2040,8 @@ async fn run_export_job_text_protocol(
             &mut line_count,
             &mut hasher,
             max_bytes,
+            &mut budget,
+            rows_written,
             s.as_bytes(),
         )
         .await?;
@@ -1946,13 +2049,24 @@ async fn run_export_job_text_protocol(
 
     let mut is_first_json = true;
     let mut previous_row: Option<serde_json::Map<String, serde_json::Value>> = None;
-    let row_count = rows.len() as u64;
 
-    for value in rows {
-        let map = match value.as_object() {
-            Some(m) => m.clone(),
-            None => continue,
+    use futures::TryStreamExt;
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let mut stream = sqlx::Executor::fetch_many(&mut *conn, sqlx::raw_sql(&data_sql));
+
+    while let Some(item) = stream
+        .try_next()
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?
+    {
+        let sqlx::Either::Right(row) = item else {
+            continue;
         };
+        let map = pg_row_to_json_with_catalog(&row, &headers, &catalog);
+
         if export_type == "csv" {
             let s = DataExporter::csv_row(&headers, &map);
             write_stats_chunk(
@@ -1961,9 +2075,12 @@ async fn run_export_job_text_protocol(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 s.as_bytes(),
             )
             .await?;
+            rows_written += 1;
         } else if export_type == "txt" {
             let mut vals = Vec::new();
             for h in &headers {
@@ -1981,9 +2098,12 @@ async fn run_export_job_text_protocol(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 line.as_bytes(),
             )
             .await?;
+            rows_written += 1;
         } else if export_type == "sql" {
             if let Some(prev) = previous_row.take() {
                 let s = DataExporter::sql_row_literal(&headers, &prev, false);
@@ -1993,9 +2113,12 @@ async fn run_export_job_text_protocol(
                     &mut line_count,
                     &mut hasher,
                     max_bytes,
+                    &mut budget,
+                    rows_written,
                     s.as_bytes(),
                 )
                 .await?;
+                rows_written += 1;
             }
             previous_row = Some(map);
         } else if export_type == "json" {
@@ -2007,9 +2130,12 @@ async fn run_export_job_text_protocol(
                     &mut line_count,
                     &mut hasher,
                     max_bytes,
+                    &mut budget,
+                    rows_written,
                     s.as_bytes(),
                 )
                 .await?;
+                rows_written += 1;
                 is_first_json = false;
             }
             previous_row = Some(map);
@@ -2035,9 +2161,22 @@ async fn run_export_job_text_protocol(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 s.as_bytes(),
             )
             .await?;
+            rows_written += 1;
+        }
+
+        if rows_written > 0 && rows_written % 2000 == 0 {
+            let written = rows_written;
+            update_tool_job(state, job_id, |j| {
+                j.status = ToolJobStatus::Running;
+                j.progress.current = written;
+                j.progress.message = Some(format!("exported {} rows", written));
+            })
+            .await;
         }
     }
 
@@ -2050,9 +2189,12 @@ async fn run_export_job_text_protocol(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 s.as_bytes(),
             )
             .await?;
+            rows_written += 1;
         }
     } else if export_type == "json" {
         if let Some(prev) = previous_row {
@@ -2063,9 +2205,12 @@ async fn run_export_job_text_protocol(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 s.as_bytes(),
             )
             .await?;
+            rows_written += 1;
         } else {
             write_stats_chunk(
                 &mut writer,
@@ -2073,6 +2218,8 @@ async fn run_export_job_text_protocol(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 b"[]\n",
             )
             .await?;
@@ -2084,6 +2231,8 @@ async fn run_export_job_text_protocol(
             &mut line_count,
             &mut hasher,
             max_bytes,
+            &mut budget,
+            rows_written,
             b"</rows>\n</export>\n",
         )
         .await?;
@@ -2098,7 +2247,7 @@ async fn run_export_job_text_protocol(
         sha256: format!("{:x}", hasher.finalize()),
         line_count,
         bytes,
-        row_count,
+        row_count: rows_written,
     })
 }
 
@@ -2109,6 +2258,7 @@ pub async fn run_export_job(
     req: &ExportJobStartRequest,
     data_path: &str,
     max_bytes: u64,
+    memory_limit: u64,
 ) -> Result<ExportStats, AppError> {
     use sha2::Digest;
     use sqlx::Column;
@@ -2134,9 +2284,12 @@ pub async fn run_export_job(
     if !matches!(db_client.db_type, DbType::MySQL | DbType::MariaDB) {
         return run_export_job_text_protocol(
             db_client,
+            state,
+            job_id,
             req,
             data_path,
             max_bytes,
+            memory_limit,
             &export_type,
             is_excel_compat,
         )
@@ -2204,6 +2357,8 @@ pub async fn run_export_job(
     let mut bytes: u64 = 0;
     let mut line_count: u64 = 0;
     let mut hasher = sha2::Sha256::new();
+    let mut budget = core_lib::tools::MemoryBudget::new(memory_limit);
+    let mut rows_written: u64 = 0;
 
     if is_excel_compat {
         write_stats_chunk(
@@ -2212,6 +2367,8 @@ pub async fn run_export_job(
             &mut line_count,
             &mut hasher,
             max_bytes,
+            &mut budget,
+            rows_written,
             b"\xEF\xBB\xBF",
         )
         .await?;
@@ -2230,6 +2387,8 @@ pub async fn run_export_job(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 header.as_bytes(),
             )
             .await?;
@@ -2245,6 +2404,8 @@ pub async fn run_export_job(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 s.as_bytes(),
             )
             .await?;
@@ -2258,6 +2419,8 @@ pub async fn run_export_job(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 header.as_bytes(),
             )
             .await?;
@@ -2280,6 +2443,8 @@ pub async fn run_export_job(
             &mut line_count,
             &mut hasher,
             max_bytes,
+            &mut budget,
+            rows_written,
             s.as_bytes(),
         )
         .await?;
@@ -2305,6 +2470,8 @@ pub async fn run_export_job(
                     &mut line_count,
                     &mut hasher,
                     max_bytes,
+                    &mut budget,
+                    rows_written,
                     header.as_bytes(),
                 )
                 .await?;
@@ -2318,6 +2485,8 @@ pub async fn run_export_job(
                     &mut line_count,
                     &mut hasher,
                     max_bytes,
+                    &mut budget,
+                    rows_written,
                     s.as_bytes(),
                 )
                 .await?;
@@ -2329,6 +2498,8 @@ pub async fn run_export_job(
                     &mut line_count,
                     &mut hasher,
                     max_bytes,
+                    &mut budget,
+                    rows_written,
                     header.as_bytes(),
                 )
                 .await?;
@@ -2350,6 +2521,8 @@ pub async fn run_export_job(
                     &mut line_count,
                     &mut hasher,
                     max_bytes,
+                    &mut budget,
+                    rows_written,
                     s.as_bytes(),
                 )
                 .await?;
@@ -2366,6 +2539,8 @@ pub async fn run_export_job(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 row_s.as_bytes(),
             )
             .await?;
@@ -2386,6 +2561,8 @@ pub async fn run_export_job(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 line.as_bytes(),
             )
             .await?;
@@ -2398,6 +2575,8 @@ pub async fn run_export_job(
                     &mut line_count,
                     &mut hasher,
                     max_bytes,
+                    &mut budget,
+                    rows_written,
                     s.as_bytes(),
                 )
                 .await?;
@@ -2412,6 +2591,8 @@ pub async fn run_export_job(
                     &mut line_count,
                     &mut hasher,
                     max_bytes,
+                    &mut budget,
+                    rows_written,
                     s.as_bytes(),
                 )
                 .await?;
@@ -2440,12 +2621,15 @@ pub async fn run_export_job(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 s.as_bytes(),
             )
             .await?;
         }
 
         processed += 1;
+        rows_written = processed;
         if processed.is_multiple_of(200) {
             update_tool_job(state, job_id, |j| {
                 j.progress.current = processed;
@@ -2463,6 +2647,8 @@ pub async fn run_export_job(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 s.as_bytes(),
             )
             .await?;
@@ -2476,6 +2662,8 @@ pub async fn run_export_job(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 s.as_bytes(),
             )
             .await?;
@@ -2486,6 +2674,8 @@ pub async fn run_export_job(
                 &mut line_count,
                 &mut hasher,
                 max_bytes,
+                &mut budget,
+                rows_written,
                 b"[]\n",
             )
             .await?;
@@ -2497,6 +2687,8 @@ pub async fn run_export_job(
             &mut line_count,
             &mut hasher,
             max_bytes,
+            &mut budget,
+            rows_written,
             b"</rows>\n</export>\n",
         )
         .await?;

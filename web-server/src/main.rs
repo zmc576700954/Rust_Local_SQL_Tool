@@ -1109,7 +1109,7 @@ use core_lib::{
     rule_engine::{Rule, RuleStore, RuleType},
     schema::{SchemaExtractor, SchemaResponse, TableWithDetails},
     sql_history::{SqlHistory, SqlHistoryStore},
-    tools::{DataExporter, DdlEngine, MockDataGenerator, SyncEngine},
+    tools::{DdlEngine, MockDataGenerator, SyncEngine},
     timeout_policy::TimeoutPolicy,
 };
 use serde::{Deserialize, Serialize};
@@ -1239,6 +1239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeouts,
         limits: limits.clone(),
         job_semaphore,
+        export_semaphore: Arc::new(Semaphore::new(1)),
         ops,
     };
 
@@ -2677,7 +2678,6 @@ async fn generate_mock_data(
 }
 
 use axum::body::Body;
-use futures::StreamExt;
 
 #[derive(Deserialize)]
 struct ExportRequest {
@@ -2685,6 +2685,28 @@ struct ExportRequest {
     export_type: String, // "csv", "sql", "json"
     /// Target connection; when omitted the currently active connection is used.
     db_id: Option<String>,
+}
+
+/// 同步导出的流式文件：响应体读完后自动删除临时文件。
+struct DeleteOnDropFile {
+    file: tokio::fs::File,
+    path: String,
+}
+
+impl tokio::io::AsyncRead for DeleteOnDropFile {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.file).poll_read(cx, buf)
+    }
+}
+
+impl Drop for DeleteOnDropFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 async fn export_data(
@@ -2703,236 +2725,59 @@ async fn export_data(
     };
 
     let table_name = req.table_name.clone();
-    let export_type = req.export_type.clone();
-    let db_type = db_client.db_type.clone();
-    let safe_table = core_lib::sql_util::quote_table_ref_checked(&table_name, &db_type)
-        .map_err(AppError::BadRequest)?;
-    let data_sql = format!("SELECT * FROM {}", safe_table);
-    let is_mysql = matches!(
-        db_type,
-        core_lib::config::DbType::MySQL | core_lib::config::DbType::MariaDB
-    );
-    let mysql_pool = if is_mysql {
-        db_client.pool.mysql().ok().cloned()
-    } else {
-        None
+    let export_type = req.export_type.to_lowercase();
+    if !matches!(export_type.as_str(), "csv" | "json" | "sql") {
+        return Err(AppError::BadRequest(format!(
+            "unsupported export_type: {}",
+            export_type
+        )));
+    }
+
+    // 导出一律先落临时文件：数据库侧边读边写，内存不随行数增长；
+    // 同时可以在发送响应体之前返回明确的状态码与错误文案。
+    let _permit = crate::handlers::util::acquire_export_slot(&state)?;
+    let estimate = crate::handlers::util::estimate_export_size(&db_client, &table_name).await;
+    crate::handlers::util::ensure_export_estimate(estimate.as_ref(), state.limits.max_file_bytes)?;
+
+    let temp_dir = state.limits.temp_dir.trim_end_matches('/').to_string();
+    ensure_temp_quota(&state.limits, 0).await?;
+    let job_id = format!("sync-{}", uuid::Uuid::new_v4());
+    let data_path = format!("{}/{}.{}", temp_dir, job_id, export_type);
+    let job_req = ExportJobStartRequest {
+        table_name: table_name.clone(),
+        export_type: export_type.clone(),
+        where_clause: None,
+        primary_key: None,
+        pk_start: None,
+        pk_end: None,
+        window_limit: None,
+        window_offset: None,
+        db_id: None,
     };
-    // PostgreSQL / SQLite 当前采用一次性取回（后续可替换为流式），MySQL 保持流式导出。
-    let prefetched = if is_mysql {
-        None
-    } else {
-        let result = tokio::time::timeout(
-            state.timeouts.db_query,
-            db_client.pool.fetch_all_result(&data_sql),
-        )
+
+    let write_result = handlers::go_live::run_export_job(
+        &db_client,
+        &state,
+        &job_id,
+        &job_req,
+        &data_path,
+        state.limits.max_file_bytes,
+        state.limits.max_export_memory_bytes,
+    )
+    .await;
+    if let Err(e) = write_result {
+        // 失败时不保留半成品文件。
+        let _ = tokio::fs::remove_file(&data_path).await;
+        return Err(e);
+    }
+
+    let file = tokio::fs::File::open(&data_path)
         .await
-        .map_err(|_| AppError::Timeout("Export query timed out after 30 seconds.".to_string()))?
         .map_err(|e| AppError::InternalError(e.to_string()))?;
-        Some((result.columns.clone(), result.to_objects()))
-    };
-
-    let (tx, rx) =
-        tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(100);
-
-    let spawn_table_name = table_name.clone();
-    let spawn_safe_table = safe_table.clone();
-    let spawn_export_type = export_type.clone();
-    let spawn_quoted_headers: Vec<String> = if is_mysql {
-        Vec::new()
-    } else {
-        // PostgreSQL / SQLite：SQL 导出必须引用列名，否则特殊字符列名会生成非法 SQL。
-        prefetched
-            .as_ref()
-            .map(|(headers, _)| {
-                headers
-                    .iter()
-                    .map(|h| {
-                        core_lib::sql_util::quote_ident_pg_checked(h)
-                            .unwrap_or_else(|_| core_lib::sql_util::quote_ident_pg(h))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    tokio::spawn(async move {
-        if let Some((headers, rows)) = prefetched {
-            let mut is_first_json = true;
-            if !headers.is_empty() {
-                if spawn_export_type == "csv" {
-                    let _ = tx
-                        .send(Ok(axum::body::Bytes::from(
-                            DataExporter::csv_header(&headers),
-                        )))
-                        .await;
-                } else if spawn_export_type == "sql" {
-                    let _ = tx
-                        .send(Ok(axum::body::Bytes::from(
-                            DataExporter::sql_header_quoted(
-                                &spawn_safe_table,
-                                &spawn_quoted_headers,
-                            ),
-                        )))
-                        .await;
-                }
-            }
-            let mut previous_row: Option<serde_json::Map<String, serde_json::Value>> = None;
-            for value in rows {
-                let map = match value.as_object() {
-                    Some(m) => m.clone(),
-                    None => continue,
-                };
-                if spawn_export_type == "csv" {
-                    let _ = tx
-                        .send(Ok(axum::body::Bytes::from(DataExporter::csv_row(
-                            &headers, &map,
-                        ))))
-                        .await;
-                } else if spawn_export_type == "sql" {
-                    if let Some(prev) = previous_row.take() {
-                        let _ = tx
-                            .send(Ok(axum::body::Bytes::from(DataExporter::sql_row_literal(
-                                &headers, &prev, false,
-                            ))))
-                            .await;
-                    }
-                    previous_row = Some(map);
-                } else if spawn_export_type == "json" {
-                    if let Some(prev) = previous_row.take() {
-                        let _ = tx
-                            .send(Ok(axum::body::Bytes::from(DataExporter::json_row(
-                                &prev,
-                                is_first_json,
-                                false,
-                            ))))
-                            .await;
-                        is_first_json = false;
-                    }
-                    previous_row = Some(map);
-                }
-            }
-            if spawn_export_type == "sql" {
-                if let Some(prev) = previous_row {
-                    let _ = tx
-                        .send(Ok(axum::body::Bytes::from(DataExporter::sql_row_literal(
-                            &headers, &prev, true,
-                        ))))
-                        .await;
-                }
-            } else if spawn_export_type == "json" {
-                if let Some(prev) = previous_row {
-                    let _ = tx
-                        .send(Ok(axum::body::Bytes::from(DataExporter::json_row(
-                            &prev,
-                            is_first_json,
-                            true,
-                        ))))
-                        .await;
-                } else {
-                    let _ = tx.send(Ok(axum::body::Bytes::from("[]
-"))).await;
-                }
-            }
-            return;
-        }
-
-        use sqlx::Column;
-        use sqlx::Row;
-
-        let pool = match mysql_pool {
-            Some(p) => p,
-            None => return,
-        };
-        let mut stream = sqlx::query(&data_sql).fetch(&pool);
-        let mut headers_sent = false;
-        let mut headers = Vec::new();
-        let mut is_first_json = true;
-        let mut previous_row: Option<serde_json::Map<String, serde_json::Value>> = None;
-
-        while let Some(row_result) = stream.next().await {
-            if let Ok(row) = row_result {
-                if !headers_sent {
-                    for col in row.columns() {
-                        headers.push(col.name().to_string());
-                    }
-                    if spawn_export_type == "csv" {
-                        let _ = tx
-                            .send(Ok(axum::body::Bytes::from(DataExporter::csv_header(
-                                &headers,
-                            ))))
-                            .await;
-                    } else if spawn_export_type == "sql" {
-                        let _ = tx
-                            .send(Ok(axum::body::Bytes::from(DataExporter::sql_header(
-                                &spawn_table_name,
-                                &headers,
-                            ))))
-                            .await;
-                    }
-                    headers_sent = true;
-                }
-
-                let map = row_to_json(&row);
-
-                if spawn_export_type == "csv" {
-                    let _ = tx
-                        .send(Ok(axum::body::Bytes::from(DataExporter::csv_row(
-                            &headers, &map,
-                        ))))
-                        .await;
-                } else if spawn_export_type == "sql" {
-                    if let Some(prev) = previous_row.take() {
-                        let _ = tx
-                            .send(Ok(axum::body::Bytes::from(DataExporter::sql_row_literal(
-                                &headers, &prev, false,
-                            ))))
-                            .await;
-                    }
-                    previous_row = Some(map);
-                } else if spawn_export_type == "json" {
-                    if let Some(prev) = previous_row.take() {
-                        let _ = tx
-                            .send(Ok(axum::body::Bytes::from(DataExporter::json_row(
-                                &prev,
-                                is_first_json,
-                                false,
-                            ))))
-                            .await;
-                        is_first_json = false;
-                    }
-                    previous_row = Some(map);
-                }
-            }
-        }
-
-        // Flush last row
-        if spawn_export_type == "sql" {
-            if let Some(prev) = previous_row {
-                let _ = tx
-                    .send(Ok(axum::body::Bytes::from(DataExporter::sql_row(
-                        &headers, &prev, true,
-                    ))))
-                    .await;
-            } else if !headers_sent {
-                // No rows, empty file
-            }
-        } else if spawn_export_type == "json" {
-            if let Some(prev) = previous_row {
-                let _ = tx
-                    .send(Ok(axum::body::Bytes::from(DataExporter::json_row(
-                        &prev,
-                        is_first_json,
-                        true,
-                    ))))
-                    .await;
-            } else {
-                let _ = tx.send(Ok(axum::body::Bytes::from("[]
-"))).await;
-            }
-        }
-    });
-
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(DeleteOnDropFile {
+        file,
+        path: data_path,
+    }));
 
     let content_type = match export_type.as_str() {
         "csv" => "text/csv",
@@ -3557,6 +3402,7 @@ mod tests {
             timeouts: TimeoutPolicy::default(),
             limits: limits.clone(),
             job_semaphore: Arc::new(Semaphore::new(limits.max_job_concurrency)),
+            export_semaphore: Arc::new(Semaphore::new(1)),
             ops: Arc::new(core_lib::ops::OpsRuntime::for_test()),
         }
     }

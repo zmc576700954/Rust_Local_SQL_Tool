@@ -324,6 +324,8 @@ pub struct AppState {
     pub timeouts: TimeoutPolicy,
     pub limits: RuntimeLimits,
     pub job_semaphore: Arc<Semaphore>,
+    /// 导出专用闸门：全局只允许一个导出任务执行，避免并发导出叠加内存。
+    pub export_semaphore: Arc<Semaphore>,
     pub ops: Arc<core_lib::ops::OpsRuntime>,
 }
 
@@ -393,6 +395,7 @@ pub fn test_state_with_config(config: AppConfig) -> AppState {
         timeouts: TimeoutPolicy::default(),
         limits: RuntimeLimits::default(),
         job_semaphore: Arc::new(Semaphore::new(1)),
+        export_semaphore: Arc::new(Semaphore::new(1)),
         ops: Arc::new(core_lib::ops::OpsRuntime::for_test()),
     }
 }

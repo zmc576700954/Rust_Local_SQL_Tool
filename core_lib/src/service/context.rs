@@ -78,6 +78,13 @@ pub struct RuntimeLimits {
     pub temp_quota_bytes: u64,
     pub max_file_bytes: u64,
     pub max_job_concurrency: usize,
+    /// 单次导出允许占用的峰值内存（字节）。
+    ///
+    /// 默认 64 MiB 的依据：流式导出时常驻缓冲只有「当前行 + 64 KiB 写缓冲」，
+    /// 正常情况下远低于 1 MiB；64 MiB 留出足够余量容纳超宽单行（例如 20 MB
+    /// 的 bytea/jsonb 值）、通道在途数据与解析开销，同时远低于 100 万行
+    /// 全量预取时约 5 GB 的占用，保证进程不会被 OOM 杀掉。
+    pub max_export_memory_bytes: u64,
 }
 
 impl Default for RuntimeLimits {
@@ -97,11 +104,17 @@ impl Default for RuntimeLimits {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(4);
+        let max_export_memory_bytes = std::env::var("LOCAL_AI_SQL_MAX_EXPORT_MEMORY_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(64 * 1024 * 1024);
         Self {
             temp_dir,
             temp_quota_bytes,
             max_file_bytes,
             max_job_concurrency: max_job_concurrency.max(1),
+            max_export_memory_bytes,
         }
     }
 }

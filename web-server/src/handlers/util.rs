@@ -46,6 +46,150 @@ pub fn require_mysql_connection(conn: &DbConnection, feature: &str) -> Result<()
     }
 }
 
+/// 导出前按目录统计估算行数与平均行宽（best effort）。
+///
+/// 只做轻量目录查询；统计信息缺失时才回退到一次有 3 秒上限的采样，
+/// 超时则放弃估算，由流式导出和内存/文件上限兜底。
+pub async fn estimate_export_size(
+    db_client: &DbClient,
+    table_name: &str,
+) -> Option<core_lib::tools::ExportEstimate> {
+    let (rows, avg_row_bytes) = match db_client.db_type {
+        DbType::PostgreSQL => {
+            let pool = db_client.pool.pg().ok()?;
+            let table_ident = core_lib::sql_util::quote_table_ref_checked(
+                table_name,
+                &DbType::PostgreSQL,
+            )
+            .ok()?;
+            let stats = sqlx::query(
+                r#"
+                SELECT c.reltuples::bigint AS est_rows,
+                       COALESCE((
+                           SELECT sum(s.avg_width)::bigint
+                           FROM pg_stats s
+                           WHERE s.schemaname = n.nspname AND s.tablename = c.relname
+                       ), 0) AS avg_width
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.oid = to_regclass($1)
+                "#,
+            )
+            .bind(&table_ident)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()?;
+            let est_rows: i64 = stats.try_get("est_rows").ok()?;
+            let avg_width: i64 = stats.try_get("avg_width").unwrap_or(0);
+
+            let rows = if est_rows >= 0 {
+                est_rows as u64
+            } else {
+                let row = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    sqlx::query(&format!("SELECT count(*)::bigint AS n FROM {}", table_ident))
+                        .fetch_one(pool),
+                )
+                .await
+                .ok()?
+                .ok()?;
+                row.try_get::<i64, _>("n").ok()? as u64
+            };
+
+            let avg = if avg_width > 0 {
+                avg_width as u64
+            } else {
+                let row = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    sqlx::query(&format!(
+                        "SELECT COALESCE(avg(pg_column_size(t))::bigint, 0) AS w FROM (SELECT * FROM {} LIMIT 200) t",
+                        table_ident
+                    ))
+                    .fetch_one(pool),
+                )
+                .await
+                .ok()?
+                .ok()?;
+                row.try_get::<i64, _>("w").unwrap_or(0) as u64
+            };
+            (rows, avg)
+        }
+        DbType::MySQL | DbType::MariaDB => {
+            let pool = db_client.pool.mysql().ok()?;
+            let row = sqlx::query(
+                "SELECT table_rows AS est_rows, avg_row_length AS avg_width \
+                 FROM information_schema.tables \
+                 WHERE table_schema = DATABASE() AND table_name = ?",
+            )
+            .bind(table_name)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()?;
+            let rows: i64 = row.try_get("est_rows").unwrap_or(0);
+            let avg: i64 = row.try_get("avg_width").unwrap_or(0);
+            (rows.max(0) as u64, avg.max(0) as u64)
+        }
+        _ => return None,
+    };
+
+    Some(core_lib::tools::ExportEstimate {
+        rows,
+        avg_row_bytes: avg_row_bytes.max(1),
+    })
+}
+
+/// 明显超过安全阈值时在启动阶段直接拒绝，避免用户等待数分钟后才失败。
+pub fn ensure_export_estimate(
+    estimate: Option<&core_lib::tools::ExportEstimate>,
+    max_bytes: u64,
+) -> Result<(), AppError> {
+    let Some(est) = estimate else {
+        return Ok(());
+    };
+    if est.exceeds(max_bytes) {
+        return Err(AppError::ExportTooLarge {
+            estimated_rows: est.rows,
+            avg_row_bytes: est.avg_row_bytes,
+            estimated_bytes: est.estimated_bytes(),
+            max_bytes,
+        });
+    }
+    Ok(())
+}
+
+/// 导出并发闸门：全局同一时刻只允许一个导出任务，避免多个任务同时吃内存。
+pub fn acquire_export_slot(
+    state: &crate::state::AppState,
+) -> Result<tokio::sync::OwnedSemaphorePermit, AppError> {
+    state
+        .export_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            AppError::TooManyRequests(
+                "导出并发上限为 1，已有导出任务正在执行，请稍后重试".to_string(),
+            )
+        })
+}
+
+/// 按列顺序把 PostgreSQL 行转换成 JSON 对象（用于流式导出）。
+pub fn pg_row_to_json_with_catalog(
+    row: &sqlx::postgres::PgRow,
+    headers: &[String],
+    catalog: &std::collections::HashMap<u32, core_lib::sql_util::PgTypeMeta>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::with_capacity(headers.len());
+    for (idx, name) in headers.iter().enumerate() {
+        map.insert(
+            name.clone(),
+            core_lib::sql_util::pg_cell_to_value_with_catalog(row, idx, catalog),
+        );
+    }
+    map
+}
+
 /// Convert a single MySQL row to a JSON map, handling common column types.
 pub fn row_to_json(row: &sqlx::mysql::MySqlRow) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
