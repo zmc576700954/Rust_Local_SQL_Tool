@@ -21,10 +21,11 @@ use crate::state::*;
 use crate::mysql_codec::*;
 use crate::resolve_db_client_for_request;
 use crate::handlers::go_live::{LimitQuery, read_jsonl_recent, safe_ident_suffix};
+use crate::handlers::util::require_mysql_connection;
 use crate::{
     PERF_SUITE_ARCHIVE_DEFAULT_LIMIT, PERF_PROBE_MAX_ITERATIONS,
     QUERY_PREVIEW_CHUNK_SIZE, QUERY_PREVIEW_ROW_CAP,
-    clear_metadata_caches, get_cached_schema, get_cached_table_schema,
+    clear_metadata_caches, get_cached_table_schema,
     is_read_only_connection, get_or_open_transaction_session,
     ExecuteRequest, ExecuteResponse,
 };
@@ -465,11 +466,12 @@ pub async fn run_catalog_first_paint_probe(
     let mut samples = Vec::with_capacity(iterations as usize);
     for iteration in 0..iterations {
         clear_metadata_caches(state).await;
-        let (db_client, db_name) = resolve_db_client_for_request(state, db_id).await?;
+        let (_db_client, _db_name) = resolve_db_client_for_request(state, db_id).await?;
         let started_at = Instant::now();
-        let schema = get_cached_schema(state, db_id, &db_client, &db_name)
+        let ctx = crate::bridge::bridge_service_context(state);
+        let schema = core_lib::service::schema::SchemaService::get_schema(&ctx, db_id)
             .await
-            .ok_or_else(|| AppError::InternalError("Failed to fetch schema".to_string()))?;
+            .map_err(|e| e.to_app_error())?;
         samples.push(PerfSample {
             operation: "catalog_first_paint".to_string(),
             iteration: iteration + 1,
@@ -632,6 +634,11 @@ pub async fn diagnostics_perf_probe(
         .trim()
         .to_lowercase();
     let iterations = normalize_perf_probe_iterations(req.iterations);
+
+    // 性能探针依赖 MySQL 的临时表语法、information_schema 与 performance_schema。
+    // 非 MySQL 连接给出明确提示，避免底层驱动错误直接冒到界面。
+    let conn = resolve_perf_probe_connection(&state, req.db_id.as_deref()).await?;
+    require_mysql_connection(&conn, "性能探针")?;
 
     let summary = match operation.as_str() {
         "connect_cold" => {
@@ -1000,423 +1007,38 @@ pub async fn diagnostics_perf_suite_diff_save(
 
 pub async fn execute_sql(
     State(state): State<AppState>,
-    Json(mut req): Json<ExecuteRequest>,
+    Json(req): Json<ExecuteRequest>,
 ) -> Result<Json<ExecuteResponse>, AppError> {
-    let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
-    let is_read_only = is_read_only_connection(&state, req.db_id.as_deref()).await;
+    use core_lib::service::workbench::{ExecuteParams, WorkbenchService};
 
-    use std::time::Instant;
-
-    let mut clean_sql = req.sql.trim().to_string();
-    loop {
-        if clean_sql.starts_with("--") {
-            if let Some(idx) = clean_sql.find('\n') {
-                clean_sql = clean_sql[idx + 1..].trim().to_string();
-            } else {
-                clean_sql = String::new();
-            }
-        } else if clean_sql.starts_with("/*") {
-            if let Some(idx) = clean_sql.find("*/") {
-                clean_sql = clean_sql[idx + 2..].trim().to_string();
-            } else {
-                clean_sql = String::new();
-            }
-        } else {
-            break;
-        }
-    }
-
-    let upper_sql = clean_sql.to_uppercase();
-    let statement_kind = clean_sql
-        .split_whitespace()
-        .next()
-        .map(|part| part.to_uppercase());
-
-    // AST-level SQL classification (immune to comment-based bypasses)
-    let dialect = sqlparser::dialect::GenericDialect {};
-    let parsed = sqlparser::parser::Parser::parse_sql(&dialect, clean_sql.trim());
-    let (is_select, is_dangerous) = if let Ok(stmts) = parsed.as_ref() {
-        if stmts.len() != 1 {
-            (false, true)
-        } else {
-            let stmt = &stmts[0];
-            (
-                core_lib::sql::util::is_read_only_statement(stmt),
-                core_lib::sql::util::is_dangerous_statement(stmt),
-            )
-        }
-    } else {
-        // Parse failure: fall back to keyword detection as a safety net
-        let sel = upper_sql.starts_with("SELECT")
-            || upper_sql.starts_with("SHOW")
-            || upper_sql.starts_with("DESCRIBE")
-            || upper_sql.starts_with("EXPLAIN");
-        let dangerous = upper_sql.contains("INSERT ")
-            || upper_sql.contains("UPDATE ")
-            || upper_sql.contains("DELETE ")
-            || upper_sql.contains("DROP ")
-            || upper_sql.contains("TRUNCATE ")
-            || upper_sql.contains("ALTER ");
-        (sel, dangerous)
-    };
-
-    if is_read_only && !is_select {
-        return Err(AppError::Forbidden(
-            "当前连接为只读模式，禁止执行非查询操作！".to_string(),
-        ));
-    }
-
-    if is_dangerous && req.force != Some(true) {
-        let body = serde_json::json!({
-            "error": "DANGEROUS_SQL",
-            "message": "检测到高危操作，请确认后强制执行"
-        })
-        .to_string();
-        return Err(AppError::BadRequest(body));
-    }
-
-    let mut rows = Vec::new();
-    let mut columns = Vec::new();
-    let mut affected_rows = 0;
-    let mut has_more = false;
-    let mut next_offset = None;
-    let chunk_offset = req.chunk_offset.unwrap_or(0);
-    let mut chunk_size = None;
-    let mut preview_cap = None;
-    let mut truncated = false;
-    let is_chunked_preview =
-        is_select && upper_sql.starts_with("SELECT") && !upper_sql.contains("LIMIT");
-
-    if is_chunked_preview {
-        let requested_chunk_size = req
-            .chunk_size
-            .unwrap_or(QUERY_PREVIEW_CHUNK_SIZE)
-            .clamp(1, QUERY_PREVIEW_CHUNK_SIZE);
-        let remaining = QUERY_PREVIEW_ROW_CAP.saturating_sub(chunk_offset);
-        let effective_chunk_size = requested_chunk_size.min(remaining.max(1));
-        req.sql = req.sql.trim().trim_end_matches(';').to_string();
-        req.sql.push_str(&format!(
-            " LIMIT {} OFFSET {}",
-            effective_chunk_size + 1,
-            chunk_offset
-        ));
-        chunk_size = Some(requested_chunk_size);
-        preview_cap = Some(QUERY_PREVIEW_ROW_CAP);
-    } else if is_select && !upper_sql.contains("LIMIT") {
-        req.sql = req.sql.trim().trim_end_matches(';').to_string();
-        req.sql.push_str(" LIMIT 1000");
-    }
-
-    let transaction_id = req
-        .transaction_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_string);
-    let transaction_session = if let Some(id) = transaction_id.as_deref() {
-        Some(get_or_open_transaction_session(&state, req.db_id.as_deref(), id, false).await?)
-    } else {
-        None
-    };
-    let cancel_token = req
-        .cancel_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_string);
-    let mut active_query = if let Some(token) = cancel_token {
-        let canceled = Arc::new(AtomicBool::new(false));
-        if let Some(transaction_session) = transaction_session.clone() {
-            let connection_id = transaction_session.lock().await.connection_id;
-            register_active_query(
-                &state,
-                token.clone(),
-                ActiveQueryHandle {
-                    db_client: db_client.clone(),
-                    connection_id,
-                    canceled: canceled.clone(),
-                },
-            )
-            .await;
-            Some(ActiveQuerySession {
-                token,
-                connection_id,
-                canceled,
-                owned_conn: None,
-                transaction_session: Some(transaction_session),
-            })
-        } else {
-            let mut conn = db_client
-                .mysql_pool()?
-                .acquire()
-                .await
-                .map_err(|e| AppError::InternalError(e.to_string()))?;
-            let connection_id = DbClient::connection_id_for_session(&mut conn)
-                .await
-                .map_err(|e| AppError::InternalError(e.to_string()))?;
-            register_active_query(
-                &state,
-                token.clone(),
-                ActiveQueryHandle {
-                    db_client: db_client.clone(),
-                    connection_id,
-                    canceled: canceled.clone(),
-                },
-            )
-            .await;
-            Some(ActiveQuerySession {
-                token,
-                connection_id,
-                canceled,
-                owned_conn: Some(conn),
-                transaction_session: None,
-            })
-        }
-    } else {
-        None
-    };
-
-    let mysql_pool = db_client.mysql_pool().ok().cloned();
-
-    let start_time = Instant::now();
-    let execution_result = if is_select {
-        match tokio::time::timeout(state.timeouts.db_query, async {
-            if let Some(active_query) = active_query.as_mut() {
-                if let Some(transaction_session) = active_query.transaction_session.as_ref() {
-                    let mut session = transaction_session.lock().await;
-                    sqlx::query(&req.sql).fetch_all(&mut *session.conn).await
-                } else if let Some(conn) = active_query.owned_conn.as_mut() {
-                    sqlx::query(&req.sql).fetch_all(&mut **conn).await
-                } else if let Some(pool) = &mysql_pool {
-                    sqlx::query(&req.sql).fetch_all(pool).await
-                } else {
-                    Err(sqlx::Error::PoolClosed)
-                }
-            } else if let Some(transaction_session) = transaction_session.as_ref() {
-                let mut session = transaction_session.lock().await;
-                sqlx::query(&req.sql).fetch_all(&mut *session.conn).await
-            } else if let Some(pool) = &mysql_pool {
-                sqlx::query(&req.sql).fetch_all(pool).await
-            } else {
-                Err(sqlx::Error::PoolClosed)
-            }
-        })
-        .await
-        {
-            Ok(res) => res,
-            Err(_) => {
-                if let Some(active_query) = active_query.as_ref() {
-                    let _ = db_client.kill_query(active_query.connection_id).await;
-                    unregister_active_query(&state, &active_query.token).await;
-                }
-                return Err(AppError::Timeout(
-                    "查询执行超时（已超过 30 秒），已被系统安全阻断，请优化 SQL 或添加索引。"
-                        .to_string(),
-                ));
-            }
-        }
-    } else {
-        // Just for type matching we do a dummy empty result, the real logic is below
-        Ok(vec![])
-    };
-
-    let mut status = "success".to_string();
-    let mut err_msg = None;
-
-    if is_select {
-        match execution_result {
-            Ok(result_rows) => {
-                let chunk_limit = if is_chunked_preview {
-                    chunk_size.unwrap_or(QUERY_PREVIEW_CHUNK_SIZE)
-                } else {
-                    result_rows.len() as u32
-                };
-                let fetched_len = result_rows.len() as u32;
-                if is_chunked_preview {
-                    has_more = fetched_len > chunk_limit
-                        && chunk_offset.saturating_add(chunk_limit) < QUERY_PREVIEW_ROW_CAP;
-                    next_offset = has_more.then_some(chunk_offset.saturating_add(chunk_limit));
-                    truncated = fetched_len > chunk_limit;
-                }
-
-                let mut row_encoder = None;
-                for row in result_rows.into_iter().take(chunk_limit as usize) {
-                    if row_encoder.is_none() {
-                        let encoder = MySqlRowJsonEncoder::from_row(&row);
-                        columns = encoder.column_names();
-                        row_encoder = Some(encoder);
-                    }
-                    rows.push(encode_mysql_row(
-                        &row,
-                        row_encoder
-                            .as_ref()
-                            .expect("row encoder should be initialized"),
-                    ));
-                }
-            }
-            Err(e) => {
-                let query_was_canceled = active_query
-                    .as_ref()
-                    .map(|query| query.canceled.load(Ordering::SeqCst))
-                    .unwrap_or(false);
-                status = if query_was_canceled {
-                    "canceled".to_string()
-                } else {
-                    "error".to_string()
-                };
-                err_msg = Some(if query_was_canceled {
-                    "Query canceled".to_string()
-                } else {
-                    e.to_string()
-                });
-            }
-        }
-    } else {
-        match tokio::time::timeout(state.timeouts.db_query, async {
-            if let Some(active_query) = active_query.as_mut() {
-                if let Some(transaction_session) = active_query.transaction_session.as_ref() {
-                    let mut session = transaction_session.lock().await;
-                    sqlx::query(&req.sql).execute(&mut *session.conn).await
-                } else if let Some(conn) = active_query.owned_conn.as_mut() {
-                    sqlx::query(&req.sql).execute(&mut **conn).await
-                } else if let Some(pool) = &mysql_pool {
-                    sqlx::query(&req.sql).execute(pool).await
-                } else {
-                    Err(sqlx::Error::PoolClosed)
-                }
-            } else if let Some(transaction_session) = transaction_session.as_ref() {
-                let mut session = transaction_session.lock().await;
-                sqlx::query(&req.sql).execute(&mut *session.conn).await
-            } else if let Some(pool) = &mysql_pool {
-                sqlx::query(&req.sql).execute(pool).await
-            } else {
-                Err(sqlx::Error::PoolClosed)
-            }
-        })
-        .await
-        {
-            Ok(Ok(result)) => {
-                affected_rows = result.rows_affected();
-            }
-            Ok(Err(e)) => {
-                let query_was_canceled = active_query
-                    .as_ref()
-                    .map(|query| query.canceled.load(Ordering::SeqCst))
-                    .unwrap_or(false);
-                status = if query_was_canceled {
-                    "canceled".to_string()
-                } else {
-                    "error".to_string()
-                };
-                err_msg = Some(if query_was_canceled {
-                    "Query canceled".to_string()
-                } else {
-                    e.to_string()
-                });
-            }
-            Err(_) => {
-                if let Some(active_query) = active_query.as_ref() {
-                    let _ = db_client.kill_query(active_query.connection_id).await;
-                    unregister_active_query(&state, &active_query.token).await;
-                }
-                return Err(AppError::Timeout(
-                    "查询执行超时（已超过 30 秒），已被系统安全阻断，请优化 SQL 或添加索引。"
-                        .to_string(),
-                ));
-            }
-        }
-    }
-
-    if let Some(active_query) = active_query.as_ref() {
-        unregister_active_query(&state, &active_query.token).await;
-    }
-    let was_canceled = active_query
-        .as_ref()
-        .map(|query| query.canceled.load(Ordering::SeqCst))
-        .unwrap_or(false);
-
-    let elapsed = start_time.elapsed().as_millis() as u64;
-    let history_row_count = if err_msg.is_none() && is_select {
-        Some(rows.len() as u64)
-    } else {
-        None
-    };
-    let history_affected_rows = if err_msg.is_none() && !is_select {
-        Some(affected_rows)
-    } else {
-        None
-    };
-
-    // Record history
-    {
-        let store_clone = {
-            let mut store = state.sql_history.write().await;
-            store.add_history(SqlHistory {
-                id: "".to_string(), // will be generated
-                sql: req.sql.clone(),
-                status,
-                execution_time_ms: elapsed,
-                executed_at: 0, // will be generated
-                db_id: req.db_id.clone(),
-                row_count: history_row_count,
-                affected_rows: history_affected_rows,
-                statement_kind: statement_kind.clone(),
-            });
-            store.clone()
-        };
-        let _ = store_clone.save().await; // ignore save errors for history
-    }
-
-    if let Some(e) = err_msg {
-        if was_canceled {
-            return Err(AppError::Canceled(e));
-        }
-        return Err(AppError::InternalError(e));
-    }
-
-    if let Some(session) = transaction_session.as_ref() {
-        let mut session_lock = session.lock().await;
-        session_lock.last_accessed = std::time::Instant::now();
-        drop(session_lock);
-
-        // If this was a successful COMMIT or ROLLBACK, clean up the session
-        let is_tx_end = {
-            let s = upper_sql.trim();
-            s == "COMMIT" || s == "ROLLBACK" || s == "COMMIT;" || s == "ROLLBACK;"
-        };
-        if is_tx_end && err_msg.is_none() {
-            if let Some(id) = transaction_id.as_deref() {
-                state.transaction_sessions.write().await.remove(id);
-            }
-        }
-    }
-
-    if !is_select {
-        clear_metadata_caches(&state).await;
-    }
-
-    let transaction_state = if let Some(id) = transaction_id.as_deref() {
-        if state.transaction_sessions.read().await.contains_key(id) {
-            Some("active".to_string())
-        } else {
-            Some("idle".to_string())
-        }
-    } else {
-        None
-    };
+    let ctx = crate::bridge::bridge_service_context(&state);
+    let result = WorkbenchService::execute_sql(
+        &ctx,
+        ExecuteParams {
+            sql: req.sql,
+            force: req.force,
+            db_id: req.db_id,
+            chunk_offset: req.chunk_offset,
+            chunk_size: req.chunk_size,
+            cancel_token: req.cancel_token,
+            transaction_id: req.transaction_id,
+        },
+    )
+    .await
+    .map_err(|e| e.to_app_error())?;
 
     Ok(Json(ExecuteResponse {
-        columns,
-        row_count: rows.len(),
-        rows,
-        affected_rows,
-        execution_time_ms: elapsed,
-        has_more,
-        next_offset,
-        chunk_offset,
-        chunk_size,
-        preview_cap,
-        truncated,
-        transaction_state,
+        columns: result.columns,
+        rows: result.rows,
+        row_count: result.row_count,
+        affected_rows: result.affected_rows,
+        execution_time_ms: result.execution_time_ms,
+        has_more: result.has_more,
+        next_offset: result.next_offset,
+        chunk_offset: result.chunk_offset,
+        chunk_size: result.chunk_size,
+        preview_cap: result.preview_cap,
+        truncated: result.truncated,
+        transaction_state: result.transaction_state,
     }))
 }

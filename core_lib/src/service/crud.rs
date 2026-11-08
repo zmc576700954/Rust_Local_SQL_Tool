@@ -67,7 +67,7 @@ impl CrudService {
         let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
             let mut guard = session.lock().await;
             guard.last_accessed = std::time::Instant::now();
-            let affected = CrudManager::insert_mysql(&mut *guard.conn, &crud_req)
+            let affected = CrudManager::insert_engine(&mut guard.conn, &crud_req)
                 .await
                 .map_err(|e| ServiceError::DbWrite(e.to_string()))?;
             (affected, Some("active".into()))
@@ -108,7 +108,7 @@ impl CrudService {
         let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
             let mut guard = session.lock().await;
             guard.last_accessed = std::time::Instant::now();
-            let affected = CrudManager::update_mysql(&mut *guard.conn, &crud_req)
+            let affected = CrudManager::update_engine(&mut guard.conn, &crud_req)
                 .await
                 .map_err(|e| ServiceError::DbWrite(e.to_string()))?;
             (affected, Some("active".into()))
@@ -143,7 +143,7 @@ impl CrudService {
         let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
             let mut guard = session.lock().await;
             guard.last_accessed = std::time::Instant::now();
-            let affected = CrudManager::delete_mysql(&mut *guard.conn, &params.table_name, &params.condition)
+            let affected = CrudManager::delete_engine(&mut guard.conn, &params.table_name, &params.condition)
                 .await
                 .map_err(|e| ServiceError::DbWrite(e.to_string()))?;
             (affected, Some("active".into()))

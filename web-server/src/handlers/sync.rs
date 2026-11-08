@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::quote_mysql_ident;
+use crate::handlers::util::{require_mysql_client, require_mysql_connection};
 
 use crate::state::*;
 use crate::{get_temp_db_client, GAP_TOO_LARGE_MSG};
@@ -85,6 +86,16 @@ pub async fn mysql_sync_compare(
             .db_connections
             .iter()
             .find(|c| c.id == req.source_db_id);
+        let target_conn = config
+            .db_connections
+            .iter()
+            .find(|c| c.id == req.target_db_id);
+        if let Some(conn) = source_conn {
+            require_mysql_connection(conn, "MySQL 数据同步（源库）")?;
+        }
+        if let Some(conn) = target_conn {
+            require_mysql_connection(conn, "MySQL 数据同步（目标库）")?;
+        }
         let db_type = source_conn
             .and_then(|c| c.db_type.clone())
             .unwrap_or(core_lib::config::DbType::MySQL);
@@ -571,6 +582,11 @@ pub async fn perf_sync_check(
                 req.target_db_id
             )));
         }
+        for id in [&req.source_db_id, &req.target_db_id] {
+            if let Some(conn) = config.db_connections.iter().find(|c| c.id == *id) {
+                require_mysql_connection(conn, "性能同步检查")?;
+            }
+        }
     }
 
     let tables = req.tables.unwrap_or_else(default_perf_tables);
@@ -765,6 +781,11 @@ pub async fn perf_sync_start(
                 req.target_db_id
             )));
         }
+        for id in [&req.source_db_id, &req.target_db_id] {
+            if let Some(conn) = config.db_connections.iter().find(|c| c.id == *id) {
+                require_mysql_connection(conn, "性能同步任务")?;
+            }
+        }
     }
 
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -861,6 +882,8 @@ pub async fn run_perf_sync_job(
     let t0 = std::time::Instant::now();
     let (source_client, _) = get_temp_db_client(state, &req.source_db_id).await?;
     let (target_client, _) = get_temp_db_client(state, &req.target_db_id).await?;
+    require_mysql_client(&source_client, "性能同步任务（源库）")?;
+    require_mysql_client(&target_client, "性能同步任务（目标库）")?;
 
     let mut stage_ms: HashMap<String, u128> = HashMap::new();
     let mut loadgen_report: Option<core_lib::loadgen::LoadgenReport> = None;

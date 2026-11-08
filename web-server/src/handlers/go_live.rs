@@ -1,6 +1,6 @@
 //! GoLive handler — pre-deployment checks, job orchestration, and report generation.
 
-use super::util::row_to_json;
+use super::util::{require_mysql_client, row_to_json};
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -234,6 +234,7 @@ pub async fn export_job_start(
             .clone()
             .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
     };
+    require_mysql_client(&db_client, "导出任务")?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -394,6 +395,7 @@ pub async fn import_job_start(
             .clone()
             .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
     };
+    require_mysql_client(&db_client, "导入任务")?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -493,6 +495,7 @@ pub async fn import_sql_job_start(
             .clone()
             .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?
     };
+    require_mysql_client(&db_client, "SQL 脚本导入任务")?;
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
@@ -817,6 +820,22 @@ pub async fn go_live_job_start(
             Some(t)
         }
     });
+
+    // go-live 的连接/契约/导入导出冒烟检查全部基于 MySQL 语义
+    //（临时表 AUTO_INCREMENT、information_schema、MySQL 导出格式）。
+    // 非 MySQL 连接在这里给出明确提示，而不是在任务报告里冒出驱动错误。
+    {
+        let config = state.config.read().await;
+        let (connections, _) = resolve_go_live_connections(&config, &req.connection_ids);
+        for conn in &connections {
+            if !matches!(conn.db_type, DbType::MySQL | DbType::MariaDB) {
+                return Err(AppError::BadRequest(format!(
+                    "上线检查（go-live）当前仅支持 MySQL / MariaDB 连接；连接 {} 为 {:?}，请改用 MySQL 连接后再运行。",
+                    conn.id, conn.db_type
+                )));
+            }
+        }
+    }
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();

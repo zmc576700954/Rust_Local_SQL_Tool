@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::config::AppConfig;
-use crate::db::DbClient;
+use crate::db::{DbClient, EngineConnection};
 use crate::rule_engine::RuleStore;
 use crate::schema::{SchemaResponse, TableWithDetails};
 use crate::sql_history::SqlHistoryStore;
@@ -55,7 +55,7 @@ pub struct ActiveQuerySession {
     pub token: String,
     pub connection_id: u64,
     pub canceled: Arc<AtomicBool>,
-    pub owned_conn: Option<sqlx::pool::PoolConnection<sqlx::MySql>>,
+    pub owned_conn: Option<EngineConnection>,
     pub transaction_session: Option<SharedTransactionSession>,
 }
 
@@ -64,7 +64,7 @@ pub struct ActiveQuerySession {
 pub struct TransactionSession {
     pub connection_id: u64,
     pub db_id: Option<String>,
-    pub conn: sqlx::pool::PoolConnection<sqlx::MySql>,
+    pub conn: EngineConnection,
     pub last_accessed: std::time::Instant,
 }
 

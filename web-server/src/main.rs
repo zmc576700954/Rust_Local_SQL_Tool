@@ -297,12 +297,14 @@ async fn import_data(
         return Err(AppError::BadRequest("No columns mapped".to_string()));
     }
 
+    let db_type = db_client.db_type.clone();
     let mut db_col_names: Vec<String> = Vec::with_capacity(mapped_cols.len());
     for (db, _) in &mapped_cols {
-        db_col_names.push(quote_mysql_ident(db)?);
+        db_col_names.push(quote_ident_for(&db_type, db)?);
     }
     let col_list = db_col_names.join(", ");
-    let table_ident = quote_mysql_ident(&table_name)?;
+    let table_ident = core_lib::sql_util::quote_table_ref_checked(&table_name, &db_type)
+        .map_err(AppError::BadRequest)?;
 
     let batch_size: usize = 500;
     let mut batch_values: Vec<String> = Vec::with_capacity(batch_size);
@@ -310,18 +312,31 @@ async fn import_data(
         Vec::with_capacity(batch_size * mapped_cols.len());
 
     for (i, row) in req.data.iter().enumerate() {
-        let start_param = batch_params.len();
-        let placeholders: Vec<String> = (0..mapped_cols.len())
-            .map(|j| format!("${}", start_param + j + 1))
+        let values: Vec<serde_json::Value> = mapped_cols
+            .iter()
+            .map(|(_, src_field)| {
+                row.get(src_field)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
+            })
             .collect();
-        batch_values.push(format!("({})", placeholders.join(", ")));
 
-        for (_, src_field) in &mapped_cols {
-            let val = row
-                .get(src_field)
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            batch_params.push(val);
+        // 占位符按引擎生成：MySQL 用 `?` 并绑定；PostgreSQL / SQLite 生成转义后的字面量。
+        if matches!(db_type, core_lib::config::DbType::MySQL | core_lib::config::DbType::MariaDB) {
+            batch_values.push(format!(
+                "({})",
+                vec!["?"; mapped_cols.len()].join(", ")
+            ));
+            batch_params.extend(values);
+        } else {
+            batch_values.push(format!(
+                "({})",
+                values
+                    .iter()
+                    .map(core_lib::sql_util::format_sql_value)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
 
         let is_last = i + 1 == req.data.len();
@@ -333,12 +348,7 @@ async fn import_data(
                 batch_values.join(", ")
             );
 
-            let mut query = sqlx::query(&batch_sql);
-            for val in &batch_params {
-                query = bind_json_value_to_query(query, val);
-            }
-
-            match query.execute(db_client.mysql_pool()?).await {
+            match execute_import_sql(&db_client, &batch_sql, &batch_params, &db_type).await {
                 Ok(_) => {
                     inserted += batch_values.len();
                 }
@@ -351,26 +361,33 @@ async fn import_data(
                                 "INSERT INTO {} ({}) VALUES {}",
                                 table_ident, col_list, chunk
                             );
-                            let mut row_query = sqlx::query(&row_sql);
-                            let row_start = j * mapped_cols.len();
-                            for k in 0..mapped_cols.len() {
-                                row_query =
-                                    bind_json_value_to_query(row_query, &batch_params[row_start + k]);
-                            }
-                            match row_query.execute(db_client.mysql_pool()?).await {
+                            let row_values = if matches!(
+                                db_type,
+                                core_lib::config::DbType::MySQL | core_lib::config::DbType::MariaDB
+                            ) {
+                                let row_start = j * mapped_cols.len();
+                                batch_params[row_start..row_start + mapped_cols.len()].to_vec()
+                            } else {
+                                Vec::new()
+                            };
+                            match execute_import_sql(&db_client, &row_sql, &row_values, &db_type)
+                                .await
+                            {
                                 Ok(_) => inserted += 1,
                                 Err(row_err) => {
                                     errors += 1;
-                                    error_details
-                                        .push(format!("Row {}: {}", batch_start + j + 1, row_err));
+                                    error_details.push(format!(
+                                        "Row {}: {}",
+                                        batch_start + j + 1,
+                                        row_err
+                                    ));
                                 }
                             }
                         }
                     } else {
                         return Err(AppError::BadRequest(format!(
                             "Batch insert failed at row {}: {}",
-                            i + 1,
-                            e
+                            i + 1, e
                         )));
                     }
                 }
@@ -386,6 +403,46 @@ async fn import_data(
         errors,
         error_details,
     }))
+}
+
+/// 按引擎引用列名 / 表名。
+fn quote_ident_for(
+    db_type: &core_lib::config::DbType,
+    s: &str,
+) -> Result<String, AppError> {
+    match db_type {
+        core_lib::config::DbType::MySQL | core_lib::config::DbType::MariaDB => {
+            core_lib::sql::util::quote_ident_mysql_checked(s).map_err(AppError::BadRequest)
+        }
+        _ => core_lib::sql_util::quote_ident_pg_checked(s).map_err(AppError::BadRequest),
+    }
+}
+
+/// 执行导入 SQL：MySQL 绑定参数，PostgreSQL / SQLite 使用已内联的字面量。
+async fn execute_import_sql(
+    db_client: &core_lib::db::DbClient,
+    sql: &str,
+    values: &[serde_json::Value],
+    db_type: &core_lib::config::DbType,
+) -> Result<u64, String> {
+    match db_type {
+        core_lib::config::DbType::MySQL | core_lib::config::DbType::MariaDB => {
+            let mut query = sqlx::query(sql);
+            for val in values {
+                query = bind_json_value_to_query(query, val);
+            }
+            query
+                .execute(db_client.pool.mysql().map_err(|e| e.to_string())?)
+                .await
+                .map(|r| r.rows_affected())
+                .map_err(|e| e.to_string())
+        }
+        _ => db_client
+            .pool
+            .execute_affected(sql)
+            .await
+            .map_err(|e| e.to_string()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -492,24 +549,26 @@ async fn parse_navicat(
 }
 
 async fn db_test(Json(req): Json<DbTestRequest>) -> Result<Json<DbTestResponse>, AppError> {
-    // Runtime test connections are only implemented for MySQL/MariaDB. Report
-    // that explicitly instead of parsing other engines as MySQL and emitting a
-    // misleading "invalid url" diagnostic.
-    if let Some(db_url) = req.db_url.as_deref().filter(|s| !s.trim().is_empty()) {
-        let db_type = core_lib::config::DbType::from_url(db_url);
+    // 按 URL scheme 识别引擎；仅阻止尚未实现连接的引擎。
+    let requested_type = req
+        .db_url
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(core_lib::config::DbType::from_url);
+    if let Some(db_type) = requested_type.as_ref() {
         if !matches!(
             db_type,
-            None | Some(core_lib::config::DbType::MySQL) | Some(core_lib::config::DbType::MariaDB)
+            core_lib::config::DbType::MySQL
+                | core_lib::config::DbType::MariaDB
+                | core_lib::config::DbType::PostgreSQL
+                | core_lib::config::DbType::SQLite
         ) {
-            let detected = db_type.map(|t| t.display_name()).unwrap_or("unknown");
             return Ok(Json(db_test_failed(
                 "validation",
                 "DB_TEST_UNSUPPORTED_TYPE",
-                "连接测试当前仅支持 MySQL / MariaDB。",
-                Some(
-                    "PostgreSQL / SQLite 为实验性支持（仅连接与基础 CRUD），SQL Server / Oracle / MongoDB / Redis 尚未实现。",
-                ),
-                Some(format!("db_type={detected}")),
+                "连接测试暂不支持该数据库类型。",
+                Some("当前支持 MySQL / MariaDB / PostgreSQL / SQLite。"),
+                Some(format!("db_type={}", db_type.display_name())),
             )));
         }
     }
@@ -591,6 +650,29 @@ async fn db_test(Json(req): Json<DbTestRequest>) -> Result<Json<DbTestResponse>,
     } else {
         None
     };
+
+    // 非 MySQL 引擎走独立的 sqlx 连接测试；MySQL 保持原有路径。
+    let detected_type = requested_type.unwrap_or(core_lib::config::DbType::MySQL);
+    if matches!(
+        detected_type,
+        core_lib::config::DbType::PostgreSQL | core_lib::config::DbType::SQLite
+    ) {
+        return Ok(Json(
+            db_test_sqlx_engine(
+                detected_type,
+                db_url_for_connect.as_deref(),
+                req.host.as_deref(),
+                req.username.as_deref(),
+                req.password.as_deref(),
+                host_override,
+                port_override,
+                req.ssl_mode.as_deref(),
+                req.probe_capabilities.unwrap_or(false),
+                policy,
+            )
+            .await,
+        ));
+    }
 
     use sqlx::mysql::MySqlConnectOptions;
     use sqlx::mysql::MySqlSslMode;
@@ -795,6 +877,224 @@ async fn db_test(Json(req): Json<DbTestRequest>) -> Result<Json<DbTestResponse>,
         server_version,
     )))
 }
+/// PostgreSQL / SQLite 的真实连接测试。
+///
+/// 与 MySQL 路径共享同样的诊断码（超时 / 握手失败 / ping 失败 / 能力探测失败），
+/// 但数据库列表与版本查询按引擎选择。
+async fn db_test_sqlx_engine(
+    db_type: core_lib::config::DbType,
+    db_url: Option<&str>,
+    host: Option<&str>,
+    username: Option<&str>,
+    password: Option<&str>,
+    host_override: Option<String>,
+    port_override: Option<u16>,
+    ssl_mode: Option<&str>,
+    probe_capabilities: bool,
+    policy: TimeoutPolicy,
+) -> DbTestResponse {
+    use core_lib::config::DbType;
+    use core_lib::db::connect::DbClientConnectOptions;
+
+    let url = match db_url.filter(|s| !s.trim().is_empty()) {
+        Some(url) => url.to_string(),
+        None => {
+            if db_type == DbType::SQLite {
+                return db_test_failed(
+                    "validation",
+                    "DB_TEST_MISSING_URL",
+                    "SQLite 连接需要提供 sqlite:// 文件路径。",
+                    Some("示例：sqlite:///Users/me/data/app.db"),
+                    None,
+                );
+            }
+            let host = host_override
+                .or_else(|| host.map(|s| s.to_string()))
+                .unwrap_or_default();
+            let user = username.unwrap_or_default();
+            if host.trim().is_empty() || user.trim().is_empty() {
+                return db_test_failed(
+                    "validation",
+                    "DB_TEST_MISSING_FIELDS",
+                    "连接参数不完整，host 和 username 为必填项。",
+                    Some("请填写主机地址和用户名后重试。"),
+                    None,
+                );
+            }
+            let port = port_override.unwrap_or(5432);
+            match password.filter(|p| !p.is_empty()) {
+                Some(p) => format!("postgres://{}:{}@{}:{}/postgres", user, p, host, port),
+                None => format!("postgres://{}@{}:{}/postgres", user, host, port),
+            }
+        }
+    };
+
+    let mut pool_config = core_lib::config::PoolConfig::default();
+    pool_config.max_connections = 1;
+    pool_config.min_connections = 0;
+
+    let connect = core_lib::db::DbClient::new_with_options(
+        &url,
+        &pool_config,
+        &db_type,
+        DbClientConnectOptions {
+            ssl_mode: ssl_mode.map(|s| s.to_string()),
+        },
+        None,
+    );
+    let client = match tokio::time::timeout(policy.db_connect, connect).await {
+        Err(_) => {
+            return db_test_failed(
+                "timeout",
+                "DB_TEST_CONNECT_TIMEOUT",
+                "连接数据库超时（已超过 10 秒），请检查网络、IP 或防火墙配置是否正确。",
+                Some("若是云数据库，请确认白名单及安全组规则已放行。"),
+                None,
+            );
+        }
+        Ok(Ok(client)) => client,
+        Ok(Err(e)) => {
+            use core_lib::db::DbError;
+            let msg = e.to_string();
+            if let DbError::Unsupported(_) = e {
+                return db_test_failed(
+                    "validation",
+                    "DB_TEST_INVALID_URL",
+                    "连接地址格式错误，请检查 db_url。",
+                    Some("PostgreSQL 示例：postgres://user:password@host:5432/dbname"),
+                    Some(msg),
+                );
+            }
+            return classify_db_test_connect_error(&msg);
+        }
+    };
+
+    match tokio::time::timeout(policy.db_query, client.pool.ping()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return db_test_failed(
+                "query",
+                "DB_TEST_PING_FAILED",
+                "Connection established, but ping failed.",
+                Some("Check proxy restrictions or query permissions, then retry."),
+                Some(e.to_string()),
+            );
+        }
+        Err(_) => {
+            return db_test_failed(
+                "timeout",
+                "DB_TEST_PING_TIMEOUT",
+                "Connection established, but ping timed out.",
+                Some("Check database load or network jitter, then retry."),
+                None,
+            );
+        }
+    }
+
+    if !probe_capabilities {
+        let resp = db_test_response(
+            true,
+            vec![],
+            db_test_diagnostic(
+                "success",
+                "success",
+                "DB_TEST_OK",
+                "Connection successful.",
+                None,
+                None,
+            ),
+            "handshake",
+            false,
+            None,
+            None,
+        );
+        client.pool.close().await;
+        return resp;
+    }
+
+    let (version_sql, databases_sql) = match db_type {
+        DbType::PostgreSQL => (
+            "SELECT version()",
+            Some("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname"),
+        ),
+        _ => ("SELECT sqlite_version()", None),
+    };
+
+    let server_version = match tokio::time::timeout(
+        policy.db_query,
+        client.pool.fetch_all_result(version_sql),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        _ => None,
+    };
+
+    let mut databases = Vec::new();
+    if let Some(sql) = databases_sql {
+        match tokio::time::timeout(policy.db_query, client.pool.fetch_all_result(sql)).await {
+            Ok(Ok(result)) => {
+                for row in &result.rows {
+                    if let Some(name) = row.first().and_then(|v| v.as_str()) {
+                        if !name.is_empty() {
+                            databases.push(name.to_string());
+                        }
+                    }
+                }
+            }
+            other => {
+                let detail = match other {
+                    Ok(Err(e)) => Some(e.to_string()),
+                    _ => None,
+                };
+                let resp = db_test_response(
+                    true,
+                    vec![],
+                    db_test_diagnostic(
+                        "warning",
+                        "query",
+                        "DB_TEST_CAPABILITY_PROBE_FAILED",
+                        "Connection successful, but failed to list databases.",
+                        Some("Check metadata query restrictions or role privileges."),
+                        detail,
+                    ),
+                    "handshake",
+                    true,
+                    Some(false),
+                    server_version,
+                );
+                client.pool.close().await;
+                return resp;
+            }
+        }
+    }
+
+    let resp = db_test_response(
+        true,
+        databases,
+        db_test_diagnostic(
+            "success",
+            "success",
+            "DB_TEST_OK",
+            "Connection successful. Capability probe completed.",
+            None,
+            None,
+        ),
+        "capabilities",
+        true,
+        Some(true),
+        server_version,
+    );
+    client.pool.close().await;
+    resp
+}
+
+
 use core_lib::{
     ai::{
         agent::AgentError,
@@ -860,20 +1160,19 @@ pub(crate) async fn get_or_open_transaction_session(
     let resolved_db_id = resolve_transaction_db_id(state, db_id).await;
     let (db_client, _) = resolve_db_client_for_request(state, db_id).await?;
     let mut conn = db_client
-        .mysql_pool()?
-        .acquire()
+        .pool
+        .acquire_engine()
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
-    let connection_id = DbClient::connection_id_for_session(&mut conn)
+    let connection_id = conn
+        .backend_id()
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
-    tokio::time::timeout(
-        state.timeouts.db_query,
-        sqlx::query("START TRANSACTION").execute(&mut *conn),
-    )
-    .await
-    .map_err(|_| AppError::Timeout("Starting transaction timed out".to_string()))?
-    .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let begin_sql = conn.begin_statement();
+    tokio::time::timeout(state.timeouts.db_query, conn.execute_command(begin_sql))
+        .await
+        .map_err(|_| AppError::Timeout("Starting transaction timed out".to_string()))?
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
 
     let session = Arc::new(Mutex::new(TransactionSession {
         connection_id,
@@ -1214,7 +1513,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for id in expired {
                 if let Some(session_arc) = sessions.remove(&id) {
                     let mut session = session_arc.lock().await;
-                    let _ = sqlx::query("ROLLBACK").execute(&mut *session.conn).await;
+                    let _ = session.conn.execute_command("ROLLBACK").await;
                     tracing::info!("Cleaned up idle transaction session: {}", id);
                 }
             }
@@ -1342,7 +1641,7 @@ async fn crud_insert(
     let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
         let mut guard = session.lock().await;
         guard.last_accessed = std::time::Instant::now();
-        let affected = CrudManager::insert_mysql(&mut *guard.conn, &crud_req)
+        let affected = CrudManager::insert_engine(&mut guard.conn, &crud_req)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, Some("active".to_string()))
@@ -1403,7 +1702,7 @@ async fn crud_update(
     let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
         let mut guard = session.lock().await;
         guard.last_accessed = std::time::Instant::now();
-        let affected = CrudManager::update_mysql(&mut *guard.conn, &crud_req)
+        let affected = CrudManager::update_engine(&mut guard.conn, &crud_req)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, Some("active".to_string()))
@@ -1466,7 +1765,7 @@ async fn crud_delete(
     let (affected_rows, transaction_state) = if let Some(session) = transaction_session {
         let mut guard = session.lock().await;
         guard.last_accessed = std::time::Instant::now();
-        let affected = CrudManager::delete_mysql(&mut *guard.conn, &req.table_name, &req.condition)
+        let affected = CrudManager::delete_engine(&mut guard.conn, &req.table_name, &req.condition)
             .await
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         (affected, Some("active".to_string()))
@@ -1720,47 +2019,6 @@ mod config_redaction_tests {
     }
 }
 
-async fn fetch_schema_for_db(db_client: &DbClient, db_name: &str) -> Option<SchemaResponse> {
-    let tables = SchemaExtractor::get_tables(db_client, db_name).await.ok()?;
-    let columns_map = SchemaExtractor::get_columns_map(db_client, db_name)
-        .await
-        .unwrap_or_default();
-    let indexes_map = SchemaExtractor::get_indexes_map(db_client, db_name)
-        .await
-        .unwrap_or_default();
-    let foreign_keys_map = SchemaExtractor::get_foreign_keys_map(db_client, db_name)
-        .await
-        .unwrap_or_default();
-
-    let mut result_tables = Vec::with_capacity(tables.len());
-    for t in tables {
-        let table_name = t.table_name;
-        let columns = columns_map.get(&table_name).cloned().unwrap_or_default();
-        let indexes = indexes_map.get(&table_name).cloned().unwrap_or_default();
-        let foreign_keys = foreign_keys_map
-            .get(&table_name)
-            .cloned()
-            .unwrap_or_default();
-
-        result_tables.push(TableWithDetails {
-            table_name,
-            columns,
-            indexes,
-            foreign_keys,
-        });
-    }
-
-    let views = SchemaExtractor::get_views(db_client, db_name)
-        .await
-        .unwrap_or_default();
-
-    Some(SchemaResponse {
-        db_name: db_name.to_string(),
-        tables: result_tables,
-        views,
-    })
-}
-
 fn schema_cache_key(db_id: Option<&str>, db_name: &str) -> String {
     match db_id {
         Some(id) => format!("{}::{}", id, db_name),
@@ -1772,41 +2030,10 @@ fn table_schema_cache_key(db_id: Option<&str>, db_name: &str, table_name: &str) 
     format!("{}::{}", schema_cache_key(db_id, db_name), table_name)
 }
 
-pub(crate) async fn get_cached_schema(
-    state: &AppState,
-    db_id: Option<&str>,
-    db_client: &DbClient,
-    db_name: &str,
-) -> Option<SchemaResponse> {
-    let key = schema_cache_key(db_id, db_name);
-    // Fast path: read lock allows concurrent cache hits
-    {
-        let cache = state.schema_cache.read().await;
-        if let Some(entry) = cache.get(&key) {
-            if entry.expires_at > Instant::now() {
-                return Some(entry.schema.clone());
-            }
-        }
-    }
-
-    // Acquire write lock, then double-check (another thread may have refreshed)
-    let mut cache = state.schema_cache.write().await;
-    if let Some(entry) = cache.get(&key) {
-        if entry.expires_at > Instant::now() {
-            return Some(entry.schema.clone());
-        }
-    }
-
-    let schema = fetch_schema_for_db(db_client, db_name).await?;
-    cache.retain(|_, v| v.expires_at > Instant::now());
-    cache.insert(
-        key,
-        CachedSchemaEntry {
-            schema: schema.clone(),
-            expires_at: Instant::now() + SCHEMA_CACHE_TTL,
-        },
-    );
-    Some(schema)
+/// 把 DbError 转成 AppError：`Unsupported`（如 SQLite 结构内省未支持）会变成
+/// 400 BadRequest，而不再是 500 Internal，避免把"功能未支持"误报为服务端故障。
+fn db_error_to_app(e: core_lib::db::DbError) -> AppError {
+    core_lib::service::error::ServiceError::from(e).to_app_error()
 }
 
 pub(crate) async fn get_cached_table_schema(
@@ -1837,13 +2064,13 @@ pub(crate) async fn get_cached_table_schema(
 
     let columns = SchemaExtractor::get_columns(db_client, db_name, table_name)
         .await
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
+        .map_err(db_error_to_app)?;
     let indexes = SchemaExtractor::get_indexes(db_client, db_name, table_name)
         .await
-        .unwrap_or_default();
+        .map_err(db_error_to_app)?;
     let foreign_keys = SchemaExtractor::get_foreign_keys(db_client, db_name, table_name)
         .await
-        .unwrap_or_default();
+        .map_err(db_error_to_app)?;
     let table = TableWithDetails {
         table_name: table_name.to_string(),
         columns,
@@ -1869,27 +2096,17 @@ pub(crate) async fn clear_metadata_caches(state: &AppState) {
 }
 
 async fn get_schema_internal(state: &AppState) -> Option<SchemaResponse> {
-    if let Some(vs) = state.virtual_schema.read().await.clone() {
-        return Some(vs);
-    }
-
-    let db_client = state.db_client.read().await.clone()?;
-    let url = state
-        .config
-        .read()
+    let ctx = crate::bridge::bridge_service_context(state);
+    core_lib::service::schema::SchemaService::get_schema(&ctx, None)
         .await
-        .get_active_db_url()
-        .unwrap_or_default();
-    let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
-
-    get_cached_schema(state, None, &db_client, &db_name).await
+        .ok()
 }
 
 async fn get_schema_for_db_id(state: &AppState, db_id: &str) -> Result<SchemaResponse, AppError> {
-    let (db_client, db_name) = get_temp_db_client(state, db_id).await?;
-    get_cached_schema(state, Some(db_id), &db_client, &db_name)
+    let ctx = crate::bridge::bridge_service_context(state);
+    core_lib::service::schema::SchemaService::get_schema(&ctx, Some(db_id))
         .await
-        .ok_or_else(|| AppError::InternalError("Failed to fetch schema".to_string()))
+        .map_err(|e| e.to_app_error())
 }
 
 pub(crate) async fn resolve_db_client_for_request(
@@ -2152,10 +2369,10 @@ async fn execute_transaction(
         } else {
             "ROLLBACK"
         };
-        tokio::time::timeout(state.timeouts.db_query, sqlx::query(sql).execute(&mut *guard.conn))
+        tokio::time::timeout(state.timeouts.db_query, guard.conn.execute_command(sql))
             .await
             .map_err(|_| AppError::Timeout(format!("{action} timed out")))?
-            .map_err(|e| AppError::InternalError(e.to_string()))?;
+            .map_err(db_error_to_app)?;
     }
 
     state
@@ -2208,176 +2425,28 @@ async fn get_table_data(
     State(state): State<AppState>,
     axum::extract::Query(req): axum::extract::Query<GetTableDataRequest>,
 ) -> Result<Json<GetTableDataResponse>, AppError> {
-    let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
+    use core_lib::service::schema::{GetTableDataParams, SchemaService};
 
-    let page = req.page.unwrap_or(1);
-    let page_size = req.page_size.unwrap_or(100);
-    let offset = (page - 1) * page_size;
-
-    let mut where_clause = String::new();
-    let mut bindings = Vec::new();
-
-    if let Some(filters_str) = &req.filters {
-        if let Ok(filters) = serde_json::from_str::<Vec<FilterCondition>>(filters_str) {
-            let mut conditions = Vec::new();
-            for f in filters {
-                let col = quote_mysql_ident(&f.column)?;
-                match f.operator.as_str() {
-                    "equals" => {
-                        conditions.push(format!("{} = ?", col));
-                        bindings.push(f.value.clone());
-                    }
-                    "not_equals" => {
-                        conditions.push(format!("{} <> ?", col));
-                        bindings.push(f.value.clone());
-                    }
-                    "contains" => {
-                        conditions.push(format!("{} LIKE ?", col));
-                        bindings.push(format!("%{}%", f.value));
-                    }
-                    "starts_with" => {
-                        conditions.push(format!("{} LIKE ?", col));
-                        bindings.push(format!("{}%", f.value));
-                    }
-                    "ends_with" => {
-                        conditions.push(format!("{} LIKE ?", col));
-                        bindings.push(format!("%{}", f.value));
-                    }
-                    "greater_than" => {
-                        conditions.push(format!("{} > ?", col));
-                        bindings.push(f.value.clone());
-                    }
-                    "less_than" => {
-                        conditions.push(format!("{} < ?", col));
-                        bindings.push(f.value.clone());
-                    }
-                    "between" => {
-                        let parts: Vec<String> = f
-                            .value
-                            .split(',')
-                            .map(|part| part.trim().to_string())
-                            .filter(|part| !part.is_empty())
-                            .collect();
-                        if parts.len() >= 2 {
-                            conditions.push(format!("{} BETWEEN ? AND ?", col));
-                            bindings.push(parts[0].clone());
-                            bindings.push(parts[1].clone());
-                        }
-                    }
-                    "in" => {
-                        let parts: Vec<String> = f
-                            .value
-                            .split(',')
-                            .map(|part| part.trim().to_string())
-                            .filter(|part| !part.is_empty())
-                            .collect();
-                        if !parts.is_empty() {
-                            let placeholders = std::iter::repeat("?")
-                                .take(parts.len())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            conditions.push(format!("{} IN ({})", col, placeholders));
-                            bindings.extend(parts);
-                        }
-                    }
-                    "not_in" => {
-                        let parts: Vec<String> = f
-                            .value
-                            .split(',')
-                            .map(|part| part.trim().to_string())
-                            .filter(|part| !part.is_empty())
-                            .collect();
-                        if !parts.is_empty() {
-                            let placeholders = std::iter::repeat("?")
-                                .take(parts.len())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            conditions.push(format!("{} NOT IN ({})", col, placeholders));
-                            bindings.extend(parts);
-                        }
-                    }
-                    "is_null" => {
-                        conditions.push(format!("{} IS NULL", col));
-                    }
-                    "is_not_null" => {
-                        conditions.push(format!("{} IS NOT NULL", col));
-                    }
-                    _ => {
-                        conditions.push(format!("{} = ?", col));
-                        bindings.push(f.value.clone());
-                    }
-                }
-            }
-            if !conditions.is_empty() {
-                where_clause = format!("WHERE {}", conditions.join(" AND "));
-            }
-        }
-    }
-
-    let mut order_clause = String::new();
-    if let Some(orders_str) = &req.orders {
-        if let Ok(orders) = serde_json::from_str::<Vec<OrderCondition>>(orders_str) {
-            let mut o_clauses = Vec::new();
-            for o in orders {
-                let dir = if o.desc { "DESC" } else { "ASC" };
-                let col = quote_mysql_ident(&o.column)?;
-                o_clauses.push(format!("{} {}", col, dir));
-            }
-            if !o_clauses.is_empty() {
-                order_clause = format!("ORDER BY {}", o_clauses.join(", "));
-            }
-        }
-    }
-
-    let table_ident = quote_mysql_ident(&req.table_name)?;
-    let data_sql = format!(
-        "SELECT * FROM {} {} {} LIMIT {} OFFSET {}",
-        table_ident,
-        where_clause,
-        order_clause,
-        page_size + 1,
-        offset
-    );
-    let mut data_query = sqlx::query(&data_sql);
-    for b in &bindings {
-        data_query = data_query.bind(b);
-    }
-
-    let mut rows = Vec::new();
-    let result_rows = match tokio::time::timeout(
-        state.timeouts.db_query,
-        data_query.fetch_all(db_client.mysql_pool()?),
+    let ctx = crate::bridge::bridge_service_context(&state);
+    let result = SchemaService::get_table_data(
+        &ctx,
+        GetTableDataParams {
+            db_id: req.db_id,
+            table_name: req.table_name,
+            page: req.page,
+            page_size: req.page_size,
+            filters: req.filters,
+            orders: req.orders,
+        },
     )
     .await
-    {
-        Ok(Ok(res)) => res,
-        Ok(Err(e)) => return Err(AppError::InternalError(e.to_string())),
-        Err(_) => {
-            return Err(AppError::Timeout(
-                "Query timed out after 30 seconds. Please optimize SQL or add indexes.".to_string(),
-            ))
-        }
-    };
-
-    let has_more = result_rows.len() as u32 > page_size;
-    let mut row_encoder = None;
-    for row in result_rows.into_iter().take(page_size as usize) {
-        if row_encoder.is_none() {
-            row_encoder = Some(MySqlRowJsonEncoder::from_row(&row));
-        }
-        rows.push(encode_mysql_row(
-            &row,
-            row_encoder
-                .as_ref()
-                .expect("row encoder should be initialized"),
-        ));
-    }
+    .map_err(|e| e.to_app_error())?;
 
     Ok(Json(GetTableDataResponse {
-        data: rows,
-        total: None,
-        total_status: "calculating".to_string(),
-        has_more,
+        data: result.data,
+        total: result.total,
+        total_status: result.total_status,
+        has_more: result.has_more,
     }))
 }
 
@@ -2413,6 +2482,7 @@ struct ExecuteDdlRequest {
 struct PreviewDdlRequest {
     old_table: Option<TableWithDetails>,
     new_table: TableWithDetails,
+    db_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2442,8 +2512,26 @@ fn is_ddl_statement(stmt: &sqlparser::ast::Statement) -> bool {
 }
 
 async fn preview_ddl(
+    State(state): State<AppState>,
     Json(req): Json<PreviewDdlRequest>,
 ) -> Result<Json<PreviewDdlResponse>, AppError> {
+    let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
+    match db_client.db_type {
+        core_lib::config::DbType::MySQL | core_lib::config::DbType::MariaDB => {}
+        core_lib::config::DbType::PostgreSQL => {
+            return Err(AppError::BadRequest(
+                "结构对比式 DDL 预览当前仅支持 MySQL。PostgreSQL 已支持连接、查询、结构浏览与已编写 DDL 的执行，请直接编写 DDL 后通过 DDL 执行接口提交。"
+                    .to_string(),
+            ));
+        }
+        _ => {
+            return Err(AppError::BadRequest(
+                "SQLite 结构变更（DDL）当前版本未支持。SQLite 仅支持连接与查询执行。"
+                    .to_string(),
+            ));
+        }
+    }
+
     let sql = DdlEngine::generate_preview(req.old_table.as_ref(), &req.new_table);
     Ok(Json(PreviewDdlResponse { sql }))
 }
@@ -2485,17 +2573,35 @@ async fn execute_ddl(
 
     let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
-    let result = sqlx::query(&req.sql)
-        .execute(db_client.mysql_pool()?)
-        .await
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    // SQLite 的结构变更当前明确未支持；PostgreSQL 与 MySQL 允许执行已编写好的 DDL。
+    if matches!(db_client.db_type, core_lib::config::DbType::SQLite) {
+        return Err(AppError::BadRequest(
+            "SQLite 结构变更（DDL）当前版本未支持。SQLite 仅支持连接与查询执行，请改用 MySQL 或 PostgreSQL。"
+                .to_string(),
+        ));
+    }
+
+    let affected_rows = match tokio::time::timeout(
+        state.timeouts.db_query,
+        db_client.pool.execute_affected(&req.sql),
+    )
+    .await
+    {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => return Err(db_error_to_app(e)),
+        Err(_) => {
+            return Err(AppError::Timeout(
+                "DDL execution timed out after 30 seconds.".to_string(),
+            ))
+        }
+    };
     clear_metadata_caches(&state).await;
 
     Ok(Json(ExecuteResponse {
         columns: vec![],
         row_count: 0,
         rows: vec![],
-        affected_rows: result.rows_affected(),
+        affected_rows,
         execution_time_ms: 0,
         has_more: false,
         next_offset: None,
@@ -2598,9 +2704,32 @@ async fn export_data(
 
     let table_name = req.table_name.clone();
     let export_type = req.export_type.clone();
-    let safe_table = quote_mysql_ident(&table_name)?;
+    let db_type = db_client.db_type.clone();
+    let safe_table = core_lib::sql_util::quote_table_ref_checked(&table_name, &db_type)
+        .map_err(AppError::BadRequest)?;
     let data_sql = format!("SELECT * FROM {}", safe_table);
-    let mysql_pool = db_client.mysql_pool().ok().cloned();
+    let is_mysql = matches!(
+        db_type,
+        core_lib::config::DbType::MySQL | core_lib::config::DbType::MariaDB
+    );
+    let mysql_pool = if is_mysql {
+        db_client.pool.mysql().ok().cloned()
+    } else {
+        None
+    };
+    // PostgreSQL / SQLite 当前采用一次性取回（后续可替换为流式），MySQL 保持流式导出。
+    let prefetched = if is_mysql {
+        None
+    } else {
+        let result = tokio::time::timeout(
+            state.timeouts.db_query,
+            db_client.pool.fetch_all_result(&data_sql),
+        )
+        .await
+        .map_err(|_| AppError::Timeout("Export query timed out after 30 seconds.".to_string()))?
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+        Some((result.columns.clone(), result.to_objects()))
+    };
 
     let (tx, rx) =
         tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(100);
@@ -2608,6 +2737,84 @@ async fn export_data(
     let spawn_table_name = table_name.clone();
     let spawn_export_type = export_type.clone();
     tokio::spawn(async move {
+        if let Some((headers, rows)) = prefetched {
+            let mut is_first_json = true;
+            if !headers.is_empty() {
+                if spawn_export_type == "csv" {
+                    let _ = tx
+                        .send(Ok(axum::body::Bytes::from(
+                            DataExporter::csv_header(&headers),
+                        )))
+                        .await;
+                } else if spawn_export_type == "sql" {
+                    let _ = tx
+                        .send(Ok(axum::body::Bytes::from(DataExporter::sql_header(
+                            &spawn_table_name,
+                            &headers,
+                        ))))
+                        .await;
+                }
+            }
+            let mut previous_row: Option<serde_json::Map<String, serde_json::Value>> = None;
+            for value in rows {
+                let map = match value.as_object() {
+                    Some(m) => m.clone(),
+                    None => continue,
+                };
+                if spawn_export_type == "csv" {
+                    let _ = tx
+                        .send(Ok(axum::body::Bytes::from(DataExporter::csv_row(
+                            &headers, &map,
+                        ))))
+                        .await;
+                } else if spawn_export_type == "sql" {
+                    if let Some(prev) = previous_row.take() {
+                        let _ = tx
+                            .send(Ok(axum::body::Bytes::from(DataExporter::sql_row(
+                                &headers, &prev, false,
+                            ))))
+                            .await;
+                    }
+                    previous_row = Some(map);
+                } else if spawn_export_type == "json" {
+                    if let Some(prev) = previous_row.take() {
+                        let _ = tx
+                            .send(Ok(axum::body::Bytes::from(DataExporter::json_row(
+                                &prev,
+                                is_first_json,
+                                false,
+                            ))))
+                            .await;
+                        is_first_json = false;
+                    }
+                    previous_row = Some(map);
+                }
+            }
+            if spawn_export_type == "sql" {
+                if let Some(prev) = previous_row {
+                    let _ = tx
+                        .send(Ok(axum::body::Bytes::from(DataExporter::sql_row(
+                            &headers, &prev, true,
+                        ))))
+                        .await;
+                }
+            } else if spawn_export_type == "json" {
+                if let Some(prev) = previous_row {
+                    let _ = tx
+                        .send(Ok(axum::body::Bytes::from(DataExporter::json_row(
+                            &prev,
+                            is_first_json,
+                            true,
+                        ))))
+                        .await;
+                } else {
+                    let _ = tx.send(Ok(axum::body::Bytes::from("[]
+"))).await;
+                }
+            }
+            return;
+        }
+
         use sqlx::Column;
         use sqlx::Row;
 
@@ -2698,7 +2905,8 @@ async fn export_data(
                     ))))
                     .await;
             } else {
-                let _ = tx.send(Ok(axum::body::Bytes::from("[]\n"))).await;
+                let _ = tx.send(Ok(axum::body::Bytes::from("[]
+"))).await;
             }
         }
     });
@@ -2801,15 +3009,18 @@ async fn sync_schema_diff(
     State(state): State<AppState>,
     Json(req): Json<SyncSchemaDiffRequest>,
 ) -> Result<Json<SyncSchemaDiffResponse>, AppError> {
-    let (source_client, source_db_name) = get_temp_db_client(&state, &req.source_db_id).await?;
-    let (target_client, target_db_name) = get_temp_db_client(&state, &req.target_db_id).await?;
+    let (source_client, _source_db_name) = get_temp_db_client(&state, &req.source_db_id).await?;
+    let (target_client, _target_db_name) = get_temp_db_client(&state, &req.target_db_id).await?;
+    crate::handlers::util::require_mysql_client(&source_client, "结构同步（源库）")?;
+    crate::handlers::util::require_mysql_client(&target_client, "结构同步（目标库）")?;
 
-    let source = fetch_schema_for_db(&source_client, &source_db_name)
+    let ctx = crate::bridge::bridge_service_context(&state);
+    let source = core_lib::service::schema::SchemaService::get_schema(&ctx, Some(&req.source_db_id))
         .await
-        .ok_or_else(|| AppError::InternalError("Failed to fetch source schema".to_string()))?;
-    let target = fetch_schema_for_db(&target_client, &target_db_name)
+        .map_err(|e| e.to_app_error())?;
+    let target = core_lib::service::schema::SchemaService::get_schema(&ctx, Some(&req.target_db_id))
         .await
-        .ok_or_else(|| AppError::InternalError("Failed to fetch target schema".to_string()))?;
+        .map_err(|e| e.to_app_error())?;
 
     let (diff, _) = SyncEngine::schema_sync(&source, &target);
     if schema_gap_too_large(&diff) {
@@ -2834,15 +3045,18 @@ async fn sync_schema_ddl(
     State(state): State<AppState>,
     Json(req): Json<SyncSchemaDdlRequest>,
 ) -> Result<Json<SyncSchemaDdlResponse>, AppError> {
-    let (source_client, source_db_name) = get_temp_db_client(&state, &req.source_db_id).await?;
-    let (target_client, target_db_name) = get_temp_db_client(&state, &req.target_db_id).await?;
+    let (source_client, _source_db_name) = get_temp_db_client(&state, &req.source_db_id).await?;
+    let (target_client, _target_db_name) = get_temp_db_client(&state, &req.target_db_id).await?;
+    crate::handlers::util::require_mysql_client(&source_client, "结构同步（源库）")?;
+    crate::handlers::util::require_mysql_client(&target_client, "结构同步（目标库）")?;
 
-    let source = fetch_schema_for_db(&source_client, &source_db_name)
+    let ctx = crate::bridge::bridge_service_context(&state);
+    let source = core_lib::service::schema::SchemaService::get_schema(&ctx, Some(&req.source_db_id))
         .await
-        .ok_or_else(|| AppError::InternalError("Failed to fetch source schema".to_string()))?;
-    let target = fetch_schema_for_db(&target_client, &target_db_name)
+        .map_err(|e| e.to_app_error())?;
+    let target = core_lib::service::schema::SchemaService::get_schema(&ctx, Some(&req.target_db_id))
         .await
-        .ok_or_else(|| AppError::InternalError("Failed to fetch target schema".to_string()))?;
+        .map_err(|e| e.to_app_error())?;
     let (diff, _) = SyncEngine::schema_sync(&source, &target);
     if schema_gap_too_large(&diff) {
         return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
@@ -2970,6 +3184,8 @@ async fn clear_history(State(state): State<AppState>) -> Result<StatusCode, AppE
 #[derive(Deserialize)]
 struct ExplainSqlRequest {
     sql: String,
+    #[serde(default)]
+    db_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -3054,12 +3270,7 @@ async fn explain_sql(
     State(state): State<AppState>,
     Json(req): Json<ExplainSqlRequest>,
 ) -> Result<Json<ExplainSqlResponse>, AppError> {
-    let db_client = state
-        .db_client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| AppError::BadRequest("Database not connected".to_string()))?;
+    let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
 
     // Validate SQL is a single read-only statement before prepending EXPLAIN
     let dialect = sqlparser::dialect::GenericDialect {};
@@ -3071,40 +3282,31 @@ async fn explain_sql(
     if !core_lib::sql::util::is_read_only_statement(&statements[0]) {
         return Err(AppError::BadRequest("EXPLAIN only supports read-only queries (SELECT, SHOW, DESCRIBE)".to_string()));
     }
-    let explain_sql = format!("EXPLAIN {}", req.sql);
-    use sqlx::Column;
-    use sqlx::Row;
+    // EXPLAIN 各引擎语法与输出格式不同：
+    // - MySQL:         EXPLAIN <sql>，输出列结构化的执行计划表
+    // - PostgreSQL:    EXPLAIN <sql>，输出单列 "QUERY PLAN" 文本树
+    // - SQLite:        EXPLAIN QUERY PLAN <sql>，输出 id/parent/notused/detail 四列
+    let db_type = db_client.db_type.clone();
+    let explain_sql = match db_type {
+        core_lib::config::DbType::SQLite => format!("EXPLAIN QUERY PLAN {}", req.sql),
+        _ => format!("EXPLAIN {}", req.sql),
+    };
 
-    let result_rows = sqlx::query(&explain_sql)
-        .fetch_all(db_client.mysql_pool()?)
-        .await
-        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let result = tokio::time::timeout(
+        state.timeouts.db_query,
+        db_client.pool.fetch_all_result(&explain_sql),
+    )
+    .await
+    .map_err(|_| AppError::Timeout("EXPLAIN timed out after 30 seconds.".to_string()))?
+    .map_err(|e| {
+        AppError::BadRequest(format!(
+            "{} 无法执行该 SQL 的 EXPLAIN：{}",
+            db_client.db_type.display_name(),
+            e
+        ))
+    })?;
 
-    let mut rows = Vec::new();
-    for row in result_rows {
-        let mut map = serde_json::Map::new();
-        for col in row.columns() {
-            let col_name = col.name().to_string();
-
-            if let Ok(val) = row.try_get::<Option<i64>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val));
-            } else if let Ok(val) = row.try_get::<Option<f64>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val));
-            } else if let Ok(val) = row.try_get::<Option<String>, _>(col.ordinal()) {
-                map.insert(col_name, serde_json::json!(val));
-            } else {
-                let val: Option<Vec<u8>> = row.try_get(col.ordinal()).unwrap_or(None);
-                if let Some(bytes) = val {
-                    let s = String::from_utf8_lossy(&bytes).into_owned();
-                    map.insert(col_name, serde_json::json!(s));
-                } else {
-                    map.insert(col_name, serde_json::Value::Null);
-                }
-            }
-        }
-        rows.push(serde_json::Value::Object(map));
-    }
-
+    let rows = result.to_objects();
     Ok(Json(ExplainSqlResponse { rows }))
 }
 
@@ -3122,6 +3324,7 @@ async fn session_info(
             .cloned()
     });
     let (db_client, db_name) = resolve_db_client_for_request(&state, effective_db_id.as_deref()).await?;
+    crate::handlers::util::require_mysql_client(&db_client, "会话信息（SHOW VARIABLES）")?;
     let policy = state.timeouts.clone();
 
     let summary_row = tokio::time::timeout(

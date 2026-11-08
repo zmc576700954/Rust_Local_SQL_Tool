@@ -54,6 +54,10 @@ pub(crate) async fn build_ctx(
     session_id: Option<String>,
 ) -> Result<core_lib::ops::OpsContext, AppError> {
     let (db_client, db_name) = resolve_db_client_for_request(state, db_id).await?;
+    // 运维中心的四类场景（索引优化、性能诊断、定期巡检、字段治理）依赖 MySQL
+    // 的 information_schema / performance_schema 与 MySQL 方言，当前仅支持 MySQL。
+    // 非 MySQL 连接返回明确提示，避免驱动层错误直接冒到界面。
+    crate::handlers::util::require_mysql_client(&db_client, "运维中心场景")?;
     let resolved_id = match db_id {
         Some(id) => id.to_string(),
         None => state

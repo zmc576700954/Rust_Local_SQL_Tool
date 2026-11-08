@@ -5,6 +5,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::config::DbType;
+use crate::db::database_ops::DatabaseOps;
 use crate::db::DbClient;
 use crate::schema::{SchemaExtractor, SchemaResponse, TableWithDetails};
 use crate::sql::offline_parser::OfflineParser;
@@ -21,6 +23,28 @@ use crate::service::row_codec::{encode_mysql_row, MySqlRowJsonEncoder, bind_json
 const SCHEMA_CACHE_TTL: Duration = Duration::from_secs(30);
 const TABLE_SCHEMA_CACHE_TTL: Duration = Duration::from_secs(300);
 const DB_CLIENT_CACHE_TTL: Duration = Duration::from_secs(600);
+
+/// 按引擎引用列名（MySQL 反引号，PostgreSQL/SQLite 双引号）。
+fn quote_column_checked(col: &str, db_type: &DbType) -> Result<String, ServiceError> {
+    match db_type {
+        DbType::MySQL | DbType::MariaDB => quote_ident_mysql_checked(col),
+        _ => crate::sql_util::quote_ident_pg_checked(col),
+    }
+    .map_err(ServiceError::BadRequest)
+}
+
+/// 过滤值按引擎处理：
+/// - MySQL / SQLite：占位符 `?`，值进入绑定列表；
+/// - PostgreSQL：`sqlx` 无法把动态 JSON 值安全地绑定到任意列类型，因此生成
+///   带转义的单引号字面量（PostgreSQL 会将 unknown 字面量隐式转换为列类型）。
+fn filter_literal(value: &str, db_type: &DbType, bindings: &mut Vec<String>) -> String {
+    if matches!(db_type, DbType::PostgreSQL) {
+        crate::sql_util::format_sql_value(&serde_json::Value::String(value.to_string()))
+    } else {
+        bindings.push(value.to_string());
+        "?".to_string()
+    }
+}
 
 // ── 参数 / 响应类型 ─────────────────────────────────────
 
@@ -123,45 +147,67 @@ impl SchemaService {
         params: GetTableDataParams,
     ) -> Result<GetTableDataResult, ServiceError> {
         let (db_client, _) = Self::resolve_db_client(ctx, params.db_id.as_deref()).await?;
+        let db_type = db_client.db_type.clone();
         let page = params.page.unwrap_or(1);
         let page_size = params.page_size.unwrap_or(100);
         let offset = (page - 1) * page_size;
 
-        let (where_clause, bindings) = Self::build_where_clause(&params.filters)?;
-        let order_clause = Self::build_order_clause(&params.orders)?;
+        let (where_clause, bindings) = Self::build_where_clause(&params.filters, &db_type)?;
+        let order_clause = Self::build_order_clause(&params.orders, &db_type)?;
 
-        let table_ident = quote_ident_mysql_checked(&params.table_name)
+        let table_ident = crate::sql_util::quote_table_ref_checked(&params.table_name, &db_type)
             .map_err(ServiceError::BadRequest)?;
         let data_sql = format!(
             "SELECT * FROM {} {} {} LIMIT {} OFFSET {}",
             table_ident, where_clause, order_clause, page_size + 1, offset
         );
 
-        let mut data_query = sqlx::query(&data_sql);
-        for b in &bindings {
-            data_query = bind_json_value_to_query(data_query, &serde_json::Value::String(b.clone()));
-        }
-
-        let result_rows = tokio::time::timeout(
-            ctx.timeouts().db_query,
-            data_query.fetch_all(db_client.mysql_pool()?),
-        )
-        .await
-        .map_err(|_| ServiceError::Timeout("Query timed out".into()))?
-        .map_err(ServiceError::from)?;
-
-        let has_more = result_rows.len() as u32 > page_size;
-        let mut rows = Vec::new();
-        let mut row_encoder = None;
-        for row in result_rows.into_iter().take(page_size as usize) {
-            if row_encoder.is_none() {
-                row_encoder = Some(MySqlRowJsonEncoder::from_row(&row));
+        let (_, all_rows) = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
+            let mut data_query = sqlx::query(&data_sql);
+            for b in &bindings {
+                data_query = bind_json_value_to_query(
+                    data_query,
+                    &serde_json::Value::String(b.clone()),
+                );
             }
-            rows.push(encode_mysql_row(
-                &row,
-                row_encoder.as_ref().expect("row encoder initialized"),
-            ));
-        }
+            let result_rows = tokio::time::timeout(
+                ctx.timeouts().db_query,
+                data_query.fetch_all(db_client.mysql_pool()?),
+            )
+            .await
+            .map_err(|_| ServiceError::Timeout("Query timed out".into()))?
+            .map_err(ServiceError::from)?;
+
+            let columns = result_rows
+                .first()
+                .map(|row| MySqlRowJsonEncoder::from_row(row).column_names())
+                .unwrap_or_default();
+            let mut rows = Vec::new();
+            let mut row_encoder = None;
+            for row in result_rows.into_iter().take((page_size + 1) as usize) {
+                if row_encoder.is_none() {
+                    row_encoder = Some(MySqlRowJsonEncoder::from_row(&row));
+                }
+                rows.push(encode_mysql_row(
+                    &row,
+                    row_encoder.as_ref().expect("row encoder initialized"),
+                ));
+            }
+            (columns, rows)
+        } else {
+            // PostgreSQL / SQLite：过滤值已按引擎语法内联为字面量，走统一执行接口。
+            let result = tokio::time::timeout(
+                ctx.timeouts().db_query,
+                db_client.execute_query(&data_sql),
+            )
+            .await
+            .map_err(|_| ServiceError::Timeout("Query timed out".into()))?
+            .map_err(ServiceError::from)?;
+            (result.columns.clone(), result.to_objects())
+        };
+
+        let has_more = all_rows.len() as u32 > page_size;
+        let rows = all_rows.into_iter().take(page_size as usize).collect();
 
         Ok(GetTableDataResult {
             data: rows,
@@ -190,9 +236,7 @@ impl SchemaService {
             .ok_or_else(|| ServiceError::BadRequest("Database not connected".into()))?;
         let url = ctx.get_config().await.get_active_db_url().unwrap_or_default();
         let db_name = DbClient::extract_db_name(&url).unwrap_or_default();
-        Self::get_cached_schema(ctx, None, &db_client, &db_name)
-            .await
-            .ok_or_else(|| ServiceError::InternalError("Failed to fetch schema".into()))
+        Self::get_cached_schema(ctx, None, &db_client, &db_name).await
     }
 
     /// 获取指定 db_id 的 schema
@@ -201,9 +245,7 @@ impl SchemaService {
         db_id: &str,
     ) -> Result<SchemaResponse, ServiceError> {
         let (db_client, db_name) = Self::resolve_db_client(ctx, Some(db_id)).await?;
-        Self::get_cached_schema(ctx, Some(db_id), &db_client, &db_name)
-            .await
-            .ok_or_else(|| ServiceError::InternalError("Failed to fetch schema".into()))
+        Self::get_cached_schema(ctx, Some(db_id), &db_client, &db_name).await
     }
 
     /// 从 DB 获取 schema（带 TTL 缓存）
@@ -212,13 +254,13 @@ impl SchemaService {
         db_id: Option<&str>,
         db_client: &DbClient,
         db_name: &str,
-    ) -> Option<SchemaResponse> {
+    ) -> Result<SchemaResponse, ServiceError> {
         let key = Self::schema_cache_key(db_id, db_name);
         // 快路径：读锁
         {
             if let Some(entry) = ctx.schema_state().get_schema(&key).await {
                 if entry.expires_at > Instant::now() {
-                    return Some(entry.schema.clone());
+                    return Ok(entry.schema.clone());
                 }
             }
         }
@@ -232,7 +274,7 @@ impl SchemaService {
             },
         )
         .await;
-        Some(schema)
+        Ok(schema)
     }
 
     /// 从 DB 获取指定表结构（带 TTL 缓存）
@@ -255,7 +297,7 @@ impl SchemaService {
         // 慢路径
         let columns = SchemaExtractor::get_columns(db_client, db_name, table_name)
             .await
-            .map_err(|e| ServiceError::DbQuery(e.to_string()))?;
+            .map_err(ServiceError::from)?;
         let indexes = SchemaExtractor::get_indexes(db_client, db_name, table_name)
             .await
             .unwrap_or_default();
@@ -283,17 +325,19 @@ impl SchemaService {
     async fn fetch_schema_for_db(
         db_client: &DbClient,
         db_name: &str,
-    ) -> Option<SchemaResponse> {
-        let tables = SchemaExtractor::get_tables(db_client, db_name).await.ok()?;
+    ) -> Result<SchemaResponse, ServiceError> {
+        let tables = SchemaExtractor::get_tables(db_client, db_name)
+            .await
+            .map_err(ServiceError::from)?;
         let columns_map = SchemaExtractor::get_columns_map(db_client, db_name)
             .await
-            .unwrap_or_default();
+            .map_err(ServiceError::from)?;
         let indexes_map = SchemaExtractor::get_indexes_map(db_client, db_name)
             .await
-            .unwrap_or_default();
+            .map_err(ServiceError::from)?;
         let foreign_keys_map = SchemaExtractor::get_foreign_keys_map(db_client, db_name)
             .await
-            .unwrap_or_default();
+            .map_err(ServiceError::from)?;
 
         let mut result_tables = Vec::with_capacity(tables.len());
         for t in tables {
@@ -316,7 +360,7 @@ impl SchemaService {
             .await
             .unwrap_or_default();
 
-        Some(SchemaResponse {
+        Ok(SchemaResponse {
             db_name: db_name.to_string(),
             tables: result_tables,
             views,
@@ -369,8 +413,8 @@ impl SchemaService {
             }
         }
 
-        // 新建连接
-        let client = DbClient::new_default(&conn.url)
+        // 新建连接：与激活连接一致地应用 SSH 隧道与 TLS
+        let client = crate::db::connect::open_db_client(&conn, &config.pool_config)
             .await
             .map_err(|e| ServiceError::DbConnection(e.to_string()))?;
         let entry = CachedDbClient {
@@ -409,6 +453,7 @@ impl SchemaService {
 
     fn build_where_clause(
         filters_str: &Option<String>,
+        db_type: &DbType,
     ) -> Result<(String, Vec<String>), ServiceError> {
         let mut where_clause = String::new();
         let mut bindings = Vec::new();
@@ -418,36 +463,40 @@ impl SchemaService {
                 serde_json::from_str(filters_str).map_err(ServiceError::from)?;
             let mut conditions = Vec::new();
             for f in filters {
-                let col = quote_ident_mysql_checked(&f.column)
-                    .map_err(ServiceError::BadRequest)?;
+                let col = quote_column_checked(&f.column, db_type)?;
                 match f.operator.as_str() {
                     "equals" => {
-                        conditions.push(format!("{} = ?", col));
-                        bindings.push(f.value.clone());
+                        conditions.push(format!("{} = {}", col, filter_literal(&f.value, db_type, &mut bindings)));
                     }
                     "not_equals" => {
-                        conditions.push(format!("{} <> ?", col));
-                        bindings.push(f.value.clone());
+                        conditions.push(format!("{} <> {}", col, filter_literal(&f.value, db_type, &mut bindings)));
                     }
                     "contains" => {
-                        conditions.push(format!("{} LIKE ?", col));
-                        bindings.push(format!("%{}%", f.value));
+                        conditions.push(format!(
+                            "{} LIKE {}",
+                            col,
+                            filter_literal(&format!("%{}%", f.value), db_type, &mut bindings)
+                        ));
                     }
                     "starts_with" => {
-                        conditions.push(format!("{} LIKE ?", col));
-                        bindings.push(format!("{}%", f.value));
+                        conditions.push(format!(
+                            "{} LIKE {}",
+                            col,
+                            filter_literal(&format!("{}%", f.value), db_type, &mut bindings)
+                        ));
                     }
                     "ends_with" => {
-                        conditions.push(format!("{} LIKE ?", col));
-                        bindings.push(format!("%{}", f.value));
+                        conditions.push(format!(
+                            "{} LIKE {}",
+                            col,
+                            filter_literal(&format!("%{}", f.value), db_type, &mut bindings)
+                        ));
                     }
                     "greater_than" => {
-                        conditions.push(format!("{} > ?", col));
-                        bindings.push(f.value.clone());
+                        conditions.push(format!("{} > {}", col, filter_literal(&f.value, db_type, &mut bindings)));
                     }
                     "less_than" => {
-                        conditions.push(format!("{} < ?", col));
-                        bindings.push(f.value.clone());
+                        conditions.push(format!("{} < {}", col, filter_literal(&f.value, db_type, &mut bindings)));
                     }
                     "between" => {
                         let parts: Vec<String> = f
@@ -457,9 +506,12 @@ impl SchemaService {
                             .filter(|p| !p.is_empty())
                             .collect();
                         if parts.len() >= 2 {
-                            conditions.push(format!("{} BETWEEN ? AND ?", col));
-                            bindings.push(parts[0].clone());
-                            bindings.push(parts[1].clone());
+                            conditions.push(format!(
+                                "{} BETWEEN {} AND {}",
+                                col,
+                                filter_literal(&parts[0], db_type, &mut bindings),
+                                filter_literal(&parts[1], db_type, &mut bindings)
+                            ));
                         }
                     }
                     "in" => {
@@ -470,9 +522,11 @@ impl SchemaService {
                             .filter(|p| !p.is_empty())
                             .collect();
                         if !parts.is_empty() {
-                            let ph = std::iter::repeat("?").take(parts.len()).collect::<Vec<_>>().join(", ");
-                            conditions.push(format!("{} IN ({})", col, ph));
-                            bindings.extend(parts);
+                            let placeholders: Vec<String> = parts
+                                .iter()
+                                .map(|p| filter_literal(p, db_type, &mut bindings))
+                                .collect();
+                            conditions.push(format!("{} IN ({})", col, placeholders.join(", ")));
                         }
                     }
                     "not_in" => {
@@ -483,16 +537,17 @@ impl SchemaService {
                             .filter(|p| !p.is_empty())
                             .collect();
                         if !parts.is_empty() {
-                            let ph = std::iter::repeat("?").take(parts.len()).collect::<Vec<_>>().join(", ");
-                            conditions.push(format!("{} NOT IN ({})", col, ph));
-                            bindings.extend(parts);
+                            let placeholders: Vec<String> = parts
+                                .iter()
+                                .map(|p| filter_literal(p, db_type, &mut bindings))
+                                .collect();
+                            conditions.push(format!("{} NOT IN ({})", col, placeholders.join(", ")));
                         }
                     }
                     "is_null" => conditions.push(format!("{} IS NULL", col)),
                     "is_not_null" => conditions.push(format!("{} IS NOT NULL", col)),
                     _ => {
-                        conditions.push(format!("{} = ?", col));
-                        bindings.push(f.value.clone());
+                        conditions.push(format!("{} = {}", col, filter_literal(&f.value, db_type, &mut bindings)));
                     }
                 }
             }
@@ -504,7 +559,10 @@ impl SchemaService {
         Ok((where_clause, bindings))
     }
 
-    pub(crate) fn build_order_clause(orders_str: &Option<String>) -> Result<String, ServiceError> {
+    pub(crate) fn build_order_clause(
+        orders_str: &Option<String>,
+        db_type: &DbType,
+    ) -> Result<String, ServiceError> {
         let mut order_clause = String::new();
         if let Some(orders_str) = orders_str {
             let orders: Vec<OrderCondition> =
@@ -516,7 +574,7 @@ impl SchemaService {
                         let col = o.column.ok_or_else(|| {
                             ServiceError::BadRequest("排序规则缺少 column 字段".into())
                         })?;
-                        quote_ident_mysql_checked(&col).map_err(ServiceError::BadRequest)?
+                        quote_column_checked(&col, db_type)?
                     }
                     OrderKind::Expression => {
                         let expr = o.expression.ok_or_else(|| {
@@ -530,8 +588,22 @@ impl SchemaService {
                 let dir = if o.desc { "DESC" } else { "ASC" };
                 match o.nulls {
                     OrderNulls::Default => clauses.push(format!("{} {}", target, dir)),
-                    OrderNulls::First => clauses.push(format!("{0} IS NULL DESC, {0} {1}", target, dir)),
-                    OrderNulls::Last => clauses.push(format!("{0} IS NULL ASC, {0} {1}", target, dir)),
+                    // MySQL 不支持 `NULLS FIRST/LAST` 语法，沿用 IS NULL 排序技巧；
+                    // PostgreSQL / SQLite 使用标准的 NULLS FIRST/LAST。
+                    OrderNulls::First => {
+                        if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
+                            clauses.push(format!("{0} IS NULL DESC, {0} {1}", target, dir));
+                        } else {
+                            clauses.push(format!("{} {} NULLS FIRST", target, dir));
+                        }
+                    }
+                    OrderNulls::Last => {
+                        if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
+                            clauses.push(format!("{0} IS NULL ASC, {0} {1}", target, dir));
+                        } else {
+                            clauses.push(format!("{} {} NULLS LAST", target, dir));
+                        }
+                    }
                 }
             }
             if !clauses.is_empty() {
@@ -558,14 +630,18 @@ impl SchemaService {
 #[cfg(test)]
 mod build_order_clause_tests {
     use super::SchemaService;
+    use crate::config::DbType;
 
     fn build(json: &str) -> String {
-        SchemaService::build_order_clause(&Some(json.to_string())).unwrap()
+        SchemaService::build_order_clause(&Some(json.to_string()), &DbType::MySQL).unwrap()
     }
 
     #[test]
     fn empty_input_returns_empty() {
-        assert_eq!(SchemaService::build_order_clause(&None).unwrap(), "");
+        assert_eq!(
+            SchemaService::build_order_clause(&None, &DbType::MySQL).unwrap(),
+            ""
+        );
         assert_eq!(build("[]"), "");
     }
 
@@ -614,7 +690,7 @@ mod build_order_clause_tests {
     fn expression_rule_rejects_injection() {
         let res = SchemaService::build_order_clause(&Some(
             r#"[{"kind":"expression","expression":"name; DROP TABLE x","desc":false}]"#.to_string(),
-        ));
+        ), &DbType::MySQL);
         assert!(res.is_err());
     }
 
@@ -622,7 +698,7 @@ mod build_order_clause_tests {
     fn column_rule_missing_column_errors() {
         let res = SchemaService::build_order_clause(&Some(
             r#"[{"kind":"column","desc":false}]"#.to_string(),
-        ));
+        ), &DbType::MySQL);
         assert!(res.is_err());
     }
 
@@ -630,7 +706,7 @@ mod build_order_clause_tests {
     fn expression_rule_missing_expression_errors() {
         let res = SchemaService::build_order_clause(&Some(
             r#"[{"kind":"expression","desc":false}]"#.to_string(),
-        ));
+        ), &DbType::MySQL);
         assert!(res.is_err());
     }
 }

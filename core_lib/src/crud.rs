@@ -46,7 +46,7 @@ fn build_insert_sql(
     };
     format!(
         "INSERT INTO {} ({}) VALUES ({})",
-        quote(table),
+        table,
         cols,
         placeholders.join(", ")
     )
@@ -100,7 +100,7 @@ fn build_update_sql(
 
     format!(
         "UPDATE {} SET {} WHERE {}",
-        quote(table),
+        table,
         set_clause,
         where_clauses.join(" AND ")
     )
@@ -126,7 +126,7 @@ fn build_delete_sql(
 
     format!(
         "DELETE FROM {} WHERE {}",
-        quote(table),
+        table,
         where_clauses.join(" AND ")
     )
 }
@@ -171,6 +171,18 @@ macro_rules! bind_value {
     }};
 }
 
+/// 在单连接上按顺序绑定值并执行。每个 match 分支单独展开，
+/// 从而让 sqlx 的数据库类型由执行器推断，而不是被其他分支统一成 MySQL。
+macro_rules! exec_values {
+    ($sql:expr, $values:expr, $conn:expr) => {{
+        let mut query = sqlx::query($sql);
+        for value in $values {
+            bind_value!(query, *value);
+        }
+        query.execute(&mut **$conn).await?.rows_affected()
+    }};
+}
+
 // ---------------------------------------------------------------------------
 // CrudManager implementation
 // ---------------------------------------------------------------------------
@@ -185,7 +197,8 @@ impl CrudManager {
 
         let columns: Vec<&String> = obj.keys().collect();
         let style = pool.placeholder_style();
-        let sql = build_insert_sql(&req.table_name, &columns, style, |s| pool.quote_ident(s));
+        let quoted_table = pool.quote_table_ref(&req.table_name);
+        let sql = build_insert_sql(&quoted_table, &columns, style, |s| pool.quote_ident(s));
 
         match pool {
             DbPool::MySQL(p) => {
@@ -247,7 +260,7 @@ impl CrudManager {
         // Separate NULL conditions (use IS NULL, no placeholder) from non-NULL
         let (null_clauses, non_null_condition_keys) = build_null_where_clauses(condition, &quote);
 
-        let mut sql = build_update_sql(&req.table_name, &columns, non_null_condition_keys.clone(), style, &quote);
+        let mut sql = build_update_sql(&pool.quote_table_ref(&req.table_name), &columns, non_null_condition_keys.clone(), style, &quote);
         if !null_clauses.is_empty() {
             sql.push_str(" AND ");
             sql.push_str(&null_clauses.join(" AND "));
@@ -326,7 +339,7 @@ impl CrudManager {
         // Separate NULL conditions (use IS NULL, no placeholder) from non-NULL
         let (null_clauses, non_null_condition_keys) = build_null_where_clauses(condition, &quote);
 
-        let mut sql = build_delete_sql(table_name, non_null_condition_keys.clone(), style, &quote);
+        let mut sql = build_delete_sql(&pool.quote_table_ref(table_name), non_null_condition_keys.clone(), style, &quote);
         if !null_clauses.is_empty() {
             sql.push_str(" AND ");
             sql.push_str(&null_clauses.join(" AND "));
@@ -508,6 +521,128 @@ impl CrudManager {
         let result = query.execute(executor).await?;
         Ok(result.rows_affected())
     }
+
+    /// 按引擎在单连接上执行 INSERT（事务会话）。
+    pub async fn insert_engine(
+        conn: &mut crate::db::EngineConnection,
+        req: &CrudRequest,
+    ) -> Result<u64, DbError> {
+        let obj = req
+            .data
+            .as_object()
+            .ok_or_else(|| DbError::MissingData("data is not an object".into()))?;
+        let columns: Vec<&String> = obj.keys().collect();
+        let style = conn.placeholder_style();
+        let quote = |s: &str| conn.quote_ident(s);
+        let sql = build_insert_sql(&conn.quote_table_ref(&req.table_name), &columns, style, &quote);
+
+        let mut values: Vec<&serde_json::Value> = Vec::with_capacity(columns.len());
+        for col in &columns {
+            values.push(
+                obj.get(*col)
+                    .ok_or_else(|| DbError::MissingData(format!("missing column: {}", col)))?,
+            );
+        }
+        let result = match conn {
+            crate::db::EngineConnection::MySQL(c) => exec_values!(&sql, &values, c),
+            crate::db::EngineConnection::Postgres(c) => exec_values!(&sql, &values, c),
+            crate::db::EngineConnection::SQLite(c) => exec_values!(&sql, &values, c),
+        };
+        Ok(result)
+    }
+
+    /// 按引擎在单连接上执行 UPDATE（事务会话）。
+    pub async fn update_engine(
+        conn: &mut crate::db::EngineConnection,
+        req: &CrudRequest,
+    ) -> Result<u64, DbError> {
+        let obj = req
+            .data
+            .as_object()
+            .ok_or_else(|| DbError::MissingData("data is not an object".into()))?;
+        let condition = req
+            .condition
+            .as_ref()
+            .ok_or_else(|| DbError::MissingData("missing condition".into()))?;
+        if condition.is_empty() {
+            return Err(DbError::MissingData(
+                "condition must not be empty — refusing UPDATE without WHERE".into(),
+            ));
+        }
+
+        let columns: Vec<&String> = obj.keys().collect();
+        let style = conn.placeholder_style();
+        let quote = |s: &str| conn.quote_ident(s);
+        let (null_clauses, non_null_condition_keys) =
+            build_null_where_clauses(condition, &quote);
+        let mut sql =
+            build_update_sql(&conn.quote_table_ref(&req.table_name), &columns, non_null_condition_keys.clone(), style, &quote);
+        if !null_clauses.is_empty() {
+            sql.push_str(" AND ");
+            sql.push_str(&null_clauses.join(" AND "));
+        }
+
+        let mut values: Vec<&serde_json::Value> = Vec::with_capacity(columns.len() + non_null_condition_keys.len());
+        for col in &columns {
+            values.push(
+                obj.get(*col)
+                    .ok_or_else(|| DbError::MissingData(format!("missing column: {}", col)))?,
+            );
+        }
+        for k in &non_null_condition_keys {
+            values.push(
+                condition
+                    .get(*k)
+                    .ok_or_else(|| DbError::MissingData(format!("missing condition key: {}", k)))?,
+            );
+        }
+
+        let result = match conn {
+            crate::db::EngineConnection::MySQL(c) => exec_values!(&sql, &values, c),
+            crate::db::EngineConnection::Postgres(c) => exec_values!(&sql, &values, c),
+            crate::db::EngineConnection::SQLite(c) => exec_values!(&sql, &values, c),
+        };
+        Ok(result)
+    }
+
+    /// 按引擎在单连接上执行 DELETE（事务会话）。
+    pub async fn delete_engine(
+        conn: &mut crate::db::EngineConnection,
+        table_name: &str,
+        condition: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<u64, DbError> {
+        if condition.is_empty() {
+            return Err(DbError::MissingData(
+                "condition must not be empty — refusing DELETE without WHERE".into(),
+            ));
+        }
+
+        let style = conn.placeholder_style();
+        let quote = |s: &str| conn.quote_ident(s);
+        let (null_clauses, non_null_condition_keys) =
+            build_null_where_clauses(condition, &quote);
+        let mut sql = build_delete_sql(&conn.quote_table_ref(table_name), non_null_condition_keys.clone(), style, &quote);
+        if !null_clauses.is_empty() {
+            sql.push_str(" AND ");
+            sql.push_str(&null_clauses.join(" AND "));
+        }
+
+        let mut values: Vec<&serde_json::Value> = Vec::with_capacity(non_null_condition_keys.len());
+        for k in &non_null_condition_keys {
+            values.push(
+                condition
+                    .get(*k)
+                    .ok_or_else(|| DbError::MissingData(format!("missing condition key: {}", k)))?,
+            );
+        }
+
+        let result = match conn {
+            crate::db::EngineConnection::MySQL(c) => exec_values!(&sql, &values, c),
+            crate::db::EngineConnection::Postgres(c) => exec_values!(&sql, &values, c),
+            crate::db::EngineConnection::SQLite(c) => exec_values!(&sql, &values, c),
+        };
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -520,7 +655,7 @@ mod tests {
         let age = "age".to_string();
         let cols = vec![&name, &age];
         let sql = build_insert_sql(
-            "users",
+            "`users`",
             &cols,
             PlaceholderStyle::QuestionMark,
             sql_util::quote_ident_mysql,
@@ -534,7 +669,7 @@ mod tests {
         let age = "age".to_string();
         let cols = vec![&name, &age];
         let sql = build_insert_sql(
-            "users",
+            "\"users\"",
             &cols,
             PlaceholderStyle::DollarNumber,
             sql_util::quote_ident_pg,
@@ -550,7 +685,7 @@ mod tests {
         let cols = vec![&name, &age];
         let cond = vec![&id];
         let sql = build_update_sql(
-            "users",
+            "`users`",
             &cols,
             cond,
             PlaceholderStyle::QuestionMark,
@@ -567,7 +702,7 @@ mod tests {
         let cols = vec![&name, &age];
         let cond = vec![&id];
         let sql = build_update_sql(
-            "users",
+            "\"users\"",
             &cols,
             cond,
             PlaceholderStyle::DollarNumber,
@@ -584,7 +719,7 @@ mod tests {
         let id = "id".to_string();
         let cond = vec![&id];
         let sql = build_delete_sql(
-            "users",
+            "`users`",
             cond,
             PlaceholderStyle::QuestionMark,
             sql_util::quote_ident_mysql,
@@ -598,7 +733,7 @@ mod tests {
         let org_id = "org_id".to_string();
         let cond = vec![&id, &org_id];
         let sql = build_delete_sql(
-            "users",
+            "\"users\"",
             cond,
             PlaceholderStyle::DollarNumber,
             sql_util::quote_ident_pg,

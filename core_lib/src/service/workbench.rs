@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use tokio::sync::Mutex;
 
-use crate::db::DbClient;
+use crate::db::{DbClient, QueryResult};
 use crate::sql::util::{is_dangerous_statement, is_read_only_statement};
 use crate::sql_history::SqlHistory;
 use crate::service::context::{
@@ -18,7 +18,6 @@ use crate::service::context::{
     TransactionSession,
 };
 use crate::service::error::ServiceError;
-use crate::service::row_codec::{encode_mysql_row, MySqlRowJsonEncoder};
 use crate::service::schema::SchemaService;
 
 // ── 常量 ────────────────────────────────────────────────
@@ -215,8 +214,7 @@ impl WorkbenchService {
             None
         };
 
-        // 7. 执行
-        let mysql_pool = db_client.mysql_pool().ok().cloned();
+        // 7. 执行（按引擎分派）
         let start_time = Instant::now();
 
         let mut rows = Vec::new();
@@ -231,36 +229,30 @@ impl WorkbenchService {
                 &modified_sql,
                 active_query.as_mut(),
                 transaction_session.as_ref(),
-                &mysql_pool,
+                &db_client,
             )
             .await;
 
             match execution_result {
-                Ok(result_rows) => {
+                Ok(result) => {
                     let chunk_limit = if is_chunked_preview {
                         chunk_size.unwrap_or(QUERY_PREVIEW_CHUNK_SIZE)
                     } else {
-                        result_rows.len() as u32
+                        result.rows.len() as u32
                     };
-                    let fetched_len = result_rows.len() as u32;
+                    let fetched_len = result.rows.len() as u32;
                     if is_chunked_preview {
                         has_more = fetched_len > chunk_limit
                             && chunk_offset.saturating_add(chunk_limit) < QUERY_PREVIEW_ROW_CAP;
                         next_offset = has_more.then_some(chunk_offset.saturating_add(chunk_limit));
                         truncated = fetched_len > chunk_limit;
                     }
-                    let mut row_encoder = None;
-                    for row in result_rows.into_iter().take(chunk_limit as usize) {
-                        if row_encoder.is_none() {
-                            let encoder = MySqlRowJsonEncoder::from_row(&row);
-                            columns = encoder.column_names();
-                            row_encoder = Some(encoder);
-                        }
-                        rows.push(encode_mysql_row(
-                            &row,
-                            row_encoder.as_ref().expect("row encoder initialized"),
-                        ));
-                    }
+                    rows = result
+                        .to_objects()
+                        .into_iter()
+                        .take(chunk_limit as usize)
+                        .collect();
+                    columns = result.columns;
                 }
                 Err(e) => {
                     // 超时情况下 kill 连接并 unregister
@@ -289,13 +281,13 @@ impl WorkbenchService {
                 &modified_sql,
                 active_query.as_mut(),
                 transaction_session.as_ref(),
-                &mysql_pool,
+                &db_client,
             )
             .await;
 
             match execution_result {
                 Ok(result) => {
-                    affected_rows = result.rows_affected();
+                    affected_rows = result;
                 }
                 Err(e) => {
                     // 超时情况下 kill 连接并 unregister
@@ -473,11 +465,11 @@ impl WorkbenchService {
             let sql = if action == "commit" { "COMMIT" } else { "ROLLBACK" };
             tokio::time::timeout(
                 ctx.timeouts().db_query,
-                sqlx::query(sql).execute(&mut *guard.conn),
+                guard.conn.execute_command(sql),
             )
             .await
             .map_err(|_| ServiceError::Timeout(format!("{action} timed out")))?
-            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+            .map_err(|e| ServiceError::from(e))?;
         }
 
         ctx.session_state().remove_transaction(transaction_id).await;
@@ -582,13 +574,14 @@ impl WorkbenchService {
             })
         } else {
             let mut conn = db_client
-                .mysql_pool()?
-                .acquire()
+                .pool
+                .acquire_engine()
                 .await
                 .map_err(|e| ServiceError::DbConnection(e.to_string()))?;
-            let connection_id = DbClient::connection_id_for_session(&mut conn)
+            let connection_id = conn
+                .backend_id()
                 .await
-                .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+                .map_err(|e| ServiceError::from(e))?;
             crate::service::context::register_active_query(
                 ctx,
                 token.clone(),
@@ -609,33 +602,29 @@ impl WorkbenchService {
         }
     }
 
-    /// 执行 SELECT 查询（含超时）
+    /// 执行 SELECT 查询（含超时，按引擎分派）
     async fn execute_select(
         ctx: &ServiceContext,
         sql: &str,
         active_query: Option<&mut ActiveQuerySession>,
         transaction_session: Option<&SharedTransactionSession>,
-        mysql_pool: &Option<sqlx::MySqlPool>,
-    ) -> Result<Vec<sqlx::mysql::MySqlRow>, ServiceError> {
+        db_client: &DbClient,
+    ) -> Result<QueryResult, ServiceError> {
         let result = tokio::time::timeout(ctx.timeouts().db_query, async {
             if let Some(aq) = active_query {
                 if let Some(ts) = &aq.transaction_session {
                     let mut session = ts.lock().await;
-                    sqlx::query(sql).fetch_all(&mut *session.conn).await
+                    session.conn.fetch_all(sql).await
                 } else if let Some(conn) = aq.owned_conn.as_mut() {
-                    sqlx::query(sql).fetch_all(&mut **conn).await
-                } else if let Some(pool) = mysql_pool {
-                    sqlx::query(sql).fetch_all(pool).await
+                    conn.fetch_all(sql).await
                 } else {
-                    Err(sqlx::Error::PoolClosed)
+                    db_client.pool.fetch_all_result(sql).await
                 }
             } else if let Some(ts) = transaction_session {
                 let mut session = ts.lock().await;
-                sqlx::query(sql).fetch_all(&mut *session.conn).await
-            } else if let Some(pool) = mysql_pool {
-                sqlx::query(sql).fetch_all(pool).await
+                session.conn.fetch_all(sql).await
             } else {
-                Err(sqlx::Error::PoolClosed)
+                db_client.pool.fetch_all_result(sql).await
             }
         })
         .await;
@@ -648,33 +637,29 @@ impl WorkbenchService {
         }
     }
 
-    /// 执行非 SELECT 查询（含超时）
+    /// 执行非 SELECT 查询（含超时，按引擎分派）
     async fn execute_non_select(
         ctx: &ServiceContext,
         sql: &str,
         active_query: Option<&mut ActiveQuerySession>,
         transaction_session: Option<&SharedTransactionSession>,
-        mysql_pool: &Option<sqlx::MySqlPool>,
-    ) -> Result<sqlx::mysql::MySqlQueryResult, ServiceError> {
+        db_client: &DbClient,
+    ) -> Result<u64, ServiceError> {
         let result = tokio::time::timeout(ctx.timeouts().db_query, async {
             if let Some(aq) = active_query {
                 if let Some(ts) = &aq.transaction_session {
                     let mut session = ts.lock().await;
-                    sqlx::query(sql).execute(&mut *session.conn).await
+                    session.conn.execute_command(sql).await
                 } else if let Some(conn) = aq.owned_conn.as_mut() {
-                    sqlx::query(sql).execute(&mut **conn).await
-                } else if let Some(pool) = mysql_pool {
-                    sqlx::query(sql).execute(pool).await
+                    conn.execute_command(sql).await
                 } else {
-                    Err(sqlx::Error::PoolClosed)
+                    db_client.pool.execute_affected(sql).await
                 }
             } else if let Some(ts) = transaction_session {
                 let mut session = ts.lock().await;
-                sqlx::query(sql).execute(&mut *session.conn).await
-            } else if let Some(pool) = mysql_pool {
-                sqlx::query(sql).execute(pool).await
+                session.conn.execute_command(sql).await
             } else {
-                Err(sqlx::Error::PoolClosed)
+                db_client.pool.execute_affected(sql).await
             }
         })
         .await;
@@ -716,20 +701,22 @@ impl WorkbenchService {
             crate::service::context::resolve_transaction_db_id(ctx, db_id).await;
         let (db_client, _) = SchemaService::resolve_db_client(ctx, db_id).await?;
         let mut conn = db_client
-            .mysql_pool()?
-            .acquire()
+            .pool
+            .acquire_engine()
             .await
             .map_err(|e| ServiceError::DbConnection(e.to_string()))?;
-        let connection_id = DbClient::connection_id_for_session(&mut conn)
+        let connection_id = conn
+            .backend_id()
             .await
-            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+            .map_err(|e| ServiceError::from(e))?;
+        let begin_sql = conn.begin_statement();
         tokio::time::timeout(
             ctx.timeouts().db_query,
-            sqlx::query("START TRANSACTION").execute(&mut *conn),
+            conn.execute_command(begin_sql),
         )
         .await
         .map_err(|_| ServiceError::Timeout("Starting transaction timed out".into()))?
-        .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+        .map_err(|e| ServiceError::from(e))?;
 
         let session = Arc::new(Mutex::new(TransactionSession {
             connection_id,
