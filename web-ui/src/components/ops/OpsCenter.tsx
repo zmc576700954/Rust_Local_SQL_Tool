@@ -239,6 +239,17 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
 
   const plan = analysis?.plan || null
   const evidence = analysis?.evidence || null
+  // 运维中心四类场景依赖 MySQL 的 information_schema / performance_schema。
+  // dbType 缺省时不做前端阻断，由后端守卫给出权威判断。
+  const mysqlOnlyBlocked = !!dbType && dbType !== 'mysql' && dbType !== 'mariadb'
+  const mysqlOnlyBanner = mysqlOnlyBlocked ? (
+    <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+      {tr(
+        `当前连接为 ${dbType}：索引优化、性能诊断、定期巡检、字段治理四个场景依赖 MySQL 的 information_schema / performance_schema，本轮仅支持 MySQL / MariaDB。请在连接管理中切换到 MySQL 连接后再使用。`,
+        `Current connection is ${dbType}: the four ops scenarios (index advisor, diagnostics, inspection, field governance) rely on MySQL information_schema / performance_schema and are MySQL-only in this release. Switch to a MySQL connection first.`
+      )}
+    </div>
+  ) : null
 
   const workloadSamples = useMemo(
     () =>
@@ -284,6 +295,15 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
   }
 
   const handleAnalyze = async () => {
+    if (mysqlOnlyBlocked) {
+      setError(
+        tr(
+          '运维中心当前仅支持 MySQL / MariaDB（依赖 information_schema 与 performance_schema）；请切换到 MySQL 连接后再使用。',
+          'Ops Center currently supports MySQL / MariaDB only (relies on information_schema and performance_schema); switch to a MySQL connection first.'
+        )
+      )
+      return
+    }
     if (!table.trim()) {
       setError(tr('请先填写表名', 'Please enter a table name'))
       return
@@ -439,6 +459,7 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
     return (
       <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
         <OpsViewTabs view={view} onChange={setView} />
+        {mysqlOnlyBanner}
         <PerfDiagnostics dbId={dbId} />
       </div>
     )
@@ -448,6 +469,7 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
     return (
       <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
         <OpsViewTabs view={view} onChange={setView} />
+        {mysqlOnlyBanner}
         <InspectionCenter dbId={dbId} dbType={dbType} />
       </div>
     )
@@ -456,6 +478,7 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
   if (view === 'field') {
     return (
       <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
+        {mysqlOnlyBanner}
         <OpsViewTabs view={view} onChange={setView} />
         <FieldGovernance dbId={dbId} />
       </div>
@@ -503,6 +526,8 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
         </div>
       </div>
 
+      {mysqlOnlyBanner}
+
       {(error || notice) && (
         <div
           className={`rounded-lg border p-3 text-sm ${
@@ -538,7 +563,7 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
             </label>
             <button
               onClick={() => void handleAnalyze()}
-              disabled={busy !== null}
+              disabled={busy !== null || mysqlOnlyBlocked}
               className="mt-2 flex h-9 items-center justify-center gap-2 rounded bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {busy === 'analyze' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}

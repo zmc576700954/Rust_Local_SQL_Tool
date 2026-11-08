@@ -24,17 +24,32 @@ describe('dbCapabilities', () => {
     }
   })
 
-  it('marks PostgreSQL and SQLite as experimental with no advanced capabilities', () => {
-    for (const dbType of ['postgresql', 'sqlite'] as const) {
-      expect(dbCapabilityLevel(dbType)).toBe('b')
-      const caps = dbCapabilities(dbType)
-      expect(caps.supports_sql).toBe(false)
-      expect(caps.supports_schema_introspection).toBe(false)
-      expect(caps.supports_import_export).toBe(false)
-      expect(caps.supports_struct_sync).toBe(false)
-      expect(caps.supports_data_sync).toBe(false)
-      expect(dbCapabilityShortTag(dbType)).toMatch(/实验性|Experimental/)
-    }
+  it('marks PostgreSQL as partial: SQL/schema/import-export without sync', () => {
+    expect(dbCapabilityLevel('postgresql')).toBe('b')
+    expect(dbCapabilities('postgresql')).toEqual({
+      level: 'b',
+      supports_sql: true,
+      supports_schema_introspection: true,
+      supports_import_export: true,
+      supports_struct_sync: false,
+      supports_data_sync: false,
+    })
+    expect(dbCapabilityNotice('postgresql')).not.toBeNull()
+    expect(dbCapabilityShortTag('postgresql')).toMatch(/部分支持|Partial/)
+  })
+
+  it('marks SQLite as query-execution only', () => {
+    expect(dbCapabilityLevel('sqlite')).toBe('b')
+    expect(dbCapabilities('sqlite')).toEqual({
+      level: 'b',
+      supports_sql: true,
+      supports_schema_introspection: false,
+      supports_import_export: false,
+      supports_struct_sync: false,
+      supports_data_sync: false,
+    })
+    expect(dbCapabilityNotice('sqlite')).not.toBeNull()
+    expect(dbCapabilityShortTag('sqlite')).toMatch(/仅查询|Query only/)
   })
 
   it('marks SQL Server and Oracle as not connectable', () => {

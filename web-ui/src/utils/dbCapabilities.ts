@@ -65,7 +65,29 @@ export function dbCapabilities(dbType?: DbType | null): DbCapabilities {
       supports_data_sync: true,
     }
   }
-  // PostgreSQL/SQLite: connect + non-transactional CRUD only.
+  if (dbType === 'postgresql') {
+    // PG: SQL execution, schema browsing, DDL and import/export are wired.
+    // Struct/data sync and the ops-center scenarios remain MySQL-only.
+    return {
+      level,
+      supports_sql: true,
+      supports_schema_introspection: true,
+      supports_import_export: true,
+      supports_struct_sync: false,
+      supports_data_sync: false,
+    }
+  }
+  if (dbType === 'sqlite') {
+    // SQLite: connection + SQL execution only; schema browsing and DDL are not exposed.
+    return {
+      level,
+      supports_sql: true,
+      supports_schema_introspection: false,
+      supports_import_export: false,
+      supports_struct_sync: false,
+      supports_data_sync: false,
+    }
+  }
   // SQL Server/Oracle/MongoDB/Redis: no working connection path.
   return {
     level,
@@ -80,7 +102,8 @@ export function dbCapabilities(dbType?: DbType | null): DbCapabilities {
 /** Short badge shown next to a database type, e.g. 实验性 / 未实现. */
 export function dbCapabilityShortTag(dbType?: DbType | null): string | null {
   if (dbType === 'mysql' || dbType === 'mariadb') return null
-  if (dbType === 'postgresql' || dbType === 'sqlite') return tr('实验性', 'Experimental')
+  if (dbType === 'postgresql') return tr('部分支持', 'Partial')
+  if (dbType === 'sqlite') return tr('仅查询', 'Query only')
   return tr('未实现', 'Not implemented')
 }
 
@@ -90,10 +113,16 @@ export function dbCapabilityShortTag(dbType?: DbType | null): string | null {
  */
 export function dbCapabilityNotice(dbType?: DbType | null): string | null {
   if (dbType === 'mysql' || dbType === 'mariadb') return null
-  if (dbType === 'postgresql' || dbType === 'sqlite') {
+  if (dbType === 'postgresql') {
     return tr(
-      '实验性支持：当前仅可连接并使用基础 CRUD（数据表格编辑）；SQL 执行、结构浏览、DDL、导入导出与同步尚未接通。',
-      'Experimental: connection and basic CRUD (data grid editing) only; SQL execution, schema browsing, DDL, import/export and sync are not wired yet.'
+      'PostgreSQL：已支持连接、SQL 执行（含事务）、结构浏览、DDL 与导入导出。数据同步、结构同步以及运维中心场景（索引优化、性能诊断、定期巡检、字段治理）当前仅支持 MySQL。',
+      'PostgreSQL: connection, SQL execution (with transactions), schema browsing, DDL and import/export are supported. Data/struct sync and ops-center scenarios (index advisor, diagnostics, inspection, field governance) are MySQL-only.'
+    )
+  }
+  if (dbType === 'sqlite') {
+    return tr(
+      'SQLite：当前仅支持连接与 SQL 查询执行；结构浏览、DDL、导入导出与同步尚未支持。',
+      'SQLite: connection and SQL query execution only; schema browsing, DDL, import/export and sync are not supported yet.'
     )
   }
   if (dbType === 'sqlserver' || dbType === 'oracle') {

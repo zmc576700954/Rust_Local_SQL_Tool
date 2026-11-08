@@ -12,13 +12,17 @@ pub struct DbCapabilities {
 
 /// Capability level reflects what is actually wired in the current codebase:
 /// - A: full pipeline (connect / test / SQL / schema / DDL / import-export / sync)
-/// - B: experimental (connect + non-transactional CRUD only)
+/// - B: partial pipeline (connect / test / SQL / schema / DDL / import-export,
+///      but no struct/data sync and ops-center scenarios remain MySQL-only)
 /// - C/D: declared but not connectable / not implemented
 pub fn capability_level(db_type: &DbType) -> DbCapabilityLevel {
     match db_type {
         DbType::MySQL | DbType::MariaDB => DbCapabilityLevel::A,
-        // sqlx pools can be created and non-transactional CRUD is dispatched,
-        // but SQL execution, schema browsing, DDL, import/export and sync are MySQL-only.
+        // PostgreSQL: connection, SQL execution, transactions, schema browsing,
+        // DDL execution and import/export are wired. Struct/data sync and the
+        // ops-center scenarios still depend on MySQL metadata and stay unsupported.
+        // SQLite: connection + SQL execution only; schema browsing and DDL are
+        // deliberately not exposed yet.
         DbType::PostgreSQL | DbType::SQLite => DbCapabilityLevel::B,
         DbType::MongoDB => DbCapabilityLevel::C,
         DbType::SQLServer | DbType::Oracle | DbType::Redis => DbCapabilityLevel::D,
@@ -41,11 +45,22 @@ impl DbCapabilities {
                 supports_struct_sync: true,
                 supports_data_sync: true,
             },
-            // PostgreSQL / SQLite: connection + basic CRUD only. The rest of the
-            // pipeline is still MySQL-only, so nothing else is advertised.
-            DbType::PostgreSQL | DbType::SQLite => DbCapabilities {
+            // PostgreSQL: SQL execution, schema introspection and import/export
+            // are wired against real PG metadata and syntax. Sync remains
+            // MySQL-only (the engine builds MySQL-specific compare/deploy SQL).
+            DbType::PostgreSQL => DbCapabilities {
                 level,
-                supports_sql: false,
+                supports_sql: true,
+                supports_schema_introspection: true,
+                supports_import_export: true,
+                supports_struct_sync: false,
+                supports_data_sync: false,
+            },
+            // SQLite: connect + SQL execution only. Schema browsing, DDL,
+            // import/export and sync are explicitly not advertised.
+            DbType::SQLite => DbCapabilities {
+                level,
+                supports_sql: true,
                 supports_schema_introspection: false,
                 supports_import_export: false,
                 supports_struct_sync: false,
@@ -104,20 +119,24 @@ mod tests {
     }
 
     #[test]
-    fn runtime_capabilities_pg_is_experimental_without_sync() {
+    fn runtime_capabilities_pg_wires_sql_schema_and_import_export_without_sync() {
         let caps = DbCapabilities::runtime_capabilities(&DbType::PostgreSQL);
         assert_eq!(caps.level, DbCapabilityLevel::B);
-        assert!(!caps.supports_sql);
-        assert!(!caps.supports_schema_introspection);
-        assert!(!caps.supports_import_export);
+        assert!(caps.supports_sql);
+        assert!(caps.supports_schema_introspection);
+        assert!(caps.supports_import_export);
         assert!(!caps.supports_struct_sync);
         assert!(!caps.supports_data_sync);
     }
 
     #[test]
-    fn runtime_capabilities_sqlite_is_experimental_without_sync() {
+    fn runtime_capabilities_sqlite_only_query_execution() {
         let caps = DbCapabilities::runtime_capabilities(&DbType::SQLite);
         assert_eq!(caps.level, DbCapabilityLevel::B);
+        assert!(caps.supports_sql);
+        assert!(!caps.supports_schema_introspection);
+        assert!(!caps.supports_import_export);
+        assert!(!caps.supports_struct_sync);
         assert!(!caps.supports_data_sync);
     }
 
