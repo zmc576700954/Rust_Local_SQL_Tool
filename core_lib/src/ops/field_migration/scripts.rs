@@ -215,6 +215,17 @@ fn build_backfill_sql(
     )
 }
 
+/// 判断目标列是否为数值类型；数值列在 V4 中使用十进制词元比较。
+fn is_numeric_sql_type(sql_type: &str) -> bool {
+    let upper = sql_type.trim().to_ascii_uppercase();
+    [
+        "BIGINT", "INT", "SMALLINT", "MEDIUMINT", "TINYINT", "DECIMAL", "NUMERIC", "DOUBLE",
+        "FLOAT", "REAL",
+    ]
+    .iter()
+    .any(|prefix| upper.starts_with(prefix))
+}
+
 fn backfill_expr(source_column: &str, column: &TargetColumn) -> String {
     let Some(key) = column.source_key.as_deref() else {
         return source_column.to_string();
@@ -262,12 +273,32 @@ fn build_verify_sql(
         let target_column = quote_ident_mysql(&column.name);
         if let Some(key) = column.source_key.as_deref() {
             let path = escape_sql_string(&json_path(key));
-            comparisons.push(format!(
-                "(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}') = 0 AND t.{target_column} IS NOT NULL)\n\
-                 OR (JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}') = 1\n\
-                     AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.{source_column}, '{path}')), ''), '<NULL>')\n\
-                       <> COALESCE(CAST(t.{target_column} AS CHAR), '<NULL>'))"
-            ));
+            let source_token = format!("JSON_UNQUOTE(JSON_EXTRACT(s.{source_column}, '{path}'))");
+            let source_type = format!("JSON_TYPE(JSON_EXTRACT(s.{source_column}, '{path}'))");
+            if is_numeric_sql_type(&column.sql_type) {
+                // 文档 4.2(3)：数值按十进制词元比较，禁止先转 f64；
+                // 1 与 1.0 经 DECIMAL 规范化后应判为一致。
+                comparisons.push(format!(
+                    "(COALESCE(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}'), 0) = 0 AND t.{target_column} IS NOT NULL)\n\
+                     OR (COALESCE(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}'), 0) = 1\n\
+                         AND CASE\n\
+                           WHEN {source_type} IN ('INTEGER', 'DOUBLE', 'BOOLEAN') THEN\n\
+                             t.{target_column} IS NULL\n\
+                             OR CAST(t.{target_column} AS DECIMAL(65,30))\n\
+                                <> CAST({source_token} AS DECIMAL(65,30))\n\
+                           WHEN {source_type} = 'NULL' THEN t.{target_column} IS NOT NULL\n\
+                           ELSE COALESCE(NULLIF({source_token}, ''), '<NULL>')\n\
+                                <> COALESCE(CAST(t.{target_column} AS CHAR), '<NULL>')\n\
+                         END)"
+                ));
+            } else {
+                comparisons.push(format!(
+                    "(COALESCE(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}'), 0) = 0 AND t.{target_column} IS NOT NULL)\n\
+                     OR (COALESCE(JSON_CONTAINS_PATH(s.{source_column}, 'one', '{path}'), 0) = 1\n\
+                         AND COALESCE(NULLIF({source_token}, ''), '<NULL>')\n\
+                           <> COALESCE(CAST(t.{target_column} AS CHAR), '<NULL>'))"
+                ));
+            }
         } else {
             comparisons.push(format!(
                 "COALESCE(CAST(s.{source_column} AS CHAR), '<NULL>') \
@@ -401,7 +432,10 @@ fn dry_run_report(scripts: &[ManualScript]) -> DryRunReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::field_migration::types::{sample_column, DependencyEvidence, FieldGovernanceAnalysis, RiskSummary};
+    use crate::ops::field_migration::types::{
+        sample_column, ColumnMapping, DependencyEvidence, FieldGovernanceAnalysis, RiskSummary,
+        TargetSpec,
+    };
     use crate::ops::types::{ColumnSnapshot, TableSnapshot};
 
     fn snapshot() -> TableSnapshot {
@@ -538,6 +572,44 @@ mod tests {
         assert!(verify.sql.contains("LEFT JOIN"));
         assert!(verify.sql.contains("JSON_CONTAINS_PATH"));
         assert!(verify.sql.contains("<NULL>"));
+    }
+
+    #[test]
+    fn verify_sql_normalizes_numeric_tokens() {
+        let mut analysis = analysis();
+        let mut inp = input();
+        inp.target = Some(TargetSpec {
+            mappings: vec![
+                ColumnMapping {
+                    source_key: Some("age".into()),
+                    target_column: "age".into(),
+                    target_type: Some("BIGINT".into()),
+                    required: None,
+                },
+                ColumnMapping {
+                    source_key: Some("theme".into()),
+                    target_column: "theme".into(),
+                    target_type: Some("VARCHAR(512)".into()),
+                    required: None,
+                },
+            ],
+            ..Default::default()
+        });
+        generate(&snapshot(), &mut analysis, &inp);
+        let verify = analysis
+            .scripts
+            .iter()
+            .find(|script| script.kind == "verify")
+            .unwrap();
+        // 数值列按 DECIMAL(65,30) 规范化，1 与 1.0 判定一致；字符串列仍按原文比较。
+        assert!(verify.sql.contains("CAST(t.`age` AS DECIMAL(65,30))"));
+        assert!(verify
+            .sql
+            .contains("CAST(JSON_UNQUOTE(JSON_EXTRACT(s.`payload`, '$.\"age\"')) AS DECIMAL(65,30))"));
+        // 源列为 SQL NULL 时 JSON_CONTAINS_PATH 返回 NULL，必须归一为 0，
+        // 否则“源 NULL + 目标非 NULL”会被漏判。
+        assert!(verify.sql.contains("COALESCE(JSON_CONTAINS_PATH(s.`payload`"));
+        assert!(!verify.sql.contains("CAST(t.`theme` AS DECIMAL"));
     }
 
     #[test]
