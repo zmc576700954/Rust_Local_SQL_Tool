@@ -22,4 +22,8 @@
 /.superpowers/
 /.trae
 /.superpowers
-/docs
+
+# docs：只跟踪 Markdown 设计文档，临时产物/脚本/日志不入库
+/docs/**
+!/docs/**/
+!/docs/**/*.md
