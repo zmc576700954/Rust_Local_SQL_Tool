@@ -256,6 +256,75 @@ impl AlertState {
     }
 }
 
+/// 单个通道的投递状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatus {
+    /// 尚未尝试。
+    Pending,
+    /// 已尝试失败，正在退避重试。
+    Retrying,
+    Success,
+    Failed,
+    /// 因限流 / 配置缺失等原因主动跳过。
+    Skipped,
+}
+
+impl DeliveryStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            DeliveryStatus::Pending => "待发送",
+            DeliveryStatus::Retrying => "重试中",
+            DeliveryStatus::Success => "成功",
+            DeliveryStatus::Failed => "失败",
+            DeliveryStatus::Skipped => "已跳过",
+        }
+    }
+}
+
+/// 某条告警在某个通道上的投递记录。失败必须可见，不能只写日志。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelDelivery {
+    pub channel: String,
+    pub status: DeliveryStatus,
+    pub attempts: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_attempt_at: Option<i64>,
+    #[serde(default)]
+    pub delivered_at: Option<i64>,
+    /// 每次尝试的时间戳，用于核对退避间隔。
+    #[serde(default)]
+    pub attempt_times: Vec<i64>,
+}
+
+impl ChannelDelivery {
+    pub fn pending(channel: impl Into<String>) -> Self {
+        Self {
+            channel: channel.into(),
+            status: DeliveryStatus::Pending,
+            attempts: 0,
+            last_error: None,
+            last_attempt_at: None,
+            delivered_at: None,
+            attempt_times: Vec::new(),
+        }
+    }
+
+    pub fn skipped(channel: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            channel: channel.into(),
+            status: DeliveryStatus::Skipped,
+            attempts: 0,
+            last_error: Some(reason.into()),
+            last_attempt_at: None,
+            delivered_at: None,
+            attempt_times: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlertRecord {
     pub alert_id: String,
@@ -276,6 +345,9 @@ pub struct AlertRecord {
     pub acknowledged: bool,
     pub resolved_at: Option<i64>,
     pub snapshot_id: String,
+    /// 每个通道最近一次投递的状态与错误。
+    #[serde(default)]
+    pub deliveries: Vec<ChannelDelivery>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +442,12 @@ pub struct InspectionRunResult {
     pub diff: SnapshotDiff,
     /// 本次新增或状态变化的告警（含恢复）。
     pub alerts: Vec<AlertRecord>,
+    /// 需要推送的事件：新建、严重度升级、恢复。未变化的活跃 finding 不产生事件（去重）。
+    #[serde(default)]
+    pub events: Vec<crate::ops::inspection::alert::AlertNotification>,
+    /// 运行边界说明：应用关闭后巡检与通知都会停止。
+    #[serde(default)]
+    pub scope_note: String,
 }
 
 pub fn now_ts() -> i64 {

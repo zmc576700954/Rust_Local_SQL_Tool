@@ -3,6 +3,7 @@
 pub mod alert;
 pub mod checks;
 pub mod diff;
+pub mod notify;
 pub mod presets;
 pub mod runner;
 pub mod scheduler;
@@ -11,11 +12,16 @@ pub mod store;
 pub mod types;
 
 pub use alert::{
-    AlertEventKind, AlertNotification, ChannelError, EmailChannel, InAppChannel,
-    NotificationChannel, NotificationDispatcher, WebhookChannel,
+    classify_http_status, classify_smtp_code, deliver_with_retry, AlertEventKind, AlertNotification,
+    ChannelError, EmailChannel, InAppChannel, NotificationChannel, NotificationDispatcher,
+    RetryPolicy, WebhookChannel,
 };
 pub use checks::collect_check;
 pub use diff::compare_snapshots;
+pub use notify::{
+    build_content, EmailNotificationSettings, EmailSecurity, NotificationSecretStore,
+    NotificationSecrets, NotificationSettings, WebhookNotificationSettings, SCOPE_NOTE,
+};
 pub use presets::{
     all_check_ids, check_descriptor, preset_by_id, presets, resolve_check_ids, CheckDescriptor,
     CHECK_DESCRIPTORS,

@@ -795,4 +795,31 @@ export const api = {
     client.post(`/ops/inspection/alerts/${encodeURIComponent(alertId)}/ack`, {}, {
       headers: await opsWriteHeaders(),
     }).then(res => res.data),
+  opsInspectionGetNotifications: () =>
+    client.get('/ops/inspection/notifications').then(res => res.data),
+  opsInspectionSaveNotifications: async (payload: {
+    email?: {
+      enabled: boolean
+      host: string
+      port: number
+      security: 'plain' | 'start_tls' | 'ssl'
+      username: string
+      from: string
+      to: string[]
+    }
+    webhook?: {
+      enabled: boolean
+      header_names: string[]
+    }
+    max_retries?: number
+    backoff_seconds?: number
+    max_per_window?: number
+    window_seconds?: number
+    smtp_password?: string
+    webhook_url?: string
+    webhook_headers?: Record<string, string>
+  }) =>
+    client.post('/ops/inspection/notifications', payload, {
+      headers: await opsWriteHeaders(),
+    }).then(res => res.data),
 }

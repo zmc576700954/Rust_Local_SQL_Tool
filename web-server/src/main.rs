@@ -1435,6 +1435,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/ops/inspection/alerts/:alert_id/ack",
             post(inspection_handlers::ops_inspection_ack_alert),
         )
+        .route(
+            "/ops/inspection/notifications",
+            get(inspection_handlers::ops_inspection_get_notifications)
+                .post(inspection_handlers::ops_inspection_save_notifications),
+        )
         .route("/tools/jobs/:job_id", get(tool_job_status))
         .route("/tools/jobs/:job_id/cancel", post(tool_job_cancel))
         .route(
@@ -3468,6 +3473,10 @@ mod tests {
             .route(
                 "/ops/inspection/schedule",
                 get(inspection_handlers::ops_inspection_get_schedule),
+            )
+            .route(
+                "/ops/inspection/notifications",
+                get(inspection_handlers::ops_inspection_get_notifications),
             )
             .route("/diagnostics/perf/probe", post(diagnostics_perf_probe))
             .route(

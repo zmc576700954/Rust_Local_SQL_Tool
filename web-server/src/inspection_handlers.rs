@@ -11,17 +11,22 @@ use serde_json::json;
 use core_lib::config::DbType;
 use core_lib::db::client::DbClient;
 use core_lib::ops::inspection::alert::{
-    AlertEventKind, AlertNotification, NotificationDispatcher,
+    deliver_with_retry, NotificationDispatcher, RetryPolicy,
 };
 use core_lib::ops::inspection::diff::compare_snapshots;
+use core_lib::ops::inspection::notify::{
+    EmailNotificationSettings, NotificationSecrets, NotificationSettings, SCOPE_NOTE,
+    WebhookNotificationSettings,
+};
 use core_lib::ops::inspection::presets::{
     all_check_ids, resolve_check_ids, CHECK_DESCRIPTORS, presets,
 };
 use core_lib::ops::inspection::runner::run_inspection;
 use core_lib::ops::inspection::scheduler::{compute_next_run, validate_schedule};
 use core_lib::ops::inspection::types::{
-    now_ts, AlertRecord, AlertState, InspectionRunResult, InspectionSchedule, InspectionSnapshot,
-    InspectionThresholds, ScheduleMode, SnapshotDiff, SnapshotSummary, CHECK_UNUSED_INDEX,
+    now_ts, AlertRecord, AlertState, ChannelDelivery, DeliveryStatus, InspectionRunResult,
+    InspectionSchedule, InspectionSnapshot, InspectionThresholds, ScheduleMode, SnapshotDiff,
+    SnapshotSummary, CHECK_UNUSED_INDEX,
 };
 use core_lib::ops::types::hash_json;
 
@@ -112,7 +117,7 @@ pub(crate) async fn ops_inspection_presets() -> Json<serde_json::Value> {
             "title": descriptor.title,
             "rule": descriptor.rule,
         })).collect::<Vec<_>>(),
-        "scope": "调度器运行在应用进程内；关闭应用后巡检停止，不会在后台继续。",
+        "scope": SCOPE_NOTE,
     }))
 }
 
@@ -130,6 +135,20 @@ pub(crate) async fn ops_inspection_get_schedule(
     State(state): State<AppState>,
 ) -> Result<Json<ScheduleResponse>, AppError> {
     let schedule = state.ops.inspections.read().await.schedule().clone();
+    let channels = {
+        let store = state.ops.inspections.read().await;
+        let settings = store.notification_settings();
+        let dispatcher = NotificationDispatcher::from_settings(
+            &settings.email,
+            &settings.webhook,
+            store.notification_secrets(),
+        );
+        dispatcher
+            .channel_ids()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
     let target = if schedule.db_id.trim().is_empty() {
         None
     } else {
@@ -150,12 +169,8 @@ pub(crate) async fn ops_inspection_get_schedule(
             }))
             .collect::<Vec<_>>()),
         target,
-        notification_channels: NotificationDispatcher::in_app_only()
-            .channel_ids()
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-        scope_note: "调度器跟随应用进程运行；关闭应用即停止，不会在后台继续巡检。邮件/Webhook 仅保留接口位，未实现也未配置。".into(),
+        notification_channels: channels,
+        scope_note: SCOPE_NOTE.into(),
     }))
 }
 
@@ -250,8 +265,153 @@ pub(crate) async fn ops_inspection_save_schedule(
     Ok(Json(json!({
         "schedule": schedule,
         "target": target_json(&target),
-        "scope_note": "调度器跟随应用进程运行；关闭应用即停止。",
+        "scope_note": SCOPE_NOTE,
     })))
+}
+
+// ── 通知配置 ────────────────────────────────────────────────
+
+fn notification_config_json(
+    settings: &NotificationSettings,
+    secrets: &NotificationSecrets,
+) -> serde_json::Value {
+    let dispatcher =
+        NotificationDispatcher::from_settings(&settings.email, &settings.webhook, secrets);
+    json!({
+        "settings": settings,
+        "secrets": secrets.masked_view(),
+        "channels": dispatcher.channel_ids(),
+        "scope_note": SCOPE_NOTE,
+    })
+}
+
+pub(crate) async fn ops_inspection_get_notifications(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let store = state.ops.inspections.read().await;
+    Ok(Json(notification_config_json(
+        store.notification_settings(),
+        store.notification_secrets(),
+    )))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct NotificationConfigPayload {
+    #[serde(default)]
+    email: Option<EmailNotificationSettings>,
+    #[serde(default)]
+    webhook: Option<WebhookNotificationSettings>,
+    #[serde(default)]
+    max_retries: Option<u32>,
+    #[serde(default)]
+    backoff_seconds: Option<u64>,
+    #[serde(default)]
+    max_per_window: Option<usize>,
+    #[serde(default)]
+    window_seconds: Option<i64>,
+    /// 仅在提供时覆盖；空字符串表示清除。
+    #[serde(default)]
+    smtp_password: Option<String>,
+    /// 仅在提供时覆盖；空字符串表示清除。
+    #[serde(default)]
+    webhook_url: Option<String>,
+    /// 提供时整体替换自定义头；空对象表示清除。
+    #[serde(default)]
+    webhook_headers: Option<std::collections::BTreeMap<String, String>>,
+}
+
+pub(crate) async fn ops_inspection_save_notifications(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<NotificationConfigPayload>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    authorize_write(&state, &headers)?;
+
+    let (mut settings, mut secrets) = {
+        let store = state.ops.inspections.read().await;
+        (
+            store.notification_settings().clone(),
+            store.notification_secrets().clone(),
+        )
+    };
+    if let Some(email) = payload.email {
+        settings.email = email;
+    }
+    if let Some(webhook) = payload.webhook {
+        settings.webhook = webhook;
+    }
+    if let Some(max_retries) = payload.max_retries {
+        settings.max_retries = max_retries.min(10);
+    }
+    if let Some(backoff_seconds) = payload.backoff_seconds {
+        settings.backoff_seconds = backoff_seconds.min(600);
+    }
+    if let Some(max_per_window) = payload.max_per_window {
+        settings.max_per_window = max_per_window.max(1);
+    }
+    if let Some(window_seconds) = payload.window_seconds {
+        settings.window_seconds = window_seconds.max(1);
+    }
+    if let Some(password) = payload.smtp_password {
+        secrets.smtp_password = password;
+    }
+    if let Some(url) = payload.webhook_url {
+        secrets.webhook_url = url;
+    }
+    if let Some(headers) = payload.webhook_headers {
+        let mut cleaned = std::collections::BTreeMap::new();
+        for (name, value) in headers {
+            if !name.trim().is_empty() && !value.is_empty() {
+                cleaned.insert(name.trim().to_string(), value);
+            }
+        }
+        secrets.webhook_headers = cleaned;
+    }
+
+    if settings.email.enabled {
+        if settings.email.host.trim().is_empty() {
+            return Err(AppError::BadRequest("启用邮件通知时必须填写 SMTP 主机".into()));
+        }
+        if settings.email.to.is_empty() {
+            return Err(AppError::BadRequest("启用邮件通知时必须至少填写一个收件人".into()));
+        }
+        if settings.email.from.trim().is_empty() && settings.email.username.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "启用邮件通知时必须填写发件人或用户名".into(),
+            ));
+        }
+    }
+    if settings.webhook.enabled && secrets.webhook_url.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "启用 Webhook 通知时必须填写 Webhook URL（保存在本地 0600 凭据文件中）".into(),
+        ));
+    }
+
+    {
+        let mut store = state.ops.inspections.write().await;
+        store.save_notification_settings(settings.clone())?;
+        store.save_notification_secrets(secrets.clone())?;
+    }
+    audit_event(
+        &state,
+        "inspection_notifications_saved",
+        "ok",
+        json!({
+            "email_enabled": settings.email.enabled,
+            "email_host": settings.email.host,
+            "email_to": settings.email.to.len(),
+            "webhook_enabled": settings.webhook.enabled,
+            "webhook_header_names": settings.webhook.header_names,
+            "max_retries": settings.max_retries,
+            "backoff_seconds": settings.backoff_seconds,
+            "max_per_window": settings.max_per_window,
+            "window_seconds": settings.window_seconds,
+            "smtp_password_set": !secrets.smtp_password.is_empty(),
+            "webhook_url_set": !secrets.webhook_url.is_empty(),
+            "scope_note": SCOPE_NOTE,
+        }),
+    );
+    Ok(Json(notification_config_json(&settings, &secrets)))
 }
 
 // ── 运行 ────────────────────────────────────────────────────
@@ -346,22 +506,7 @@ pub(crate) async fn execute_inspection(
         store.record_snapshot(snapshot)?
     };
 
-    // 站内通知由快照存储落库；这里走一遍渠道接口，邮件/Webhook 不在默认注册列表。
-    let dispatcher = NotificationDispatcher::in_app_only();
-    for alert in &result.alerts {
-        let kind = if alert.state == AlertState::Resolved {
-            AlertEventKind::Resolved
-        } else {
-            AlertEventKind::Raised
-        };
-        let notification = AlertNotification {
-            kind,
-            alert: alert.clone(),
-        };
-        for (channel, err) in dispatcher.dispatch(&notification).await {
-            tracing::warn!(channel = %channel, error = %err, "巡检通知发送失败");
-        }
-    }
+    dispatch_notifications(state, &result).await;
 
     let diff = &result.diff;
     audit_event(
@@ -385,6 +530,88 @@ pub(crate) async fn execute_inspection(
         }),
     );
     Ok(result)
+}
+
+/// 发送本次巡检产生的事件（新建 / 升级 / 恢复），并把每个通道的投递状态写回告警。
+/// 未变化的活跃 finding 不会产生事件，因此不会重复推送。
+async fn dispatch_notifications(state: &AppState, result: &InspectionRunResult) {
+    if result.events.is_empty() {
+        return;
+    }
+    let (settings, secrets) = {
+        let store = state.ops.inspections.read().await;
+        (
+            store.notification_settings().clone(),
+            store.notification_secrets().clone(),
+        )
+    };
+    let dispatcher = NotificationDispatcher::from_settings(
+        &settings.email,
+        &settings.webhook,
+        &secrets,
+    );
+    let policy = RetryPolicy {
+        max_retries: settings.max_retries,
+        backoff_seconds: settings.backoff_seconds,
+    };
+
+    for event in &result.events {
+        let mut deliveries: Vec<ChannelDelivery> = Vec::new();
+        // 站内通道：告警已写入本地存储，直接记为成功。
+        let now = now_ts();
+        let mut in_app = ChannelDelivery::pending("in_app");
+        in_app.status = DeliveryStatus::Success;
+        in_app.attempts = 1;
+        in_app.last_attempt_at = Some(now);
+        in_app.delivered_at = Some(now);
+        deliveries.push(in_app);
+
+        for channel in dispatcher.channels() {
+            if channel.id() == "in_app" {
+                continue;
+            }
+            // 全局发送限流：每个事件 × 外部通道消费一个配额。
+            let allowed = {
+                let mut store = state.ops.inspections.write().await;
+                match store.try_acquire_send_slot(
+                    now_ts(),
+                    settings.window_seconds,
+                    settings.max_per_window,
+                ) {
+                    Ok(allowed) => allowed,
+                    Err(err) => {
+                        tracing::warn!("检查通知限流状态失败: {}", err);
+                        true
+                    }
+                }
+            };
+            if !allowed {
+                deliveries.push(ChannelDelivery::skipped(
+                    channel.id(),
+                    format!(
+                        "触发每 {} 秒最多 {} 次发送上限，本次未发送",
+                        settings.window_seconds, settings.max_per_window
+                    ),
+                ));
+                continue;
+            }
+            let delivery = deliver_with_retry(channel.as_ref(), event, policy).await;
+            if delivery.status == DeliveryStatus::Failed {
+                tracing::warn!(
+                    channel = channel.id(),
+                    attempts = delivery.attempts,
+                    error = ?delivery.last_error,
+                    "巡检通知发送失败"
+                );
+            }
+            deliveries.push(delivery);
+        }
+
+        let mut store = state.ops.inspections.write().await;
+        if let Err(err) = store.update_deliveries(&event.alert.alert_id, deliveries) {
+            tracing::warn!("记录通知投递状态失败: {}", err);
+        }
+    }
 }
 
 // ── 读取最近结果 / 历史 / 告警 ──────────────────────────────

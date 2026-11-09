@@ -10,12 +10,17 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::ops::error::OpsError;
+use crate::ops::inspection::alert::{AlertEventKind, AlertNotification};
 use crate::ops::inspection::diff::compare_snapshots;
+use crate::ops::inspection::notify::{
+    secrets_path_for, NotificationSecretStore, NotificationSecrets, NotificationSettings,
+    SCOPE_NOTE,
+};
 use crate::ops::inspection::presets::check_descriptor;
 use crate::ops::inspection::scheduler::compute_next_run;
 use crate::ops::inspection::types::{
-    fingerprint, max_severity, AlertRecord, AlertState, CheckStatus, EvidenceItem,
-    InspectionRunResult, InspectionSchedule, InspectionSnapshot, SnapshotSummary,
+    fingerprint, max_severity, severity_rank, AlertRecord, AlertState, ChannelDelivery, CheckStatus,
+    EvidenceItem, InspectionRunResult, InspectionSchedule, InspectionSnapshot, SnapshotSummary,
     CHECK_UNUSED_INDEX,
 };
 use crate::ops::types::Severity;
@@ -31,6 +36,11 @@ struct InspectionData {
     snapshots: HashMap<String, Vec<InspectionSnapshot>>,
     #[serde(default)]
     alerts: Vec<AlertRecord>,
+    #[serde(default)]
+    notifications: NotificationSettings,
+    /// 每次实际发出的时间戳，用于每时间窗发送上限。
+    #[serde(default)]
+    send_times: Vec<i64>,
 }
 
 impl Default for InspectionData {
@@ -39,6 +49,8 @@ impl Default for InspectionData {
             schedule: InspectionSchedule::default(),
             snapshots: HashMap::new(),
             alerts: Vec::new(),
+            notifications: NotificationSettings::default(),
+            send_times: Vec::new(),
         }
     }
 }
@@ -46,6 +58,7 @@ impl Default for InspectionData {
 pub struct InspectionStore {
     file: Option<PathBuf>,
     data: InspectionData,
+    secrets: NotificationSecretStore,
 }
 
 impl InspectionStore {
@@ -71,7 +84,83 @@ impl InspectionStore {
                 }
             })
             .unwrap_or_default();
-        Self { file, data }
+        let secrets = NotificationSecretStore::new(
+            file.as_ref().map(|path| secrets_path_for(path)),
+        );
+        Self {
+            file,
+            data,
+            secrets,
+        }
+    }
+
+    // ── 通知配置与凭据 ──────────────────────────────────────
+
+    pub fn notification_settings(&self) -> &NotificationSettings {
+        &self.data.notifications
+    }
+
+    pub fn save_notification_settings(
+        &mut self,
+        settings: NotificationSettings,
+    ) -> Result<(), OpsError> {
+        self.data.notifications = settings;
+        self.persist()
+    }
+
+    pub fn notification_secrets(&self) -> &NotificationSecrets {
+        self.secrets.secrets()
+    }
+
+    pub fn save_notification_secrets(
+        &mut self,
+        secrets: NotificationSecrets,
+    ) -> Result<(), OpsError> {
+        self.secrets.save(secrets)
+    }
+
+    /// 消费一个发送配额；达到时间窗上限时返回 false（不发送）。
+    pub fn try_acquire_send_slot(
+        &mut self,
+        now: i64,
+        window_seconds: i64,
+        max_per_window: usize,
+    ) -> Result<bool, OpsError> {
+        let window = window_seconds.max(1);
+        self.data
+            .send_times
+            .retain(|sent_at| now.saturating_sub(*sent_at) < window);
+        if self.data.send_times.len() >= max_per_window.max(1) {
+            return Ok(false);
+        }
+        self.data.send_times.push(now);
+        self.persist()?;
+        Ok(true)
+    }
+
+    pub fn send_count_in_window(&self, now: i64, window_seconds: i64) -> usize {
+        let window = window_seconds.max(1);
+        self.data
+            .send_times
+            .iter()
+            .filter(|sent_at| now.saturating_sub(**sent_at) < window)
+            .count()
+    }
+
+    /// 用最新一次投递结果替换该告警的全部通道记录。
+    pub fn update_deliveries(
+        &mut self,
+        alert_id: &str,
+        deliveries: Vec<ChannelDelivery>,
+    ) -> Result<(), OpsError> {
+        let alert = self
+            .data
+            .alerts
+            .iter_mut()
+            .find(|alert| alert.alert_id == alert_id)
+            .ok_or_else(|| OpsError::NotFound(format!("告警不存在: {alert_id}")))?;
+        alert.deliveries = deliveries;
+        self.persist()
     }
 
     pub fn schedule(&self) -> &InspectionSchedule {
@@ -276,7 +365,7 @@ impl InspectionStore {
         let fingerprint = snapshot.db_fingerprint.clone();
         let previous = self.latest(&fingerprint).cloned();
         let diff = compare_snapshots(previous.as_ref(), &snapshot);
-        let alerts = self.reconcile_alerts(&snapshot);
+        let (alerts, events) = self.reconcile_alerts(&snapshot);
 
         let entry = self.data.snapshots.entry(fingerprint).or_default();
         entry.push(snapshot.clone());
@@ -298,6 +387,8 @@ impl InspectionStore {
         Ok(InspectionRunResult {
             diff,
             alerts,
+            events,
+            scope_note: SCOPE_NOTE.to_string(),
             snapshot,
         })
     }
@@ -305,8 +396,9 @@ impl InspectionStore {
     fn reconcile_alerts(
         &mut self,
         snapshot: &InspectionSnapshot,
-    ) -> Vec<AlertRecord> {
+    ) -> (Vec<AlertRecord>, Vec<AlertNotification>) {
         let mut touched: BTreeMap<String, AlertRecord> = BTreeMap::new();
+        let mut events: Vec<AlertNotification> = Vec::new();
         let check_ids: Vec<&str> = snapshot
             .checks
             .iter()
@@ -361,6 +453,10 @@ impl InspectionStore {
                 alert.last_seen_at = snapshot.finished_at;
                 alert.snapshot_id = snapshot.snapshot_id.clone();
                 touched.insert(alert.alert_id.clone(), alert.clone());
+                events.push(AlertNotification {
+                    kind: AlertEventKind::Resolved,
+                    alert: alert.clone(),
+                });
             }
         }
 
@@ -385,6 +481,9 @@ impl InspectionStore {
                     Some(pos) => {
                         let alert = &mut self.data.alerts[pos];
                         let changed = alert.severity != item.severity || alert.message != item.message;
+                        // 只有严重度真正升高才再次推送；同一条 finding 未恢复期间不重复发。
+                        let escalated =
+                            severity_rank(item.severity) > severity_rank(alert.severity);
                         alert.severity = max_severity(alert.severity, item.severity);
                         alert.message = item.message.clone();
                         alert.title = title;
@@ -395,6 +494,12 @@ impl InspectionStore {
                             alert.acknowledged = false;
                         }
                         touched.insert(alert.alert_id.clone(), alert.clone());
+                        if escalated {
+                            events.push(AlertNotification {
+                                kind: AlertEventKind::Escalated,
+                                alert: alert.clone(),
+                            });
+                        }
                     }
                     None => {
                         let alert = AlertRecord {
@@ -415,15 +520,20 @@ impl InspectionStore {
                             acknowledged: false,
                             resolved_at: None,
                             snapshot_id: snapshot.snapshot_id.clone(),
+                            deliveries: Vec::new(),
                         };
                         self.data.alerts.push(alert.clone());
-                        touched.insert(alert.alert_id.clone(), alert);
+                        touched.insert(alert.alert_id.clone(), alert.clone());
+                        events.push(AlertNotification {
+                            kind: AlertEventKind::Raised,
+                            alert,
+                        });
                     }
                 }
             }
         }
 
-        touched.into_values().collect()
+        (touched.into_values().collect(), events)
     }
 
     fn trim_alerts(&mut self) {
@@ -512,6 +622,117 @@ mod tests {
 
     fn warn(key: &str, message: &str) -> EvidenceItem {
         EvidenceItem::new(key, Severity::Warn, message.into(), json!({"k": key}))
+    }
+
+    fn critical(key: &str, message: &str) -> EvidenceItem {
+        EvidenceItem::new(key, Severity::Critical, message.into(), json!({"k": key}))
+    }
+
+    #[test]
+    fn unchanged_finding_emits_no_repeated_event() {
+        use crate::ops::inspection::alert::AlertEventKind;
+        let mut store = InspectionStore::new(None);
+        let first = store
+            .record_snapshot(snapshot("s1", 100, vec![warn("t.i", "dup")]))
+            .unwrap();
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(first.events[0].kind, AlertEventKind::Raised);
+
+        let second = store
+            .record_snapshot(snapshot("s2", 200, vec![warn("t.i", "dup")]))
+            .unwrap();
+        assert!(second.events.is_empty(), "unresolved finding must not re-push");
+        assert_eq!(second.alerts.len(), 1);
+        assert_eq!(second.alerts[0].occurrences, 2);
+    }
+
+    #[test]
+    fn severity_escalation_emits_escalated_event_only() {
+        use crate::ops::inspection::alert::AlertEventKind;
+        let mut store = InspectionStore::new(None);
+        store
+            .record_snapshot(snapshot("s1", 100, vec![warn("t.i", "dup")]))
+            .unwrap();
+        let escalated = store
+            .record_snapshot(snapshot(
+                "s2",
+                200,
+                vec![critical("t.i", "dup now critical")],
+            ))
+            .unwrap();
+        assert_eq!(escalated.events.len(), 1);
+        assert_eq!(escalated.events[0].kind, AlertEventKind::Escalated);
+        assert_eq!(escalated.events[0].alert.severity, Severity::Critical);
+
+        let stable = store
+            .record_snapshot(snapshot(
+                "s3",
+                300,
+                vec![critical("t.i", "dup now critical")],
+            ))
+            .unwrap();
+        assert!(stable.events.is_empty(), "same severity must not re-push");
+    }
+
+    #[test]
+    fn resolution_emits_resolved_event() {
+        use crate::ops::inspection::alert::AlertEventKind;
+        let mut store = InspectionStore::new(None);
+        store
+            .record_snapshot(snapshot("s1", 100, vec![warn("t.i", "dup")]))
+            .unwrap();
+        let result = store
+            .record_snapshot(snapshot("s2", 200, vec![]))
+            .unwrap();
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].kind, AlertEventKind::Resolved);
+    }
+
+    #[test]
+    fn dedup_key_distinguishes_check_and_evidence() {
+        let a = fingerprint(&["fp-1", "unused_index", "t.idx_a"]);
+        let b = fingerprint(&["fp-1", "unused_index", "t.idx_a"]);
+        let c = fingerprint(&["fp-1", "redundant_index", "t.idx_a"]);
+        let d = fingerprint(&["fp-1", "unused_index", "t.idx_b"]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn send_slot_respects_window_and_expires() {
+        let mut store = InspectionStore::new(None);
+        assert!(store.try_acquire_send_slot(100, 60, 2).unwrap());
+        assert!(store.try_acquire_send_slot(110, 60, 2).unwrap());
+        assert!(!store.try_acquire_send_slot(120, 60, 2).unwrap());
+        assert_eq!(store.send_count_in_window(120, 60), 2);
+        // 窗口滑过后旧记录被淘汰，重新允许发送。
+        assert!(store.try_acquire_send_slot(161, 60, 2).unwrap());
+        assert_eq!(store.send_count_in_window(161, 60), 2);
+    }
+
+    #[test]
+    fn deliveries_are_persisted_on_alert() {
+        use crate::ops::inspection::types::{ChannelDelivery, DeliveryStatus};
+        let mut store = InspectionStore::new(None);
+        let result = store
+            .record_snapshot(snapshot("s1", 100, vec![warn("t.i", "dup")]))
+            .unwrap();
+        let alert_id = result.alerts[0].alert_id.clone();
+        let delivery = ChannelDelivery {
+            channel: "webhook".into(),
+            status: DeliveryStatus::Failed,
+            attempts: 3,
+            last_error: Some("HTTP 500".into()),
+            last_attempt_at: Some(115),
+            delivered_at: None,
+            attempt_times: vec![100, 105, 115],
+        };
+        store
+            .update_deliveries(&alert_id, vec![delivery.clone()])
+            .unwrap();
+        let alerts = store.alerts(Some("fp-1"), 10);
+        assert_eq!(alerts[0].deliveries, vec![delivery]);
     }
 
     #[test]
