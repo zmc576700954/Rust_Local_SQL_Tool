@@ -487,15 +487,12 @@ mod tests {
             !core_lib::ops::inspection::redact::contains_sensitive_shape(&content),
             "log still sensitive: {content}"
         );
-        for shape in [
-            "mysql://",
-            "postgres://",
-            "password=",
-            "@127.0.0.1:3306",
-            "@10.0.0.5:5432",
-        ] {
+        for shape in ["rootpass", "plain123", "secret@", "password="] {
             assert!(!content.contains(shape), "log leaked {shape}: {content}");
         }
+        // 主机、端口、库名保留，便于排查。
+        assert!(content.contains("mysql://root@127.0.0.1:3306/shop"), "{content}");
+        assert!(content.contains("postgres://ops@10.0.0.5:5432/app"), "{content}");
         assert!(content.contains("Failed to connect"));
         assert!(content.contains("导入失败"));
         let _ = std::fs::remove_file(&path);

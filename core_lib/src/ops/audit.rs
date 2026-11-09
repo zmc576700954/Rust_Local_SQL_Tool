@@ -90,9 +90,11 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert!(!contains_sensitive_shape(&content), "audit leaked: {content}");
-        for shape in ["mysql://", "postgres://", "password=", "@127.0.0.1:3306"] {
+        // 只删除凭据本体；主机、端口、库名等排查信息保留。
+        for shape in ["rootpass", "plain123", "password="] {
             assert!(!content.contains(shape), "audit leaked {shape}: {content}");
         }
+        assert!(content.contains("mysql://root@127.0.0.1:3306/shop"), "{content}");
         assert!(content.contains("shop"));
         assert!(content.contains("orders"));
         assert!(content.contains("idx_created"));

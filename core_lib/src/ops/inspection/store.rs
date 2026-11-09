@@ -659,10 +659,12 @@ mod tests {
         let event_text = serde_json::to_string(&result.events).unwrap();
         assert!(!contains_sensitive_shape(&event_text), "event leaked: {event_text}");
 
-        for shape in ["mysql://", "password=", "@127.0.0.1:3306"] {
+        // 凭据本体删除；主机、端口、库名保留便于排查。
+        for shape in ["rootpass", "plain123", "password="] {
             assert!(!stored_text.contains(shape), "snapshot leaked {shape}: {stored_text}");
             assert!(!alert_text.contains(shape), "alert leaked {shape}: {alert_text}");
         }
+        assert!(stored_text.contains("127.0.0.1:3306"), "{stored_text}");
         assert!(stored_text.contains("shop"));
         assert!(stored_text.contains("orders"));
         assert!(stored_text.contains("idx_created"));

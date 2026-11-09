@@ -463,24 +463,25 @@ mod tests {
         assert!(changed);
         assert!(!contains_sensitive_shape(&clean), "still sensitive: {clean}");
         for leaked in [
-            "mysql://",
             "rootpass",
-            "127.0.0.1:3306",
             "password=",
             "plain123",
             "token:",
             "abc456",
             "webhook-token-123",
             "smtp-super-secret",
+            "Bearer",
         ] {
             assert!(!clean.contains(leaked), "leaked {leaked}: {clean}");
         }
+        // 主机、端口与库名保留，便于排查。
+        assert!(clean.contains("mysql://root@127.0.0.1:3306/app"), "{clean}");
         // 删除式清洗不保留 *** 结构。
         assert!(!clean.contains("***"));
     }
 
     #[test]
-    fn alert_message_has_no_dangling_label_after_scrub() {
+    fn alert_message_keeps_context_without_credentials() {
         let polluted =
             "索引 idx_created 与 idx_created_at 重复；DSN mysql://root:rootpass@127.0.0.1:3306/shop?password=plain123";
         let notification = AlertNotification {
@@ -489,10 +490,11 @@ mod tests {
         };
         let content = build_content(&notification, &secrets());
         println!("ALERT_SUMMARY_BEGIN\n{}\nALERT_SUMMARY_END", content.text);
-        assert!(content
-            .text
-            .contains("证据摘要: 索引 idx_created 与 idx_created_at 重复\n"));
-        assert!(!content.text.contains("DSN"));
+        assert!(content.text.contains(
+            "证据摘要: 索引 idx_created 与 idx_created_at 重复；DSN mysql://root@127.0.0.1:3306/shop\n"
+        ));
+        assert!(!content.text.contains("rootpass"));
+        assert!(!content.text.contains("plain123"));
         assert!(!content.text.contains("；；"));
     }
 
@@ -510,12 +512,14 @@ mod tests {
         let payload_text = serde_json::to_string(&content.payload).unwrap();
         for text in [&content.subject, &content.text, &payload_text] {
             assert!(!contains_sensitive_shape(text), "still sensitive: {text}");
-            assert!(!text.contains("mysql://"));
+            assert!(!text.contains("rootpass"));
+            assert!(!text.contains("plain123"));
             assert!(!text.contains("password="));
         }
         assert!(content.text.contains("shop"));
         assert!(content.text.contains("orders"));
         assert!(content.text.contains("idx_created"));
+        assert!(content.text.contains("127.0.0.1:3306"));
     }
 
     #[test]

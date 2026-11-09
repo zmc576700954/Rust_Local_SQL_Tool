@@ -1,11 +1,12 @@
 //! 巡检敏感信息清洗。
 //!
 //! 两条防线：
-//! 1. 源头：巡检快照落库前清洗 message / evidence / skipped_reason，避免连接串进入历史记录；
+//! 1. 源头：巡检快照落库前清洗 message / evidence / skipped_reason，避免凭据进入历史记录；
 //! 2. 展示与通知：历史数据返回界面、写审计、发邮件/Webhook 前再次强制清洗。
 //!
-//! 清洗是“删除”而不是“替换成 ***”，避免保留 `scheme://`、`user:pass@`、
-//! `password=`、`@host:port` 这些可辨认的结构。
+//! 清洗是“删除”而不是“替换成 ***”，避免保留 `user:pass@` 这类可辨认的凭据结构；
+//! 但主机名、端口、库名、账号名与驱动错误码/原因属于排查必需的非敏感信息，
+//! 必须原样保留（例如 `1045 Access denied for user 'shop'@'localhost'`）。
 
 use serde_json::Value;
 
@@ -37,21 +38,46 @@ fn is_delimiter(value: char) -> bool {
         )
 }
 
-fn is_scheme_char(value: char) -> bool {
-    value.is_ascii_alphanumeric() || matches!(value, '+' | '-' | '.')
+/// 凭据键名，按长度从长到短排列，保证 `secret_access_key` 先于 `secret` 匹配。
+const SECRET_KEYS: &[&str] = &[
+    "secret_access_key",
+    "access_key_id",
+    "access_key",
+    "secret_key",
+    "api_key",
+    "authorization",
+    "password",
+    "passwd",
+    "pwd",
+    "apikey",
+    "accesskey",
+    "secretkey",
+    "token",
+    "secret",
+    "ak",
+    "sk",
+];
+
+/// 密码键：值若是 YES/NO 这类“是否提供密码”的诊断信息，必须保留。
+const PASSWORD_KEYS: [&str; 3] = ["password", "passwd", "pwd"];
+
+fn is_password_key(key: &str) -> bool {
+    PASSWORD_KEYS.contains(&key)
 }
 
-fn is_host_char(value: char) -> bool {
-    value.is_ascii_alphanumeric() || matches!(value, '.' | '-' | '_')
+/// `using password: YES` 这类诊断值不是凭据本体。
+fn is_password_presence_diagnostic(value: &str) -> bool {
+    matches!(
+        value.to_ascii_uppercase().as_str(),
+        "YES" | "NO" | "TRUE" | "FALSE"
+    )
 }
-
-const SECRET_KEYS: [&str; 6] = ["password", "passwd", "pwd", "token", "secret", "authorization"];
 
 /// 删除标记：删除敏感片段后先留下标记，最后统一清理悬空标签与标点。
 const CUT: char = '\u{1f}';
 
 /// 常见“标签”词：删除其后的连接串/凭据后，这些词会变成断头句。
-const DANGLING_LABELS: [&str; 31] = [
+const DANGLING_LABELS: [&str; 33] = [
     "connection string",
     "authorization",
     "connection",
@@ -64,8 +90,10 @@ const DANGLING_LABELS: [&str; 31] = [
     "endpoint",
     "address",
     "token",
+    "bearer",
     "host",
     "user",
+    "basic",
     "pwd",
     "url",
     "uri",
@@ -91,88 +119,37 @@ fn push_with_cut(output: &mut String, head: &[char], tail: &[char]) {
     output.extend(tail);
 }
 
-/// 扫描并删除形如 `scheme://...` 的整段 URI。
-fn remove_uri_tokens(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
-    let mut index = 0;
-    while index + 2 < chars.len() {
-        if chars[index] == ':' && chars[index + 1] == '/' && chars[index + 2] == '/' {
-            let mut start = index;
-            while start > 0 && is_scheme_char(chars[start - 1]) {
-                start -= 1;
-            }
-            if start < index {
-                let mut end = index + 3;
-                while end < chars.len() && !is_delimiter(chars[end]) {
-                    end += 1;
-                }
-                let mut next = String::new();
-                push_with_cut(&mut next, &chars[..start], &chars[end..]);
-                return remove_uri_tokens(&next);
-            }
-        }
-        index += 1;
-    }
-    input.to_string()
-}
-
-/// 删除 `user:pass@` 所在的整个 token（包含其后的主机与路径）。
-fn remove_userinfo(input: &str) -> String {
+/// 只删除 `user:pass@` 里的 `:pass`，保留账号、主机、端口与库名。
+///
+/// 覆盖 `scheme://user:pass@host:port/db` 与裸 `user:pass@host` 两种形态；
+/// 邮箱（`dba@example.com`）与驱动错误里的 `'shop'@'localhost'` 不受影响。
+fn strip_userinfo_passwords(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut index = 0;
     while index < chars.len() {
-        if chars[index] == '@' {
-            let mut start = index;
-            while start > 0 && !is_delimiter(chars[start - 1]) {
-                start -= 1;
-            }
-            let prefix = &chars[start..index];
-            if prefix.contains(&':') && !prefix.contains(&'@') {
-                let mut end = index + 1;
-                while end < chars.len() && !is_delimiter(chars[end]) {
-                    end += 1;
-                }
-                let mut next = String::new();
-                push_with_cut(&mut next, &chars[..start], &chars[end..]);
-                return remove_userinfo(&next);
-            }
+        if chars[index] != '@' {
+            index += 1;
+            continue;
         }
-        index += 1;
-    }
-    input.to_string()
-}
-
-/// 删除 `@host:port` 所在的整个 token。
-fn remove_at_host_port(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] == '@' {
-            let mut host_end = index + 1;
-            while host_end < chars.len() && is_host_char(chars[host_end]) {
-                host_end += 1;
+        let mut start = index;
+        while start > 0 && !is_delimiter(chars[start - 1]) {
+            start -= 1;
+        }
+        // URI 的 scheme 里也有冒号，真正的 userinfo 从最后一个 `://` 之后开始。
+        let mut user_start = start;
+        let mut probe = start;
+        while probe + 2 < index {
+            if chars[probe] == ':' && chars[probe + 1] == '/' && chars[probe + 2] == '/' {
+                user_start = probe + 3;
             }
-            let has_host = host_end > index + 1;
-            let has_port = host_end < chars.len()
-                && chars[host_end] == ':'
-                && host_end + 1 < chars.len()
-                && chars[host_end + 1].is_ascii_digit();
-            if has_host && has_port {
-                let mut start = index;
-                while start > 0 && !is_delimiter(chars[start - 1]) {
-                    start -= 1;
-                }
-                let mut end = host_end + 1;
-                while end < chars.len() && chars[end].is_ascii_digit() {
-                    end += 1;
-                }
-                while end < chars.len() && !is_delimiter(chars[end]) {
-                    end += 1;
-                }
-                let mut next = String::new();
-                push_with_cut(&mut next, &chars[..start], &chars[end..]);
-                return remove_at_host_port(&next);
-            }
+            probe += 1;
+        }
+        if let Some(offset) = chars[user_start..index].iter().position(|c| *c == ':') {
+            let colon = user_start + offset;
+            let mut next = String::new();
+            next.extend(&chars[..colon]);
+            next.extend(&chars[index..]);
+            return strip_userinfo_passwords(&next);
         }
         index += 1;
     }
@@ -184,7 +161,8 @@ fn remove_secret_assignments(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut index = 0;
     while index < chars.len() {
-        let boundary = index == 0 || is_delimiter(chars[index - 1]) || chars[index - 1] == '&';
+        let boundary =
+            index == 0 || is_delimiter(chars[index - 1]) || matches!(chars[index - 1], '&' | '?');
         if boundary {
             let rest: String = chars[index..]
                 .iter()
@@ -192,7 +170,7 @@ fn remove_secret_assignments(input: &str) -> String {
                 .collect::<String>()
                 .to_ascii_lowercase();
             let mut matched_key = None;
-            for key in SECRET_KEYS {
+            for &key in SECRET_KEYS {
                 if rest.starts_with(key) {
                     matched_key = Some((key, key.len()));
                     break;
@@ -223,6 +201,31 @@ fn remove_secret_assignments(input: &str) -> String {
                                 end += 1;
                             }
                         }
+                        let value: String = chars[cursor + 1..end]
+                            .iter()
+                            .collect::<String>()
+                            .trim()
+                            .to_string();
+                        if value.is_empty()
+                            || (is_password_key(key) && is_password_presence_diagnostic(&value))
+                        {
+                            index += 1;
+                            continue;
+                        }
+                        // URL 查询参数：把 `?password=x&next=1` 清理成 `?next=1`，
+                        // 不留下悬空的 `?`/`&`。
+                        if index > 0 && matches!(chars[index - 1], '?' | '&') {
+                            let sep = chars[index - 1];
+                            let mut next = String::new();
+                            next.extend(&chars[..index - 1]);
+                            if end < chars.len() && chars[end] == '&' {
+                                next.push(sep);
+                                next.extend(&chars[end + 1..]);
+                            } else {
+                                next.extend(&chars[end..]);
+                            }
+                            return remove_secret_assignments(&next);
+                        }
                         let mut next = String::new();
                         push_with_cut(&mut next, &chars[..index], &chars[end..]);
                         return remove_secret_assignments(&next);
@@ -231,49 +234,6 @@ fn remove_secret_assignments(input: &str) -> String {
             }
         }
         index += 1;
-    }
-    input.to_string()
-}
-
-/// 删除裸的 `host:port`（驱动错误里经常不带 `@`）。
-fn remove_bare_host_port(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] != ':' {
-            index += 1;
-            continue;
-        }
-        let mut port_end = index + 1;
-        while port_end < chars.len() && chars[port_end].is_ascii_digit() {
-            port_end += 1;
-        }
-        let port_len = port_end - index - 1;
-        if !(2..=5).contains(&port_len) {
-            index += 1;
-            continue;
-        }
-        let mut start = index;
-        while start > 0 && is_host_char(chars[start - 1]) {
-            start -= 1;
-        }
-        if start == index {
-            index += 1;
-            continue;
-        }
-        let host: String = chars[start..index].iter().collect();
-        let looks_like_host = host.contains('.')
-            || host.eq_ignore_ascii_case("localhost")
-            || host.chars().any(|c| c.is_ascii_alphabetic());
-        let before_ok = start == 0 || is_delimiter(chars[start - 1]);
-        let after_ok = port_end == chars.len() || is_delimiter(chars[port_end]);
-        if !(looks_like_host && before_ok && after_ok) {
-            index += 1;
-            continue;
-        }
-        let mut next = String::new();
-        push_with_cut(&mut next, &chars[..start], &chars[port_end..]);
-        return remove_bare_host_port(&next);
     }
     input.to_string()
 }
@@ -458,6 +418,8 @@ fn tidy_cut_markers(input: &str) -> String {
 }
 
 /// 强制清洗文本。返回 `(清洗后的文本, 是否发生变化)`。
+///
+/// 只删除凭据本体，保留驱动错误码、原因、账号、主机、端口与库名。
 pub fn scrub_text(input: &str, secrets: &[String]) -> (String, bool) {
     let mut output = input.to_string();
     let cut = CUT.to_string();
@@ -466,11 +428,8 @@ pub fn scrub_text(input: &str, secrets: &[String]) -> (String, bool) {
             output = output.replace(secret.as_str(), &cut);
         }
     }
-    output = remove_uri_tokens(&output);
-    output = remove_userinfo(&output);
-    output = remove_at_host_port(&output);
+    output = strip_userinfo_passwords(&output);
     output = remove_secret_assignments(&output);
-    output = remove_bare_host_port(&output);
     output = tidy_cut_markers(&output);
     let changed = output != input;
     (output.trim().to_string(), changed)
@@ -593,45 +552,98 @@ pub fn scrub_run_result(result: &mut InspectionRunResult, secrets: &[String]) ->
     changed
 }
 
-/// 是否仍包含需要删除的敏感形态；用于测试与运行期断言。
+/// 是否仍包含凭据本体；用于测试与运行期断言。
+///
+/// 主机名、端口、库名、账号名与 `using password: YES` 这类诊断信息不算泄漏，
+/// 因此不再把裸 URI 或 `@host:port` 视为敏感形态。
 pub fn contains_sensitive_shape(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("://") {
-        return true;
-    }
-    if lower.contains("password=")
-        || lower.contains("passwd=")
-        || lower.contains("pwd=")
-        || lower.contains("password:")
-        || lower.contains("passwd:")
-        || lower.contains("pwd:")
-    {
-        return true;
-    }
+    has_userinfo_password(text) || has_secret_assignment(text)
+}
+
+/// `scheme://user:pass@host` 或裸 `user:pass@host` 里是否仍带密码。
+fn has_userinfo_password(text: &str) -> bool {
     let chars: Vec<char> = text.chars().collect();
     for index in 0..chars.len() {
         if chars[index] != '@' {
             continue;
         }
-        let mut host_end = index + 1;
-        while host_end < chars.len() && is_host_char(chars[host_end]) {
-            host_end += 1;
-        }
-        if host_end > index + 1
-            && host_end < chars.len()
-            && chars[host_end] == ':'
-            && host_end + 1 < chars.len()
-            && chars[host_end + 1].is_ascii_digit()
-        {
-            return true;
-        }
         let mut start = index;
         while start > 0 && !is_delimiter(chars[start - 1]) {
             start -= 1;
         }
-        if chars[start..index].contains(&':') {
+        let mut user_start = start;
+        let mut probe = start;
+        while probe + 2 < index {
+            if chars[probe] == ':' && chars[probe + 1] == '/' && chars[probe + 2] == '/' {
+                user_start = probe + 3;
+            }
+            probe += 1;
+        }
+        if chars[user_start..index].contains(&':') {
             return true;
         }
+    }
+    false
+}
+
+/// 是否仍存在带非空值（且不是诊断值）的凭据键值。
+fn has_secret_assignment(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let boundary =
+            index == 0 || is_delimiter(chars[index - 1]) || matches!(chars[index - 1], '&' | '?');
+        if boundary {
+            let rest: String = chars[index..]
+                .iter()
+                .take(24)
+                .collect::<String>()
+                .to_ascii_lowercase();
+            for &key in SECRET_KEYS {
+                if !rest.starts_with(key) {
+                    continue;
+                }
+                let after_key = index + key.len();
+                let after_boundary = after_key == chars.len()
+                    || is_delimiter(chars[after_key])
+                    || matches!(chars[after_key], '=' | ':');
+                if !after_boundary {
+                    continue;
+                }
+                let mut cursor = after_key;
+                while cursor < chars.len() && chars[cursor] == ' ' {
+                    cursor += 1;
+                }
+                if cursor >= chars.len() || !matches!(chars[cursor], '=' | ':') {
+                    continue;
+                }
+                let mut end = cursor + 1;
+                while end < chars.len() && chars[end] == ' ' {
+                    end += 1;
+                }
+                if key == "authorization" {
+                    while end < chars.len() && chars[end] != '\n' {
+                        end += 1;
+                    }
+                } else {
+                    while end < chars.len() && !is_delimiter(chars[end]) && chars[end] != '&' {
+                        end += 1;
+                    }
+                }
+                let value: String = chars[cursor + 1..end]
+                    .iter()
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
+                if value.is_empty()
+                    || (is_password_key(key) && is_password_presence_diagnostic(&value))
+                {
+                    continue;
+                }
+                return true;
+            }
+        }
+        index += 1;
     }
     false
 }
@@ -657,20 +669,53 @@ mod tests {
         assert!(clean.contains("shop"));
         assert!(clean.contains("orders"));
         assert!(clean.contains("idx_created"));
+        // 主机、端口、库名与账号是排查必需信息，必须保留；只删除密码本体。
+        assert!(
+            clean.contains("mysql://root@127.0.0.1:3306/shop?ssl=1"),
+            "connection skeleton should be kept: {clean}"
+        );
         assert!(!contains_sensitive_shape(&clean), "still sensitive: {clean}");
-        for leaked in ["rootpass", "127.0.0.1:3306", "plain123", "mysql://", "password="] {
+        for leaked in ["rootpass", "plain123", "password="] {
             assert!(!clean.contains(leaked), "leaked {leaked}: {clean}");
         }
     }
 
     #[test]
-    fn removes_bare_userinfo_and_host_port() {
+    fn removes_userinfo_password_but_keeps_host_port() {
         let raw = "user:pass@db.internal:3306/app 与 ops@10.0.0.5:5432 均不可用";
         let (clean, changed) = scrub_text(raw, &[]);
         assert!(changed);
         assert!(!contains_sensitive_shape(&clean), "still sensitive: {clean}");
-        assert!(!clean.contains("db.internal:3306"));
-        assert!(!clean.contains("10.0.0.5:5432"));
+        assert!(!clean.contains("pass@"), "password body leaked: {clean}");
+        assert!(clean.contains("user@db.internal:3306/app"), "{clean}");
+        assert!(clean.contains("ops@10.0.0.5:5432"), "{clean}");
+    }
+
+    #[test]
+    fn keeps_driver_error_code_and_reason() {
+        let raw = "Failed to connect to database: 1045 Access denied for user 'shop'@'localhost' (using password: YES)";
+        let (clean, changed) = scrub_text(raw, &[]);
+        assert!(!changed, "auth failure diagnostics must be kept: {clean}");
+        for expected in ["1045", "Access denied", "shop", "localhost", "using password: YES"] {
+            assert!(clean.contains(expected), "missing {expected}: {clean}");
+        }
+        assert!(!contains_sensitive_shape(&clean), "still sensitive: {clean}");
+    }
+
+    #[test]
+    fn removes_secret_assignments_and_keeps_uri_skeleton() {
+        let raw = "连接 mysql://root@127.0.0.1:3306/shop?password=plain123&ssl=1 失败；token:abc456 secret_access_key=AKIAEXAMPLE";
+        let (clean, changed) = scrub_text(raw, &[]);
+        assert!(changed);
+        assert!(
+            clean.contains("mysql://root@127.0.0.1:3306/shop?ssl=1"),
+            "{clean}"
+        );
+        for leaked in ["plain123", "password=", "abc456", "token:", "AKIAEXAMPLE"] {
+            assert!(!clean.contains(leaked), "leaked {leaked}: {clean}");
+        }
+        assert!(!clean.contains("?&"), "dangling query separator: {clean}");
+        assert!(!contains_sensitive_shape(&clean), "still sensitive: {clean}");
     }
 
     #[test]
@@ -754,28 +799,33 @@ mod tests {
     }
 
     #[test]
-    fn removes_dangling_label_and_separator() {
+    fn keeps_context_label_and_separator_without_credentials() {
         let raw = "索引 idx_created 与 idx_created_at 重复；DSN mysql://root:pass@127.0.0.1:3306/shop?password=plain123";
         let (clean, changed) = scrub_text(raw, &[]);
         assert!(changed);
-        assert_eq!(clean, "索引 idx_created 与 idx_created_at 重复");
-        assert!(!clean.contains("DSN"));
+        assert_eq!(
+            clean,
+            "索引 idx_created 与 idx_created_at 重复；DSN mysql://root@127.0.0.1:3306/shop"
+        );
+        assert!(!clean.contains("pass@"), "{clean}");
+        assert!(!clean.contains("plain123"), "{clean}");
         assert!(!clean.ends_with('；'));
     }
 
     #[test]
-    fn removes_empty_parameter_segment() {
+    fn keeps_parameter_label_and_connection_skeleton() {
         let raw = "采集失败（参数：mysql://root:pass@127.0.0.1:3306/shop）";
         let (clean, _) = scrub_text(raw, &[]);
-        assert_eq!(clean, "采集失败");
-        assert!(!clean.contains("参数"));
+        assert_eq!(clean, "采集失败（参数：mysql://root@127.0.0.1:3306/shop）");
+        assert!(!clean.contains("pass@"), "{clean}");
         assert!(!clean.contains("（）"));
     }
 
     #[test]
-    fn removes_bare_host_port_but_keeps_clock_time() {
-        let (clean, _) = scrub_text("连接 10.0.0.5:5432 失败", &[]);
-        assert!(!clean.contains("10.0.0.5:5432"), "{clean}");
+    fn keeps_host_port_and_clock_time() {
+        let (clean, changed) = scrub_text("连接 10.0.0.5:5432 失败", &[]);
+        assert!(!changed, "host:port is diagnostic info: {clean}");
+        assert!(clean.contains("10.0.0.5:5432"), "{clean}");
 
         let (clock, changed) = scrub_text("告警时间 12:30 触发", &[]);
         assert!(!changed, "clock should be untouched: {clock}");
