@@ -704,8 +704,12 @@ pub async fn collect_evidence(
     let mut actual_latency_ms = None;
     let mut explain_analyze_raw = None;
     if input.explain_analyze {
-        if matches!(ctx.db_client.pool.db_type(), crate::config::DbType::MariaDB) {
+        if matches!(ctx.db_client.db_type, crate::config::DbType::MariaDB) {
             notes.push("MariaDB 不支持 EXPLAIN ANALYZE；已降级为普通 EXPLAIN + FORMAT=JSON".into());
+            degraded_reasons.push(
+                "explain_analyze_unsupported: MariaDB 不支持 EXPLAIN ANALYZE，已降级为普通 EXPLAIN + FORMAT=JSON"
+                    .into(),
+            );
         } else {
             let timeout_ms = input.analyze_timeout_ms();
             let run = explain_analyze_with_timeout(ctx, &target_sql, timeout_ms).await;
@@ -1217,7 +1221,7 @@ pub async fn explain_for_verification(
         let mut samples = rich.samples;
         if analyze {
             if matches!(
-                ctx.db_client.pool.db_type(),
+                ctx.db_client.db_type,
                 crate::config::DbType::MariaDB
             ) {
                 notes.push("MariaDB 不支持 EXPLAIN ANALYZE；复测仅使用 EXPLAIN".into());

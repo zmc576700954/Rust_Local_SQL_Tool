@@ -114,6 +114,7 @@ async fn perf_explain_analyze_timeout_degrades_and_audits() {
     let client = DbClient::new_default(&url)
         .await
         .expect("创建 DbClient 失败");
+    let mariadb = matches!(client.db_type, core_lib::config::DbType::MariaDB);
     let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
         .with_audit(Some(audit.clone()), Some("perf-timeout-session".into()));
     let registry = core_lib::ops::registry::ScenarioRegistry::builtin();
@@ -134,33 +135,57 @@ async fn perf_explain_analyze_timeout_degrades_and_audits() {
     println!("\n=== 超时降级 ===");
     println!("degraded={:?}", perf.degraded_reasons);
     println!("notes={:?}", perf.notes);
-    assert!(
-        perf
-            .degraded_reasons
+    if mariadb {
+        // MariaDB 不支持 EXPLAIN ANALYZE：必须显式降级，不产生实际耗时，也不伪造超时审计。
+        assert!(
+            perf
+                .degraded_reasons
+                .iter()
+                .any(|r| r.starts_with("explain_analyze_unsupported")),
+            "MariaDB 应显式声明不支持 EXPLAIN ANALYZE: {:?}",
+            perf.degraded_reasons
+        );
+        assert!(perf.actual_latency_ms.is_none());
+        assert!(perf
+            .notes
             .iter()
-            .any(|r| r.starts_with("explain_analyze_timeout")),
-        "应按超时降级: {:?}",
-        perf.degraded_reasons
-    );
-    assert!(perf.actual_latency_ms.is_none());
-    assert!(perf.notes.iter().any(|n| n.contains("max_execution_time")));
+            .any(|n| n.contains("MariaDB 不支持 EXPLAIN ANALYZE")));
+        let records = audit.recent(20).expect("读取审计失败");
+        assert!(
+            !records
+                .iter()
+                .any(|r| r.event == "perf.explain_analyze" && r.outcome == "timeout"),
+            "MariaDB 不应产生 EXPLAIN ANALYZE 超时审计"
+        );
+    } else {
+        assert!(
+            perf
+                .degraded_reasons
+                .iter()
+                .any(|r| r.starts_with("explain_analyze_timeout")),
+            "应按超时降级: {:?}",
+            perf.degraded_reasons
+        );
+        assert!(perf.actual_latency_ms.is_none());
+        assert!(perf.notes.iter().any(|n| n.contains("max_execution_time")));
 
-    let records = audit.recent(20).expect("读取审计失败");
-    let timeout: Vec<_> = records
-        .iter()
-        .filter(|r| r.event == "perf.explain_analyze" && r.outcome == "timeout")
-        .collect();
-    println!("超时审计条数: {}", timeout.len());
-    for record in &timeout {
-        println!("audit: {}", record.detail);
-    }
-    assert!(
-        timeout
+        let records = audit.recent(20).expect("读取审计失败");
+        let timeout: Vec<_> = records
             .iter()
-            .any(|r| r.detail["session_id"] == "perf-timeout-session"
-                && r.detail["timeout_ms"] == 500),
-        "审计缺少超时记录"
-    );
+            .filter(|r| r.event == "perf.explain_analyze" && r.outcome == "timeout")
+            .collect();
+        println!("超时审计条数: {}", timeout.len());
+        for record in &timeout {
+            println!("audit: {}", record.detail);
+        }
+        assert!(
+            timeout
+                .iter()
+                .any(|r| r.detail["session_id"] == "perf-timeout-session"
+                    && r.detail["timeout_ms"] == 500),
+            "审计缺少超时记录"
+        );
+    }
     exec(&mut conn, "DROP TABLE IF EXISTS perf_timeout_demo").await;
     let _ = std::fs::remove_file(&audit_path);
 }
@@ -194,6 +219,7 @@ async fn perf_diagnostics_real_mysql_flow() {
     let client = DbClient::new_default(&url)
         .await
         .expect("创建 DbClient 失败");
+    let mariadb = matches!(client.db_type, core_lib::config::DbType::MariaDB);
     let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
         .with_audit(Some(audit.clone()), Some("perf-e2e-session".into()));
 
@@ -210,15 +236,32 @@ async fn perf_diagnostics_real_mysql_flow() {
         "统计窗口: {}",
         scan.window.as_ref().map(|w| w.note.clone()).unwrap_or_else(|| "-".into())
     );
-    let candidate = scan
-        .candidates
-        .iter()
-        .find(|c| c.digest_text.contains(TABLE))
-        .expect("未在 P_S 候选中找到目标语句");
-    println!("候选摘要: {}", candidate.summary);
-    assert!(scan.available, "performance_schema 应可用: {:?}", scan.degraded_reasons);
-    assert!(scan.window.as_ref().map(|w| w.cumulative).unwrap_or(false));
-    assert!(candidate.scan_flag.unwrap_or(false), "P_S 应标记疑似扫描: {candidate:?}");
+    if mariadb {
+        // MariaDB 默认关闭 performance_schema：必须显式降级并给出可读原因。
+        assert!(
+            !scan.available,
+            "MariaDB 未开启 performance_schema 时应降级: {:?}",
+            scan.degraded_reasons
+        );
+        assert!(
+            scan
+                .degraded_reasons
+                .iter()
+                .any(|r| r.starts_with("performance_schema_disabled")),
+            "降级原因应点名 performance_schema: {:?}",
+            scan.degraded_reasons
+        );
+    } else {
+        let candidate = scan
+            .candidates
+            .iter()
+            .find(|c| c.digest_text.contains(TABLE))
+            .expect("未在 P_S 候选中找到目标语句");
+        println!("候选摘要: {}", candidate.summary);
+        assert!(scan.available, "performance_schema 应可用: {:?}", scan.degraded_reasons);
+        assert!(scan.window.as_ref().map(|w| w.cumulative).unwrap_or(false));
+        assert!(candidate.scan_flag.unwrap_or(false), "P_S 应标记疑似扫描: {candidate:?}");
+    }
 
     // 2) 证据采集（真实执行 EXPLAIN ANALYZE）。
     let input = serde_json::to_value(PerfDiagnosticsInput {
@@ -248,7 +291,23 @@ async fn perf_diagnostics_real_mysql_flow() {
     }
     println!("实际耗时: {:?} ms", perf.actual_latency_ms);
     println!("降级原因: {:?}", perf.degraded_reasons);
-    assert!(perf.actual_latency_ms.is_some(), "EXPLAIN ANALYZE 应成功: {:?}", perf.degraded_reasons);
+    if mariadb {
+        // MariaDB 不支持 EXPLAIN ANALYZE：必须声明降级，且不能伪造实际耗时。
+        assert!(
+            perf
+                .degraded_reasons
+                .iter()
+                .any(|r| r.starts_with("explain_analyze_unsupported")),
+            "MariaDB 应显式声明不支持 EXPLAIN ANALYZE: {:?}",
+            perf.degraded_reasons
+        );
+        assert!(
+            perf.actual_latency_ms.is_none(),
+            "MariaDB 不应产生 EXPLAIN ANALYZE 实际耗时"
+        );
+    } else {
+        assert!(perf.actual_latency_ms.is_some(), "EXPLAIN ANALYZE 应成功: {:?}", perf.degraded_reasons);
+    }
     assert!(perf.row_estimate.as_ref().map(|r| r.trusted).unwrap_or(false));
 
     // 3) 方案：必须只有 CreateIndex/AnalyzeTable。
@@ -279,6 +338,21 @@ async fn perf_diagnostics_real_mysql_flow() {
         .all(|a| matches!(a, ActionSpec::CreateIndex { .. } | ActionSpec::AnalyzeTable { .. })));
 
     let action_ids: Vec<String> = plan.actions.iter().map(|a| a.action_id()).collect();
+
+    if mariadb {
+        // MariaDB 没有 EXPLAIN ANALYZE，复测与审计均无法按 MySQL 口径断言；
+        // 这里只要求降级是显式的，不能出现伪造的“已执行”审计。
+        let records = audit.recent(50).expect("读取审计失败");
+        assert!(
+            !records
+                .iter()
+                .any(|r| r.event == "perf.explain_analyze" && r.outcome == "executed"),
+            "MariaDB 不应产生 EXPLAIN ANALYZE 已执行审计"
+        );
+        exec(&mut conn, &format!("DROP TABLE IF EXISTS {TABLE}")).await;
+        let _ = std::fs::remove_file(&audit_path);
+        return;
+    }
 
     // 4) dry-run → 审批 → 执行 → 复测。
     let dry = executor::dry_run(&ctx, &plan, &action_ids, &policy, &audit)
