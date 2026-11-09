@@ -391,6 +391,7 @@ pub async fn export_job_start(
                     // 失败时不保留半成品文件，避免被误当作完整导出。
                     let _ = tokio::fs::remove_file(&data_path).await;
                 }
+                tracing::warn!(job_id = %job_id_clone, "导出任务失败: {e}");
                 update_tool_job(&state_clone, &job_id_clone, |j| {
                     j.status = ToolJobStatus::Error;
                     j.elapsed_ms = Some(elapsed_ms);
@@ -499,6 +500,9 @@ pub async fn import_job_start(
                             "import failed".to_string()
                         }
                     });
+                if !success {
+                    tracing::warn!(job_id = %job_id_clone, "导入任务失败: {message}");
+                }
                 update_tool_job(&state_clone, &job_id_clone, |j| {
                     j.status = if success {
                         ToolJobStatus::Completed
@@ -514,6 +518,7 @@ pub async fn import_job_start(
             }
             Err(e) => {
                 let elapsed_ms = t_job.elapsed().as_millis();
+                tracing::warn!(job_id = %job_id_clone, "导入任务失败: {e}");
                 update_tool_job(&state_clone, &job_id_clone, |j| {
                     j.status = ToolJobStatus::Error;
                     j.elapsed_ms = Some(elapsed_ms);
@@ -618,6 +623,9 @@ pub async fn import_sql_job_start(
                             "import sql failed".to_string()
                         }
                     });
+                if !success {
+                    tracing::warn!(job_id = %job_id_clone, "SQL 导入任务失败: {message}");
+                }
                 update_tool_job(&state_clone, &job_id_clone, |j| {
                     j.status = if success {
                         ToolJobStatus::Completed
@@ -633,6 +641,7 @@ pub async fn import_sql_job_start(
             }
             Err(e) => {
                 let elapsed_ms = t_job.elapsed().as_millis();
+                tracing::warn!(job_id = %job_id_clone, "SQL 导入任务失败: {e}");
                 update_tool_job(&state_clone, &job_id_clone, |j| {
                     j.status = ToolJobStatus::Error;
                     j.elapsed_ms = Some(elapsed_ms);

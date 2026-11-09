@@ -47,6 +47,50 @@ fn is_host_char(value: char) -> bool {
 
 const SECRET_KEYS: [&str; 6] = ["password", "passwd", "pwd", "token", "secret", "authorization"];
 
+/// 删除标记：删除敏感片段后先留下标记，最后统一清理悬空标签与标点。
+const CUT: char = '\u{1f}';
+
+/// 常见“标签”词：删除其后的连接串/凭据后，这些词会变成断头句。
+const DANGLING_LABELS: [&str; 31] = [
+    "connection string",
+    "authorization",
+    "connection",
+    "hostname",
+    "username",
+    "password",
+    "passwd",
+    "secret",
+    "server",
+    "endpoint",
+    "address",
+    "token",
+    "host",
+    "user",
+    "pwd",
+    "url",
+    "uri",
+    "dsn",
+    "addr",
+    "数据库地址",
+    "连接串",
+    "连接地址",
+    "服务地址",
+    "连接",
+    "地址",
+    "主机",
+    "参数",
+    "密码",
+    "口令",
+    "用户名",
+    "账号",
+];
+
+fn push_with_cut(output: &mut String, head: &[char], tail: &[char]) {
+    output.extend(head);
+    output.push(CUT);
+    output.extend(tail);
+}
+
 /// 扫描并删除形如 `scheme://...` 的整段 URI。
 fn remove_uri_tokens(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
@@ -63,8 +107,7 @@ fn remove_uri_tokens(input: &str) -> String {
                     end += 1;
                 }
                 let mut next = String::new();
-                next.extend(&chars[..start]);
-                next.extend(&chars[end..]);
+                push_with_cut(&mut next, &chars[..start], &chars[end..]);
                 return remove_uri_tokens(&next);
             }
         }
@@ -90,8 +133,7 @@ fn remove_userinfo(input: &str) -> String {
                     end += 1;
                 }
                 let mut next = String::new();
-                next.extend(&chars[..start]);
-                next.extend(&chars[end..]);
+                push_with_cut(&mut next, &chars[..start], &chars[end..]);
                 return remove_userinfo(&next);
             }
         }
@@ -128,8 +170,7 @@ fn remove_at_host_port(input: &str) -> String {
                     end += 1;
                 }
                 let mut next = String::new();
-                next.extend(&chars[..start]);
-                next.extend(&chars[end..]);
+                push_with_cut(&mut next, &chars[..start], &chars[end..]);
                 return remove_at_host_port(&next);
             }
         }
@@ -183,8 +224,7 @@ fn remove_secret_assignments(input: &str) -> String {
                             }
                         }
                         let mut next = String::new();
-                        next.extend(&chars[..index]);
-                        next.extend(&chars[end..]);
+                        push_with_cut(&mut next, &chars[..index], &chars[end..]);
                         return remove_secret_assignments(&next);
                     }
                 }
@@ -195,18 +235,243 @@ fn remove_secret_assignments(input: &str) -> String {
     input.to_string()
 }
 
+/// 删除裸的 `host:port`（驱动错误里经常不带 `@`）。
+fn remove_bare_host_port(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != ':' {
+            index += 1;
+            continue;
+        }
+        let mut port_end = index + 1;
+        while port_end < chars.len() && chars[port_end].is_ascii_digit() {
+            port_end += 1;
+        }
+        let port_len = port_end - index - 1;
+        if !(2..=5).contains(&port_len) {
+            index += 1;
+            continue;
+        }
+        let mut start = index;
+        while start > 0 && is_host_char(chars[start - 1]) {
+            start -= 1;
+        }
+        if start == index {
+            index += 1;
+            continue;
+        }
+        let host: String = chars[start..index].iter().collect();
+        let looks_like_host = host.contains('.')
+            || host.eq_ignore_ascii_case("localhost")
+            || host.chars().any(|c| c.is_ascii_alphabetic());
+        let before_ok = start == 0 || is_delimiter(chars[start - 1]);
+        let after_ok = port_end == chars.len() || is_delimiter(chars[port_end]);
+        if !(looks_like_host && before_ok && after_ok) {
+            index += 1;
+            continue;
+        }
+        let mut next = String::new();
+        push_with_cut(&mut next, &chars[..start], &chars[port_end..]);
+        return remove_bare_host_port(&next);
+    }
+    input.to_string()
+}
+
+fn separator(value: char) -> bool {
+    matches!(value, ';' | ',' | ':' | '；' | '，' | '、')
+}
+
+fn opening_bracket(value: char) -> bool {
+    matches!(value, '(' | '[' | '{' | '（' | '【' | '《')
+}
+
+fn closing_bracket(value: char) -> bool {
+    matches!(value, ')' | ']' | '}' | '）' | '】' | '》')
+}
+
+fn trim_end_with<F: Fn(char) -> bool>(chars: &[char], predicate: F) -> usize {
+    let mut end = chars.len();
+    while end > 0 && predicate(chars[end - 1]) {
+        end -= 1;
+    }
+    end
+}
+
+/// 找到紧邻删除标记之前的标签词，返回应删除的起始位置。
+fn dangling_label_start(chars: &[char], cut: usize) -> Option<usize> {
+    let mut end = cut;
+    while end > 0 && chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    if end > 0 && matches!(chars[end - 1], ':' | '=' | '：' | '＝') {
+        end -= 1;
+        while end > 0 && chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+    }
+    for label in DANGLING_LABELS {
+        let label_chars: Vec<char> = label.chars().collect();
+        if label_chars.len() > end {
+            continue;
+        }
+        let start = end - label_chars.len();
+        let matches = chars[start..end]
+            .iter()
+            .zip(&label_chars)
+            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase());
+        if !matches {
+            continue;
+        }
+        let boundary = start == 0
+            || is_delimiter(chars[start - 1])
+            || separator(chars[start - 1])
+            || opening_bracket(chars[start - 1]);
+        if boundary {
+            return Some(start);
+        }
+    }
+    None
+}
+
+/// 删除切点后残留的悬空标签、空括号与多余标点。
+fn tidy_cut_markers(input: &str) -> String {
+    let mut chars: Vec<char> = input.chars().collect();
+
+    // 1. 删除紧挨切点的标签词（DSN、参数：、password= 等）。
+    loop {
+        let position = chars.iter().position(|c| *c == CUT);
+        let Some(cut) = position else { break };
+        let start = dangling_label_start(&chars, cut).unwrap_or(cut);
+        chars.drain(start..=cut);
+    }
+
+    // 2. 切点变成空格，避免把前后单词粘在一起。
+    for value in &mut chars {
+        if *value == CUT {
+            *value = ' ';
+        }
+    }
+
+    // 3. 去掉空括号与括号内只剩标点的情况。
+    loop {
+        let mut changed = false;
+        let mut index = 0;
+        while index < chars.len() {
+            if opening_bracket(chars[index]) {
+                let mut end = index + 1;
+                while end < chars.len() && chars[end].is_whitespace() {
+                    end += 1;
+                }
+                let mut close = end;
+                while close < chars.len() && separator(chars[close]) {
+                    close += 1;
+                }
+                if close < chars.len() && closing_bracket(chars[close]) {
+                    chars.drain(index..=close);
+                    changed = true;
+                    continue;
+                }
+                if end < chars.len() && closing_bracket(chars[end]) {
+                    chars.drain(index..=end);
+                    changed = true;
+                    continue;
+                }
+            }
+            index += 1;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // 4. 标点贴括号/句号时视为空段，去掉标点。
+    let mut index = 0;
+    while index < chars.len() {
+        if separator(chars[index]) {
+            let mut next = index + 1;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            let before_open = index > 0
+                && (opening_bracket(chars[index - 1])
+                    || chars[..index]
+                        .iter()
+                        .rev()
+                        .find(|c| !c.is_whitespace())
+                        .map(|c| opening_bracket(*c))
+                        .unwrap_or(false));
+            let before_close = next < chars.len() && closing_bracket(chars[next]);
+            let before_end = next >= chars.len();
+            let after_sentence = next < chars.len() && matches!(chars[next], '。' | '.');
+            if before_open || before_close || before_end || after_sentence {
+                chars.remove(index);
+                continue;
+            }
+        }
+        index += 1;
+    }
+
+    // 5. 连续标点只保留一个，但不改动正常的“逗号+空格”。
+    let mut index = 0;
+    while index < chars.len() {
+        if separator(chars[index]) {
+            let mut probe = index + 1;
+            while probe < chars.len() && chars[probe].is_whitespace() {
+                probe += 1;
+            }
+            if probe < chars.len() && separator(chars[probe]) {
+                let mut end = probe + 1;
+                while end < chars.len() && (chars[end].is_whitespace() || separator(chars[end])) {
+                    end += 1;
+                }
+                chars.drain(index + 1..end);
+            }
+        }
+        index += 1;
+    }
+
+    // 6. 合并空格（保留换行）。
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == ' ' || chars[index] == '\t' {
+            let mut end = index + 1;
+            while end < chars.len() && (chars[end] == ' ' || chars[end] == '\t') {
+                end += 1;
+            }
+            if end > index + 1 {
+                chars.drain(index + 1..end);
+            }
+        }
+        index += 1;
+    }
+
+    let start = chars
+        .iter()
+        .position(|c| !c.is_whitespace() && !separator(*c))
+        .unwrap_or(chars.len());
+    let end = trim_end_with(&chars, |c| c.is_whitespace() || separator(c));
+    if start >= end {
+        return String::new();
+    }
+    chars[start..end].iter().collect::<String>()
+}
+
 /// 强制清洗文本。返回 `(清洗后的文本, 是否发生变化)`。
 pub fn scrub_text(input: &str, secrets: &[String]) -> (String, bool) {
     let mut output = input.to_string();
+    let cut = CUT.to_string();
     for secret in secrets {
         if !secret.is_empty() {
-            output = output.replace(secret.as_str(), "");
+            output = output.replace(secret.as_str(), &cut);
         }
     }
     output = remove_uri_tokens(&output);
     output = remove_userinfo(&output);
     output = remove_at_host_port(&output);
     output = remove_secret_assignments(&output);
+    output = remove_bare_host_port(&output);
+    output = tidy_cut_markers(&output);
     let changed = output != input;
     (output.trim().to_string(), changed)
 }
@@ -486,5 +751,42 @@ mod tests {
         assert!(scrub_diff(&mut diff, &[]));
         let text = serde_json::to_string(&diff).unwrap();
         assert!(!contains_sensitive_shape(&text), "still sensitive: {text}");
+    }
+
+    #[test]
+    fn removes_dangling_label_and_separator() {
+        let raw = "索引 idx_created 与 idx_created_at 重复；DSN mysql://root:pass@127.0.0.1:3306/shop?password=plain123";
+        let (clean, changed) = scrub_text(raw, &[]);
+        assert!(changed);
+        assert_eq!(clean, "索引 idx_created 与 idx_created_at 重复");
+        assert!(!clean.contains("DSN"));
+        assert!(!clean.ends_with('；'));
+    }
+
+    #[test]
+    fn removes_empty_parameter_segment() {
+        let raw = "采集失败（参数：mysql://root:pass@127.0.0.1:3306/shop）";
+        let (clean, _) = scrub_text(raw, &[]);
+        assert_eq!(clean, "采集失败");
+        assert!(!clean.contains("参数"));
+        assert!(!clean.contains("（）"));
+    }
+
+    #[test]
+    fn removes_bare_host_port_but_keeps_clock_time() {
+        let (clean, _) = scrub_text("连接 10.0.0.5:5432 失败", &[]);
+        assert!(!clean.contains("10.0.0.5:5432"), "{clean}");
+
+        let (clock, changed) = scrub_text("告警时间 12:30 触发", &[]);
+        assert!(!changed, "clock should be untouched: {clock}");
+        assert!(clock.contains("12:30"));
+    }
+
+    #[test]
+    fn keeps_normal_punctuation_and_spacing() {
+        let raw = "库 shop 的表 orders，索引 idx_created 连续 3 次为 0。";
+        let (clean, changed) = scrub_text(raw, &[]);
+        assert!(!changed, "should not change: {clean}");
+        assert_eq!(clean, raw);
     }
 }

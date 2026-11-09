@@ -480,6 +480,23 @@ mod tests {
     }
 
     #[test]
+    fn alert_message_has_no_dangling_label_after_scrub() {
+        let polluted =
+            "索引 idx_created 与 idx_created_at 重复；DSN mysql://root:rootpass@127.0.0.1:3306/shop?password=plain123";
+        let notification = AlertNotification {
+            kind: AlertEventKind::Raised,
+            alert: alert(polluted, "orders.idx_created"),
+        };
+        let content = build_content(&notification, &secrets());
+        println!("ALERT_SUMMARY_BEGIN\n{}\nALERT_SUMMARY_END", content.text);
+        assert!(content
+            .text
+            .contains("证据摘要: 索引 idx_created 与 idx_created_at 重复\n"));
+        assert!(!content.text.contains("DSN"));
+        assert!(!content.text.contains("；；"));
+    }
+
+    #[test]
     fn build_content_flags_redaction_and_keeps_names() {
         use crate::ops::inspection::redact::contains_sensitive_shape;
 

@@ -81,8 +81,10 @@ impl BackendRuntime {
     }
 
     fn write_log(&self, stream: &str, line: &str) {
+        // 写前清洗：sidecar 输出的驱动/网络错误可能带 DSN 或 host:port。
+        let (clean, _) = core_lib::ops::inspection::redact::scrub_text(line, &[]);
         let entry = format!(
-            "{} [{stream}] {line}",
+            "{} [{stream}] {clean}",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
         );
         if let Ok(mut guard) = self.inner.log_file.lock() {
@@ -246,6 +248,23 @@ fn spawn_watchdog(app: AppHandle, runtime: BackendRuntime) {
     });
 }
 
+fn open_log_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
 fn start_sidecar(app: &AppHandle, runtime: &BackendRuntime) {
     let path = match sidecar_path() {
         Ok(path) => path,
@@ -267,12 +286,7 @@ fn start_sidecar(app: &AppHandle, runtime: &BackendRuntime) {
             return;
         }
     }
-    match OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&runtime.inner.log_path)
-    {
+    match open_log_file(&runtime.inner.log_path) {
         Ok(file) => {
             if let Ok(mut guard) = runtime.inner.log_file.lock() {
                 *guard = Some(file);
@@ -441,5 +455,49 @@ mod tests {
         assert_eq!(parse_ready_base_url("INFO Server listening on http://127.0.0.1:3000"), None);
         assert_eq!(parse_ready_base_url("SIDECAR_READY http://0.0.0.0:3000"), None);
         assert_eq!(parse_ready_base_url("SIDECAR_READY"), None);
+    }
+
+    #[test]
+    fn sidecar_log_is_private_and_scrubbed() {
+        use super::{open_log_file, BackendRuntime};
+
+        let path = std::env::temp_dir().join(format!("sidecar-log-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        drop(open_log_file(&path).unwrap());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "log file must be owner-only");
+        }
+
+        let runtime = BackendRuntime::new(path.clone());
+        *runtime.inner.log_file.lock().unwrap() = Some(open_log_file(&path).unwrap());
+        runtime.write_log(
+            "stderr",
+            "Failed to connect: mysql://root:rootpass@127.0.0.1:3306/shop?password=plain123",
+        );
+        runtime.write_log("stderr", "导入失败: postgres://ops:secret@10.0.0.5:5432/app");
+        drop(runtime);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        println!("SIDECAR_LOG_BEGIN\n{content}\nSIDECAR_LOG_END");
+        assert!(
+            !core_lib::ops::inspection::redact::contains_sensitive_shape(&content),
+            "log still sensitive: {content}"
+        );
+        for shape in [
+            "mysql://",
+            "postgres://",
+            "password=",
+            "@127.0.0.1:3306",
+            "@10.0.0.5:5432",
+        ] {
+            assert!(!content.contains(shape), "log leaked {shape}: {content}");
+        }
+        assert!(content.contains("Failed to connect"));
+        assert!(content.contains("导入失败"));
+        let _ = std::fs::remove_file(&path);
     }
 }

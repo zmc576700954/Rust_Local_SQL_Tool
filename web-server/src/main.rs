@@ -9,6 +9,7 @@ mod import_sql_integration_mysql;
 mod import_sql_integration_pg;
 mod inspection_handlers;
 mod inspection_scheduler;
+mod log_scrub;
 mod mysql_codec;
 mod ops_handlers;
 mod routes;
@@ -1237,7 +1238,9 @@ pub(crate) async fn get_or_open_transaction_session(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .event_format(log_scrub::ScrubbingFormat::default())
+        .init();
     tracing::info!("Starting Local AI SQL Assistant Web Server...");
 
     let config = AppConfig::load().await.unwrap_or_default().normalize();
