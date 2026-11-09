@@ -236,6 +236,10 @@ pub fn mysql_statement_causes_implicit_commit(sql: &str) -> bool {
         | "UNINSTALL" | "LOAD" | "CHANGE" | "PURGE" | "SHUTDOWN" | "RESTART" | "KILL" => true,
         // 存储过程内部可能自带 COMMIT。
         "CALL" => true,
+        // 动态 SQL：PREPARE/EXECUTE 里的语句文本无法静态识别，可能藏着 DDL 或
+        // COMMIT，因此一律不包事务。DEALLOCATE 与它们成对出现，同样按不安全处理。
+        // 注意这条规则只用于 MySQL 分支；PostgreSQL 的 PREPARE/EXECUTE 在事务内合法。
+        "PREPARE" | "EXECUTE" | "DEALLOCATE" => true,
         // SET autocommit / SET PASSWORD 会隐式提交；其余 SET 视为安全。
         "SET" => tokens.iter().any(|t| {
             let ident = t.split('=').next().unwrap_or("").trim_end_matches(';');
@@ -247,6 +251,18 @@ pub fn mysql_statement_causes_implicit_commit(sql: &str) -> bool {
             bare == "AUTOCOMMIT" || bare == "PASSWORD"
         }),
         _ => false,
+    }
+}
+
+/// 若语句是 MySQL 动态 SQL 命令，返回其类别（PREPARE / EXECUTE / DEALLOCATE）。
+///
+/// 用于在「未开事务」的原因里点明具体语句，并说明动态 SQL 的内容无法静态识别。
+pub fn mysql_dynamic_sql_kind(sql: &str) -> Option<&'static str> {
+    match leading_tokens(sql).first().map(String::as_str)? {
+        "PREPARE" => Some("PREPARE"),
+        "EXECUTE" => Some("EXECUTE"),
+        "DEALLOCATE" => Some("DEALLOCATE"),
+        _ => None,
     }
 }
 
@@ -1541,6 +1557,54 @@ mod tests {
             assert!(
                 mysql_statement_causes_implicit_commit(sql),
                 "应判定为隐式提交：{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_dynamic_sql_is_never_transactional() {
+        for sql in [
+            "PREPARE stmt FROM 'CREATE TABLE t (id int)'",
+            "EXECUTE stmt",
+            "DEALLOCATE PREPARE stmt",
+            "-- note\nEXECUTE stmt",
+            "  prepare stmt from 'DROP TABLE t'",
+        ] {
+            assert!(
+                mysql_statement_causes_implicit_commit(sql),
+                "动态 SQL 应判定为不安全：{sql}"
+            );
+        }
+        assert_eq!(
+            mysql_dynamic_sql_kind("EXECUTE stmt"),
+            Some("EXECUTE")
+        );
+        assert_eq!(
+            mysql_dynamic_sql_kind("PREPARE stmt FROM 'SELECT 1'"),
+            Some("PREPARE")
+        );
+        assert_eq!(mysql_dynamic_sql_kind("DEALLOCATE PREPARE stmt"), Some("DEALLOCATE"));
+        assert_eq!(mysql_dynamic_sql_kind("INSERT INTO t VALUES (1)"), None);
+
+        // 纯 DML 仍安全
+        assert!(!mysql_statement_causes_implicit_commit(
+            "INSERT INTO t VALUES (1)"
+        ));
+        assert!(!mysql_statement_causes_implicit_commit(
+            "SELECT * FROM t"
+        ));
+        assert!(mysql_dynamic_sql_kind("SELECT 'PREPARE x'").is_none());
+
+        // PG 路径不受影响：PREPARE/EXECUTE 在事务内合法，不应被前置拒绝。
+        for sql in [
+            "PREPARE p (int) AS SELECT $1",
+            "EXECUTE p (1)",
+            "DEALLOCATE p",
+        ] {
+            assert_eq!(
+                pg_non_transactional_statement_kind(sql),
+                None,
+                "PG 不应拒绝：{sql}"
             );
         }
     }

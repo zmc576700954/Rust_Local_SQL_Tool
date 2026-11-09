@@ -3508,10 +3508,16 @@ async fn run_import_script_non_atomic(
     let total = statements.len();
     let engine = engine_label(db_type);
     let no_tx_reason = implicit_commit_statement.map(|s| {
-        format!(
-            "脚本包含会隐式提交的语句（{}），因此未开启事务，已生效的部分无法自动回滚。",
-            s
-        )
+        match core_lib::sql_util::mysql_dynamic_sql_kind(s) {
+            Some(kind) => format!(
+                "脚本包含 {} 语句（{}）：动态 SQL 内的语句文本无法静态识别，可能包含隐式提交的 DDL 或 COMMIT，因此未开启事务，已生效的部分无法自动回滚。",
+                kind, s
+            ),
+            None => format!(
+                "脚本包含会隐式提交的语句（{}），因此未开启事务，已生效的部分无法自动回滚。",
+                s
+            ),
+        }
     });
     let mut entries: Vec<serde_json::Value> = Vec::with_capacity(total);
     let mut executed = 0u64;
