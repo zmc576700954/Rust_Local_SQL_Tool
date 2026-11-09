@@ -3269,7 +3269,9 @@ pub async fn run_import_sql_job(
             state,
             job_id,
             &db_client.db_type,
-            mysql_implicit_commit.as_ref().map(|(_, preview)| preview.as_str()),
+            mysql_implicit_commit
+                .as_ref()
+                .map(|(index, preview)| (*index, preview.as_str())),
         )
         .await
     }
@@ -3503,19 +3505,19 @@ async fn run_import_script_non_atomic(
     state: &AppState,
     job_id: &str,
     db_type: &DbType,
-    implicit_commit_statement: Option<&str>,
+    implicit_commit: Option<(usize, &str)>,
 ) -> Result<serde_json::Value, AppError> {
     let total = statements.len();
     let engine = engine_label(db_type);
-    let no_tx_reason = implicit_commit_statement.map(|s| {
+    let no_tx_reason = implicit_commit.map(|(index, s)| {
         match core_lib::sql_util::mysql_dynamic_sql_kind(s) {
             Some(kind) => format!(
-                "脚本包含 {} 语句（{}）：动态 SQL 内的语句文本无法静态识别，可能包含隐式提交的 DDL 或 COMMIT，因此未开启事务，已生效的部分无法自动回滚。",
-                kind, s
+                "第 {} 条语句是 {}（{}）：动态 SQL 内的语句文本无法静态识别，可能包含隐式提交的 DDL 或 COMMIT，因此未开启事务，已生效的部分无法自动回滚。",
+                index, kind, s
             ),
             None => format!(
-                "脚本包含会隐式提交的语句（{}），因此未开启事务，已生效的部分无法自动回滚。",
-                s
+                "第 {} 条语句（{}）会隐式提交，因此未开启事务，已生效的部分无法自动回滚。",
+                index, s
             ),
         }
     });

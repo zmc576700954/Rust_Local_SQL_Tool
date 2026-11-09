@@ -3,6 +3,8 @@
 mod ai_handlers;
 mod bridge;
 mod handlers;
+#[cfg(test)]
+mod import_sql_integration_mysql;
 mod inspection_handlers;
 mod inspection_scheduler;
 mod mysql_codec;
