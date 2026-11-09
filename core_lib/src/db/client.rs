@@ -231,6 +231,17 @@ fn effective_pool_limits(pool_config: &PoolConfig, has_tunnel: bool) -> (u32, u3
     }
 }
 
+/// mysql:// 连接的引擎类型纠偏：服务端自报 MariaDB 时按 MariaDB 处理。
+fn resolve_mysql_flavor(declared: &DbType, server_version: &str) -> DbType {
+    if matches!(declared, DbType::MySQL)
+        && server_version.to_ascii_lowercase().contains("mariadb")
+    {
+        DbType::MariaDB
+    } else {
+        declared.clone()
+    }
+}
+
 fn parse_mysql_ssl_mode(mode: &str) -> Option<sqlx::mysql::MySqlSslMode> {
     use sqlx::mysql::MySqlSslMode;
     match mode.to_ascii_lowercase().as_str() {
@@ -367,9 +378,29 @@ impl DbClient {
             other => return Err(DbError::Unsupported(other.display_name().into())),
         };
 
+        // mysql:// 既可能连 MySQL 也可能连 MariaDB，而两者在 mysql.user 列、
+        // 会话超时变量、EXPLAIN ANALYZE 支持度上并不相同。这里以服务端版本为准
+        // 修正一次引擎类型，避免 MariaDB 被按 MySQL 处理。
+        let resolved_type = if matches!(db_type, DbType::MySQL) {
+            match &pool {
+                DbPool::MySQL(mysql_pool) => {
+                    let version = sqlx::query_scalar::<_, String>("SELECT VERSION()")
+                        .fetch_one(mysql_pool)
+                        .await;
+                    match version {
+                        Ok(version) => resolve_mysql_flavor(db_type, &version),
+                        Err(_) => db_type.clone(),
+                    }
+                }
+                _ => db_type.clone(),
+            }
+        } else {
+            db_type.clone()
+        };
+
         Ok(Self {
             pool,
-            db_type: db_type.clone(),
+            db_type: resolved_type,
             tunnel: tunnel.map(Arc::new),
         })
     }
@@ -465,6 +496,26 @@ mod tests {
         assert_eq!(DbType::MySQL.display_name(), "MySQL");
         assert_eq!(DbType::PostgreSQL.display_name(), "PostgreSQL");
         assert_eq!(DbType::SQLite.display_name(), "SQLite");
+    }
+
+    #[test]
+    fn mysql_flavor_detected_from_server_version() {
+        assert_eq!(
+            resolve_mysql_flavor(&DbType::MySQL, "11.8.9-MariaDB-ubu2404"),
+            DbType::MariaDB
+        );
+        assert_eq!(
+            resolve_mysql_flavor(&DbType::MySQL, "8.0.46"),
+            DbType::MySQL
+        );
+        assert_eq!(
+            resolve_mysql_flavor(&DbType::MariaDB, "8.0.46"),
+            DbType::MariaDB
+        );
+        assert_eq!(
+            resolve_mysql_flavor(&DbType::PostgreSQL, "16.15"),
+            DbType::PostgreSQL
+        );
     }
 
     #[test]

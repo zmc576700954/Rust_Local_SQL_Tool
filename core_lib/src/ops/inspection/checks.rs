@@ -1249,6 +1249,15 @@ async fn check_unused_indexes(
     current_at: i64,
     active_alert_keys: &[String],
 ) -> CheckResult {
+    // MariaDB 默认关闭 performance_schema，索引使用统计整表不可用；
+    // 此时必须显式降级，不能静默返回“没有未使用索引”。
+    if !performance_schema_enabled(ctx).await {
+        return skipped(
+            descriptor,
+            "performance_schema 未开启，无法读取索引使用统计",
+            started,
+        );
+    }
     let schema = schema_literal(ctx);
     let sql = format!(
         "SELECT OBJECT_SCHEMA, OBJECT_NAME, INDEX_NAME, COUNT_STAR, COUNT_READ, COUNT_WRITE \
@@ -1567,16 +1576,35 @@ async fn check_passwordless_accounts(
     finish(descriptor, evidence, checked, started)
 }
 
+async fn performance_schema_enabled(ctx: &OpsContext) -> bool {
+    fetch_read_only(ctx, "SELECT @@performance_schema AS ps")
+        .await
+        .ok()
+        .and_then(|rows| rows.first().and_then(|row| uint_value(row, "ps")))
+        .map(|value| value != 0)
+        .unwrap_or(true)
+}
+
 async fn check_inactive_accounts(
     ctx: &OpsContext,
     thresholds: &InspectionThresholds,
     descriptor: &CheckDescriptor,
     started: Instant,
 ) -> CheckResult {
+    // 先校验 mysql.user 可读性：权限问题的原因更具体，不能被 P_S 降级信息掩盖。
     let accounts = match load_accounts(ctx).await {
         Ok(accounts) => accounts,
         Err(err) => return skipped(descriptor, err, started),
     };
+    // MariaDB 等实例可能关闭 performance_schema；此时 accounts/global_status
+    // 读不到真实数据，必须显式降级，不能按 0 天 uptime 误判为“窗口不足”。
+    if !performance_schema_enabled(ctx).await {
+        return skipped(
+            descriptor,
+            "performance_schema 未开启，无法读取 performance_schema.accounts/global_status",
+            started,
+        );
+    }
     let usage_sql = "SELECT USER, HOST, CURRENT_CONNECTIONS, TOTAL_CONNECTIONS \
          FROM performance_schema.accounts ORDER BY USER, HOST";
     let usage_rows = match fetch_read_only(ctx, usage_sql).await {

@@ -311,14 +311,34 @@ async fn inspection_against_real_mysql() {
         "冗余索引未识别 idx_a_copy: {redundant_keys:?}"
     );
 
+    let performance_schema_on = sqlx::query_scalar::<_, i64>("SELECT @@performance_schema")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0)
+        == 1;
+
     let unused = find_check(&snapshot1, "unused_index");
-    assert!(
-        evidence_keys(unused)
-            .iter()
-            .any(|key| key == "unused_demo.idx_unused"),
-        "未使用索引未识别: {:?}",
-        evidence_keys(unused)
-    );
+    if performance_schema_on {
+        assert!(
+            evidence_keys(unused)
+                .iter()
+                .any(|key| key == "unused_demo.idx_unused"),
+            "未使用索引未识别: {:?}",
+            evidence_keys(unused)
+        );
+    } else {
+        // MariaDB 默认关闭 performance_schema：必须显式降级并说明原因。
+        assert_eq!(unused.status, CheckStatus::Skipped);
+        assert!(
+            unused
+                .skipped_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("performance_schema 未开启"),
+            "禁用 performance_schema 时应给出可读降级原因: {:?}",
+            unused.skipped_reason
+        );
+    }
 
     let missing_pk = find_check(&snapshot1, "missing_primary_key");
     assert!(
@@ -351,7 +371,7 @@ async fn inspection_against_real_mysql() {
     assert!(
         evidence_keys(over)
             .iter()
-            .any(|key| key == "user:inspection_admin@%"),
+            .any(|key| key == "inspection_admin@%"),
         "高权限账号未识别: {:?}",
         evidence_keys(over)
     );
@@ -360,22 +380,28 @@ async fn inspection_against_real_mysql() {
     assert!(
         evidence_keys(nopass)
             .iter()
-            .any(|key| key == "user:inspection_nopass@%"),
+            .any(|key| key == "inspection_nopass@%"),
         "无密码账号未识别: {:?}",
         evidence_keys(nopass)
     );
 
     let inactive = find_check(&snapshot1, "inactive_account");
     assert_eq!(inactive.status, CheckStatus::Skipped);
-    assert!(
-        inactive
-            .skipped_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("低于"),
-        "长期未登录检查应说明统计窗口不足: {:?}",
-        inactive.skipped_reason
-    );
+    let inactive_reason = inactive.skipped_reason.as_deref().unwrap_or_default();
+    if performance_schema_on {
+        assert!(
+            inactive_reason.contains("低于"),
+            "长期未登录检查应说明统计窗口不足: {:?}",
+            inactive.skipped_reason
+        );
+    } else {
+        // MariaDB 默认关闭 performance_schema：必须显式说明降级原因，而不是静默跳过。
+        assert!(
+            inactive_reason.contains("performance_schema 未开启"),
+            "performance_schema 关闭时应给出可读降级原因: {:?}",
+            inactive.skipped_reason
+        );
+    }
 
     // 快照落库 + 重新打开文件确认持久化。
     let path = std::env::temp_dir().join(format!(
@@ -492,6 +518,38 @@ async fn inspection_against_real_mysql() {
     }
 
     // ── 未使用索引判定窗口真库验证 ─────────────────────────────
+    // MariaDB 默认关闭 performance_schema 时无法读取索引计数，
+    // 这里只验证“显式降级”，窗口连续性需要 P_S 可用才能验证。
+    if !performance_schema_on {
+        let degraded = run_inspection(
+            &ctx,
+            &[CHECK_UNUSED_INDEX.to_string()],
+            &thresholds,
+            "degraded",
+            &[],
+            &[],
+        )
+        .await
+        .expect("降级巡检失败");
+        let unused = find_check(&degraded, CHECK_UNUSED_INDEX);
+        assert_eq!(unused.status, CheckStatus::Skipped);
+        assert!(
+            unused
+                .skipped_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("performance_schema 未开启"),
+            "禁用 performance_schema 时应给出可读降级原因: {:?}",
+            unused.skipped_reason
+        );
+        cleanup(&mut conn).await;
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+        let _ = pool.close().await;
+        println!("\nMariaDB（performance_schema 关闭）巡检降级验证通过。");
+        return;
+    }
+
     // 用 TRUNCATE P_S 计数器模拟“所有索引 COUNT_STAR 归零”，验证：
     // 第 1/2 次只记 info，第 3 次升级 warning 并告警；uptime 回退视为重启，重置窗口且不 resolve 告警；
     // 真正使用索引（COUNT_STAR>0）后才 resolve。
