@@ -1,3 +1,5 @@
+import { scrubSensitiveText } from './utils/redact'
+
 export interface AppError {
   title: string;
   message: string;
@@ -130,12 +132,12 @@ export function formatErr(e: unknown): string {
   return `${err.title}：${err.message}\n[解决方案]：${err.solution}`;
 }
 
-export function redactSensitiveText(input: string): string {
-  return input
-    .replace(/Bearer\s+[A-Za-z0-9._-]+/g, 'Bearer ******')
-    .replace(/(api_key|apiKey)\s*[:=]\s*("?)[^"\s,)};]+(\2)/g, '$1: ******')
-    .replace(/password\s*[:=]\s*("?)[^"\s,)};]+(\1)/g, 'password: ******')
-    .replace(/:\/\/([^:/?#]+):([^@/]+)@/g, '://$1:******@')
+/**
+ * 薄封装：规则唯一实现位于 ./utils/redact，与 core_lib 的脱敏口径和共享 fixture 保持一致。
+ * 保留此导出是为了兼容既有调用点（api.ts、DataTable），不再维护第二套正则。
+ */
+export function redactSensitiveText(input: string, secrets: readonly string[] = []): string {
+  return scrubSensitiveText(input, secrets)
 }
 
 export function sanitizeForLog(e: unknown): string {

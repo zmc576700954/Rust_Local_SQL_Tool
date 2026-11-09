@@ -44,13 +44,13 @@ describe('ErrorDictionary', () => {
 
 describe('redactSensitiveText', () => {
   it('redacts Authorization/api_key/password/db url password', () => {
-    const s = 'Authorization: Bearer sk-abc api_key=kk password=pp mysql://u:p@host/db'
+    const s = 'Authorization: Bearer sk-abc\napi_key=kk password=pp mysql://u:p@host/db'
     const r = redactSensitiveText(s)
     expect(r).not.toContain('sk-abc')
     expect(r).not.toContain('api_key=kk')
     expect(r).not.toContain('password=pp')
-    expect(r).not.toContain('mysql://u:p@')
-    expect(r).toContain('Bearer ******')
-    expect(r).toContain('mysql://u:******@')
+    expect(r).not.toContain('u:p@')
+    expect(r).toContain('mysql://u@host/db')
+    expect(r).not.toContain('******')
   })
 })

@@ -839,4 +839,59 @@ mod tests {
         assert!(!changed, "should not change: {clean}");
         assert_eq!(clean, raw);
     }
+
+    #[derive(serde::Deserialize)]
+    struct RedactVector {
+        name: String,
+        input: String,
+        #[serde(default)]
+        secrets: Vec<String>,
+        must_disappear: Vec<String>,
+        must_keep: Vec<String>,
+        #[serde(default)]
+        unchanged: bool,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RedactFixture {
+        vectors: Vec<RedactVector>,
+    }
+
+    /// 与 web-ui/src/utils/redact.ts 共用同一份向量，防止两侧规则漂移。
+    #[test]
+    fn shared_fixture_vectors_match_ts_implementation() {
+        let raw = include_str!("../../../../web-ui/src/utils/__fixtures__/redact-vectors.json");
+        let fixture: RedactFixture = serde_json::from_str(raw).expect("vector fixture should parse");
+        assert!(!fixture.vectors.is_empty(), "fixture should not be empty");
+        for vector in fixture.vectors {
+            let (clean, changed) = scrub_text(&vector.input, &vector.secrets);
+            if vector.unchanged {
+                assert!(!changed, "{}: should be unchanged: {clean}", vector.name);
+            }
+            for leaked in &vector.must_disappear {
+                assert!(
+                    !clean.contains(leaked),
+                    "{}: leaked {leaked}: {clean}",
+                    vector.name
+                );
+            }
+            for kept in &vector.must_keep {
+                assert!(
+                    clean.contains(kept),
+                    "{}: missing {kept}: {clean}",
+                    vector.name
+                );
+            }
+            assert!(
+                !clean.contains("***"),
+                "{}: should not emit masks: {clean}",
+                vector.name
+            );
+            assert!(
+                !contains_sensitive_shape(&clean),
+                "{}: still sensitive: {clean}",
+                vector.name
+            );
+        }
+    }
 }
