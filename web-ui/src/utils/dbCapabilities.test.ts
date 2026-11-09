@@ -24,14 +24,14 @@ describe('dbCapabilities', () => {
     }
   })
 
-  it('marks PostgreSQL as partial: SQL/schema/import-export without sync', () => {
+  it('marks PostgreSQL as partial: structure sync wired, data sync still MySQL-only', () => {
     expect(dbCapabilityLevel('postgresql')).toBe('b')
     expect(dbCapabilities('postgresql')).toEqual({
       level: 'b',
       supports_sql: true,
       supports_schema_introspection: true,
       supports_import_export: true,
-      supports_struct_sync: false,
+      supports_struct_sync: true,
       supports_data_sync: false,
     })
     expect(dbCapabilityNotice('postgresql')).not.toBeNull()

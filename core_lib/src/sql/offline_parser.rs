@@ -53,6 +53,10 @@ impl OfflineParser {
                             column_name: col_name.clone(),
                             non_unique: false,
                             index_type: "BTREE".to_string(),
+                            seq_in_index: 1,
+                            sort_order: "ASC".to_string(),
+                            is_primary: true,
+                            is_expression: false,
                         });
                     }
 
@@ -66,6 +70,7 @@ impl OfflineParser {
                         column_default: None,
                         extra: "".to_string(),
                         type_warning: None,
+                        generation_expression: None,
                     });
                 }
 

@@ -472,6 +472,7 @@ mod tests {
                             column_default: None,
                             extra: String::new(),
                             type_warning: None,
+                            generation_expression: None,
                         },
                         ColumnInfo {
                             column_name: "email".to_string(),
@@ -483,6 +484,7 @@ mod tests {
                             column_default: None,
                             extra: String::new(),
                             type_warning: None,
+                            generation_expression: None,
                         },
                     ],
                     indexes: vec![],
@@ -500,6 +502,7 @@ mod tests {
                         column_default: None,
                         extra: String::new(),
                         type_warning: None,
+                        generation_expression: None,
                     }],
                     indexes: vec![],
                     foreign_keys: vec![],

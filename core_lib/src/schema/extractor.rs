@@ -24,6 +24,10 @@ pub struct ColumnInfo {
     /// 用于界面把「类型未支持」和「值为 NULL」区分开。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_warning: Option<String>,
+    /// 生成列表达式（MySQL GENERATION_EXPRESSION / PostgreSQL attgenerated='s'）。
+    /// 非生成列为 None；生成列没有 DEFAULT。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_expression: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +124,8 @@ impl SchemaExtractor {
                         COLUMN_COMMENT as column_comment, 
                         COLUMN_KEY as column_key,
                         COLUMN_DEFAULT as column_default,
-                        EXTRA as extra
+                        EXTRA as extra,
+                        GENERATION_EXPRESSION as generation_expression
                     FROM information_schema.COLUMNS 
                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? 
                     ORDER BY ORDINAL_POSITION
@@ -148,6 +153,11 @@ impl SchemaExtractor {
                         column_default: crate::sql_util::mysql_text(&row, "column_default"),
                         extra: crate::sql_util::mysql_text(&row, "extra").unwrap_or_default(),
                         type_warning: None,
+                        generation_expression: crate::sql_util::mysql_text(
+                            &row,
+                            "generation_expression",
+                        )
+                        .filter(|s| !s.is_empty()),
                     });
                 }
                 Ok(result)
@@ -185,7 +195,8 @@ impl SchemaExtractor {
                         COLUMN_COMMENT as column_comment, 
                         COLUMN_KEY as column_key,
                         COLUMN_DEFAULT as column_default,
-                        EXTRA as extra
+                        EXTRA as extra,
+                        GENERATION_EXPRESSION as generation_expression
                     FROM information_schema.COLUMNS 
                     WHERE TABLE_SCHEMA = ? 
                     ORDER BY TABLE_NAME, ORDINAL_POSITION
@@ -214,6 +225,11 @@ impl SchemaExtractor {
                         column_default: crate::sql_util::mysql_text(&row, "column_default"),
                         extra: crate::sql_util::mysql_text(&row, "extra").unwrap_or_default(),
                         type_warning: None,
+                        generation_expression: crate::sql_util::mysql_text(
+                            &row,
+                            "generation_expression",
+                        )
+                        .filter(|s| !s.is_empty()),
                     });
                 }
                 Ok(result)
@@ -257,7 +273,11 @@ impl SchemaExtractor {
                    format_type(a.atttypid, a.atttypmod) AS column_type,
                    CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
                    col_description(a.attrelid, a.attnum) AS column_comment,
-                   pg_get_expr(d.adbin, d.adrelid) AS column_default,
+                   pg_get_expr(d.adbin, d.adrelid) AS raw_default,
+                   CASE WHEN a.attgenerated = 's'
+                        THEN pg_get_expr(d.adbin, d.adrelid) ELSE NULL END AS generation_expression,
+                   CASE WHEN a.attgenerated = 's'
+                        THEN NULL ELSE pg_get_expr(d.adbin, d.adrelid) END AS column_default,
                    CASE WHEN a.attidentity IN ('a','d') THEN 'identity' ELSE '' END AS extra
             FROM pg_attribute a
             JOIN pg_class c ON c.oid = a.attrelid
@@ -316,6 +336,9 @@ impl SchemaExtractor {
                     column_key: key,
                     column_default,
                     extra,
+                    generation_expression: row
+                        .try_get("generation_expression")
+                        .unwrap_or_default(),
                 },
             });
         }

@@ -9,6 +9,22 @@ pub struct IndexInfo {
     pub column_name: String,
     pub non_unique: bool,
     pub index_type: String,
+    /// 该列在索引中的序号（从 1 开始），用于还原复合索引的列序。
+    #[serde(default)]
+    pub seq_in_index: u32,
+    /// 排序方向："ASC" 或 "DESC"。
+    #[serde(default = "default_sort_order")]
+    pub sort_order: String,
+    /// 是否为主键索引。
+    #[serde(default)]
+    pub is_primary: bool,
+    /// 是否为表达式索引（PostgreSQL 中 indkey 的 attnum 为 0）。
+    #[serde(default)]
+    pub is_expression: bool,
+}
+
+fn default_sort_order() -> String {
+    "ASC".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,10 +41,21 @@ pub struct ForeignKeyInfo {
     pub referenced_column_name: String,
     pub update_rule: String,
     pub delete_rule: String,
+    /// 该列在外键中的序号（从 1 开始），用于还原复合外键的列序。
+    #[serde(default)]
+    pub ordinal_position: u32,
 }
 
 use crate::schema::extractor::pg_display_name;
 use crate::schema::SchemaExtractor;
+
+/// MySQL STATISTICS.COLLATION：'A' 升序、'D' 降序、NULL（HASH/FULLTEXT 等）按升序处理。
+fn mysql_sort_order(collation: Option<&str>) -> String {
+    match collation {
+        Some("D") => "DESC".to_string(),
+        _ => "ASC".to_string(),
+    }
+}
 
 impl SchemaExtractor {
     /// Fetches all views in a specific database schema
@@ -96,10 +123,12 @@ impl SchemaExtractor {
                         INDEX_NAME as index_name, 
                         COLUMN_NAME as column_name, 
                         NON_UNIQUE as non_unique, 
-                        INDEX_TYPE as index_type 
+                        INDEX_TYPE as index_type,
+                        SEQ_IN_INDEX as seq_in_index,
+                        COLLATION as collation
                     FROM information_schema.STATISTICS 
                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-                    ORDER BY SEQ_IN_INDEX
+                    ORDER BY INDEX_NAME, SEQ_IN_INDEX
                 "#;
                 let indexes = sqlx::query(query)
                     .bind(db_name)
@@ -110,14 +139,23 @@ impl SchemaExtractor {
                 let mut result = Vec::new();
                 use sqlx::Row;
                 for row in indexes {
+                    let index_name = crate::sql_util::mysql_text(&row, "index_name")
+                        .unwrap_or_default();
+                    let collation = crate::sql_util::mysql_text(&row, "collation");
                     result.push(IndexInfo {
-                        index_name: crate::sql_util::mysql_text(&row, "index_name")
-                            .unwrap_or_default(),
+                        is_primary: index_name == "PRIMARY",
+                        sort_order: mysql_sort_order(collation.as_deref()),
+                        seq_in_index: row
+                            .try_get::<u64, _>("seq_in_index")
+                            .unwrap_or(0)
+                            .min(u32::MAX as u64) as u32,
                         column_name: crate::sql_util::mysql_text(&row, "column_name")
                             .unwrap_or_default(),
                         non_unique: row.try_get::<i64, _>("non_unique").unwrap_or(1) != 0,
                         index_type: crate::sql_util::mysql_text(&row, "index_type")
                             .unwrap_or_default(),
+                        is_expression: false,
+                        index_name,
                     });
                 }
                 Ok(result)
@@ -147,7 +185,9 @@ impl SchemaExtractor {
                         INDEX_NAME as index_name, 
                         COLUMN_NAME as column_name, 
                         NON_UNIQUE as non_unique, 
-                        INDEX_TYPE as index_type 
+                        INDEX_TYPE as index_type,
+                        SEQ_IN_INDEX as seq_in_index,
+                        COLLATION as collation
                     FROM information_schema.STATISTICS 
                     WHERE TABLE_SCHEMA = ?
                     ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX
@@ -162,14 +202,23 @@ impl SchemaExtractor {
                 for row in rows {
                     let table_name =
                         crate::sql_util::mysql_text(&row, "table_name").unwrap_or_default();
+                    let index_name =
+                        crate::sql_util::mysql_text(&row, "index_name").unwrap_or_default();
+                    let collation = crate::sql_util::mysql_text(&row, "collation");
                     result.entry(table_name).or_default().push(IndexInfo {
-                        index_name: crate::sql_util::mysql_text(&row, "index_name")
-                            .unwrap_or_default(),
+                        is_primary: index_name == "PRIMARY",
+                        sort_order: mysql_sort_order(collation.as_deref()),
+                        seq_in_index: row
+                            .try_get::<u64, _>("seq_in_index")
+                            .unwrap_or(0)
+                            .min(u32::MAX as u64) as u32,
                         column_name: crate::sql_util::mysql_text(&row, "column_name")
                             .unwrap_or_default(),
                         non_unique: row.try_get::<i64, _>("non_unique").unwrap_or(1) != 0,
                         index_type: crate::sql_util::mysql_text(&row, "index_type")
                             .unwrap_or_default(),
+                        is_expression: false,
+                        index_name,
                     });
                 }
                 Ok(result)
@@ -204,7 +253,8 @@ impl SchemaExtractor {
                         kcu.REFERENCED_TABLE_NAME as referenced_table_name,
                         kcu.REFERENCED_COLUMN_NAME as referenced_column_name,
                         rc.UPDATE_RULE as update_rule,
-                        rc.DELETE_RULE as delete_rule
+                        rc.DELETE_RULE as delete_rule,
+                        kcu.ORDINAL_POSITION as ordinal_position
                     FROM information_schema.KEY_COLUMN_USAGE kcu
                     JOIN information_schema.REFERENTIAL_CONSTRAINTS rc 
                       ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME 
@@ -212,6 +262,7 @@ impl SchemaExtractor {
                     WHERE kcu.TABLE_SCHEMA = ? 
                       AND kcu.TABLE_NAME = ?
                       AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+                    ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION
                 "#;
                 let fks = sqlx::query(query)
                     .bind(db_name)
@@ -241,6 +292,10 @@ impl SchemaExtractor {
                             .unwrap_or_default(),
                         delete_rule: crate::sql_util::mysql_text(&row, "delete_rule")
                             .unwrap_or_default(),
+                        ordinal_position: row
+                            .try_get::<u64, _>("ordinal_position")
+                            .unwrap_or(0)
+                            .min(u32::MAX as u64) as u32,
                     });
                 }
                 Ok(result)
@@ -272,7 +327,8 @@ impl SchemaExtractor {
                         kcu.REFERENCED_TABLE_NAME as referenced_table_name,
                         kcu.REFERENCED_COLUMN_NAME as referenced_column_name,
                         rc.UPDATE_RULE as update_rule,
-                        rc.DELETE_RULE as delete_rule
+                        rc.DELETE_RULE as delete_rule,
+                        kcu.ORDINAL_POSITION as ordinal_position
                     FROM information_schema.KEY_COLUMN_USAGE kcu
                     JOIN information_schema.REFERENTIAL_CONSTRAINTS rc 
                       ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME 
@@ -310,6 +366,10 @@ impl SchemaExtractor {
                             .unwrap_or_default(),
                         delete_rule: crate::sql_util::mysql_text(&row, "delete_rule")
                             .unwrap_or_default(),
+                        ordinal_position: row
+                            .try_get::<u64, _>("ordinal_position")
+                            .unwrap_or(0)
+                            .min(u32::MAX as u64) as u32,
                     });
                 }
                 Ok(result)
@@ -342,7 +402,11 @@ impl SchemaExtractor {
                    i.relname AS index_name,
                    COALESCE(a.attname, '') AS column_name,
                    NOT idx.indisunique AS non_unique,
-                   am.amname AS index_type
+                   am.amname AS index_type,
+                   k.ord::int4 AS seq_in_index,
+                   CASE WHEN (idx.indoption[(k.ord - 1)::int] & 1) = 1 THEN 'DESC' ELSE 'ASC' END AS sort_order,
+                   idx.indisprimary AS is_primary,
+                   (k.attnum = 0) AS is_expression
             FROM pg_index idx
             JOIN pg_class t ON t.oid = idx.indrelid
             JOIN pg_namespace n ON n.oid = t.relnamespace
@@ -372,6 +436,10 @@ impl SchemaExtractor {
                     column_name: row.try_get("column_name")?,
                     non_unique: row.try_get("non_unique")?,
                     index_type: row.try_get("index_type")?,
+                    seq_in_index: row.try_get::<i32, _>("seq_in_index").unwrap_or(0).max(0) as u32,
+                    sort_order: row.try_get("sort_order")?,
+                    is_primary: row.try_get("is_primary")?,
+                    is_expression: row.try_get("is_expression")?,
                 },
             ));
         }
@@ -390,8 +458,10 @@ impl SchemaExtractor {
                    cl.relname AS table_name,
                    con.conname AS constraint_name,
                    a.attname AS column_name,
-                   fcl.relname AS referenced_table_name,
+                   CASE WHEN fn.nspname = 'public' THEN fcl.relname
+                        ELSE fn.nspname || '.' || fcl.relname END AS referenced_table_name,
                    fa.attname AS referenced_column_name,
+                   ck.ord::int4 AS ordinal_position,
                    CASE con.confupdtype
                      WHEN 'a' THEN 'NO ACTION'
                      WHEN 'r' THEN 'RESTRICT'
@@ -412,6 +482,7 @@ impl SchemaExtractor {
             JOIN pg_class cl ON cl.oid = con.conrelid
             JOIN pg_namespace n ON n.oid = cl.relnamespace
             JOIN pg_class fcl ON fcl.oid = con.confrelid
+            JOIN pg_namespace fn ON fn.oid = fcl.relnamespace
             JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS ck(attnum, ord) ON true
             JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ck.attnum
             JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON fk.ord = ck.ord
@@ -441,6 +512,10 @@ impl SchemaExtractor {
                     referenced_column_name: row.try_get("referenced_column_name")?,
                     update_rule: row.try_get("update_rule")?,
                     delete_rule: row.try_get("delete_rule")?,
+                    ordinal_position: row
+                        .try_get::<i32, _>("ordinal_position")
+                        .unwrap_or(0)
+                        .max(0) as u32,
                 },
             ));
         }

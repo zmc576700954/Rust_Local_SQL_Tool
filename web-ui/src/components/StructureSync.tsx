@@ -19,6 +19,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
   const [diff, setDiff] = useState<any>(null);
   const [selectedTables, setSelectedTables] = useState<string[]>([]);
   const [ddl, setDdl] = useState<string>('');
+  const [ddlStatements, setDdlStatements] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const diffSummary = diff
     ? diff.tables.reduce((acc: any, t: any) => {
@@ -68,11 +69,40 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
     }
   };
 
+  const selectedDestructiveChanges = diff
+    ? (diff.destructive_changes || []).filter((d: any) => selectedTables.includes(d.table_name))
+    : [];
+
   const handleGenerateDdl = async () => {
+    if (selectedDestructiveChanges.length > 0) {
+      const detail = selectedDestructiveChanges
+        .map((d: any) => `${d.table_name}: ${d.detail}`)
+        .join('\n');
+      const confirmed = window.confirm(
+        tr(
+          `检测到 ${selectedDestructiveChanges.length} 项破坏性结构变更，继续后不可撤销：\n\n${detail}\n\n确认生成并允许执行这些 DDL？`,
+          `${selectedDestructiveChanges.length} destructive schema change(s) detected. This cannot be undone:\n\n${detail}\n\nGenerate and allow executing these DDL statements?`
+        )
+      );
+      if (!confirmed) return false;
+    }
     setIsLoading(true);
     try {
-      const ddlResult = await api.syncSchemaDdl(sourceDbId, targetDbId, selectedTables);
-      setDdl(ddlResult);
+      const ddlResult = await api.syncSchemaDdl(
+        sourceDbId,
+        targetDbId,
+        selectedTables,
+        selectedDestructiveChanges.length > 0
+      );
+      setDdl(ddlResult.ddl);
+      setDdlStatements(ddlResult.statements);
+      if (ddlResult.unsupportedChanges.length > 0) {
+        toast(
+          tr('部分差异暂不支持自动处理：', 'Some differences cannot be handled automatically: ') +
+            ddlResult.unsupportedChanges.join('；'),
+          'info'
+        );
+      }
       return true;
     } catch (e: unknown) {
       toast(tr('生成 DDL 失败：', 'Failed to generate DDL: ') + (e instanceof Error ? e.message : String(e)), 'error');
@@ -84,11 +114,17 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
 
   const handleExecute = async () => {
     try {
-      if (!ddl || ddl === '-- No changes detected') {
+      if ((!ddl || ddl === '-- No changes detected') && ddlStatements.length === 0) {
         toast(tr('没有可执行的 DDL', 'No DDL to execute'), 'info');
         return;
       }
-      await api.executeDdl(ddl, targetDbId);
+      if (ddlStatements.length > 0) {
+        for (const statement of ddlStatements) {
+          await api.executeDdl(statement, targetDbId);
+        }
+      } else {
+        await api.executeDdl(ddl, targetDbId);
+      }
       toast(tr('结构同步成功', 'Schema synced successfully'), 'success');
       onCancel();
     } catch (e: unknown) {
@@ -113,6 +149,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
                 setSourceDbId(e.target.value);
                 setDiff(null);
                 setDdl('');
+                setDdlStatements([]);
               }}
               className="bg-dark-bg border border-dark-border rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >
@@ -132,6 +169,7 @@ export function StructureSync({ onCancel }: StructureSyncProps) {
                 setTargetDbId(e.target.value);
                 setDiff(null);
                 setDdl('');
+                setDdlStatements([]);
               }}
               className="bg-dark-bg border border-dark-border rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
             >

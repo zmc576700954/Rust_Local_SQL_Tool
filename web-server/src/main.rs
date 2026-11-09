@@ -7,6 +7,10 @@ mod handlers;
 mod import_sql_integration_mysql;
 #[cfg(test)]
 mod import_sql_integration_pg;
+#[cfg(test)]
+mod schema_sync_integration_mysql;
+#[cfg(test)]
+mod schema_sync_integration_pg;
 mod inspection_handlers;
 mod inspection_scheduler;
 mod log_scrub;
@@ -2602,9 +2606,23 @@ async fn execute_ddl(
         ));
     }
 
-    // Validate SQL is a DDL statement (not arbitrary SQL)
-    let dialect = sqlparser::dialect::GenericDialect {};
-    match sqlparser::parser::Parser::parse_sql(&dialect, req.sql.trim()) {
+    // Validate SQL is a DDL statement (not arbitrary SQL).
+    // 先按 GenericDialect 解析；失败时再用 PostgreSqlDialect 兜底，
+    // 以支持 PG 专属语法（如 ALTER COLUMN ... TYPE ... USING），
+    // 同时保持 MySQL 路径与既有错误提示不变。
+    let parse_result =
+        match sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::GenericDialect {}, req.sql.trim())
+        {
+            Ok(stmts) => Ok(stmts),
+            Err(generic_err) => match sqlparser::parser::Parser::parse_sql(
+                &sqlparser::dialect::PostgreSqlDialect {},
+                req.sql.trim(),
+            ) {
+                Ok(stmts) if !stmts.is_empty() => Ok(stmts),
+                _ => Err(generic_err),
+            },
+        };
+    match parse_result {
         Ok(stmts) => {
             if stmts.len() != 1 {
                 return Err(AppError::BadRequest(
@@ -2927,6 +2945,25 @@ struct SyncSchemaDiffRequest {
 #[derive(Serialize)]
 struct SyncSchemaDiffResponse {
     diff: core_lib::tools::SchemaDiff,
+    /// PostgreSQL 专属：破坏性差异清单（MySQL 路径不返回）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destructive_changes: Option<Vec<core_lib::pg_schema_sync::DestructiveChange>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsupported_changes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requires_confirmation: Option<bool>,
+}
+
+fn is_pg_client(client: &DbClient) -> bool {
+    matches!(client.db_type, core_lib::config::DbType::PostgreSQL)
+}
+
+fn same_engine_family_error(source: &DbClient, target: &DbClient) -> AppError {
+    AppError::BadRequest(format!(
+        "源库与目标库数据库类型不一致（{} → {}）：结构同步要求两端为同一类型，跨引擎暂不支持",
+        source.db_type.display_name(),
+        target.db_type.display_name()
+    ))
 }
 
 async fn sync_schema_diff(
@@ -2935,10 +2972,39 @@ async fn sync_schema_diff(
 ) -> Result<Json<SyncSchemaDiffResponse>, AppError> {
     let (source_client, _source_db_name) = get_temp_db_client(&state, &req.source_db_id).await?;
     let (target_client, _target_db_name) = get_temp_db_client(&state, &req.target_db_id).await?;
+
+    let ctx = crate::bridge::bridge_service_context(&state);
+
+    if is_pg_client(&source_client) && is_pg_client(&target_client) {
+        // PostgreSQL：绕过 30s schema 缓存，确保「执行后再对比」读到真实结构。
+        let source =
+            core_lib::service::schema::SchemaService::get_schema_fresh(&ctx, Some(&req.source_db_id))
+                .await
+                .map_err(|e| e.to_app_error())?;
+        let target =
+            core_lib::service::schema::SchemaService::get_schema_fresh(&ctx, Some(&req.target_db_id))
+                .await
+                .map_err(|e| e.to_app_error())?;
+        let result = core_lib::pg_schema_sync::PgSchemaSyncEngine::compare(&source, &target);
+        if schema_gap_too_large(&result.diff) {
+            return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+        }
+        let requires_confirmation = !result.destructive.is_empty();
+        return Ok(Json(SyncSchemaDiffResponse {
+            diff: result.diff,
+            destructive_changes: Some(result.destructive),
+            unsupported_changes: Some(result.unsupported),
+            requires_confirmation: Some(requires_confirmation),
+        }));
+    }
+
+    if is_pg_client(&source_client) || is_pg_client(&target_client) {
+        return Err(same_engine_family_error(&source_client, &target_client));
+    }
+
     crate::handlers::util::require_mysql_client(&source_client, "结构同步（源库）")?;
     crate::handlers::util::require_mysql_client(&target_client, "结构同步（目标库）")?;
 
-    let ctx = crate::bridge::bridge_service_context(&state);
     let source = core_lib::service::schema::SchemaService::get_schema(&ctx, Some(&req.source_db_id))
         .await
         .map_err(|e| e.to_app_error())?;
@@ -2950,7 +3016,12 @@ async fn sync_schema_diff(
     if schema_gap_too_large(&diff) {
         return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
     }
-    Ok(Json(SyncSchemaDiffResponse { diff }))
+    Ok(Json(SyncSchemaDiffResponse {
+        diff,
+        destructive_changes: None,
+        unsupported_changes: None,
+        requires_confirmation: None,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -2958,11 +3029,21 @@ struct SyncSchemaDdlRequest {
     source_db_id: String,
     target_db_id: String,
     selected_tables: Vec<String>,
+    /// PostgreSQL 破坏性差异确认。MySQL 路径忽略该字段，保持原有行为。
+    #[serde(default)]
+    confirm_destructive: bool,
 }
 
 #[derive(Serialize)]
 struct SyncSchemaDdlResponse {
     ddl_statements: String,
+    /// PostgreSQL 逐条语句，前端按顺序执行；MySQL 路径为 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ddl_statement_list: Option<Vec<String>>,
+    #[serde(default)]
+    destructive_changes: Vec<core_lib::pg_schema_sync::DestructiveChange>,
+    #[serde(default)]
+    unsupported_changes: Vec<String>,
 }
 
 async fn sync_schema_ddl(
@@ -2971,10 +3052,60 @@ async fn sync_schema_ddl(
 ) -> Result<Json<SyncSchemaDdlResponse>, AppError> {
     let (source_client, _source_db_name) = get_temp_db_client(&state, &req.source_db_id).await?;
     let (target_client, _target_db_name) = get_temp_db_client(&state, &req.target_db_id).await?;
+
+    let ctx = crate::bridge::bridge_service_context(&state);
+
+    if is_pg_client(&source_client) && is_pg_client(&target_client) {
+        let source =
+            core_lib::service::schema::SchemaService::get_schema_fresh(&ctx, Some(&req.source_db_id))
+                .await
+                .map_err(|e| e.to_app_error())?;
+        let target =
+            core_lib::service::schema::SchemaService::get_schema_fresh(&ctx, Some(&req.target_db_id))
+                .await
+                .map_err(|e| e.to_app_error())?;
+        let comparison = core_lib::pg_schema_sync::PgSchemaSyncEngine::compare(&source, &target);
+        if schema_gap_too_large(&comparison.diff) {
+            return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+        }
+
+        let plan = match core_lib::pg_schema_sync::PgSchemaSyncEngine::generate_ddl(
+            &source,
+            &target,
+            &req.selected_tables,
+            req.confirm_destructive,
+        ) {
+            Ok(plan) => plan,
+            Err(blocked) => {
+                let details = blocked
+                    .destructive
+                    .iter()
+                    .map(|d| format!("{}:{}（{}）", d.table_name, d.kind, d.detail))
+                    .collect::<Vec<_>>()
+                    .join("；");
+                return Err(AppError::BadRequest(format!(
+                    "检测到 {} 项破坏性结构变更，未确认前不会生成或执行任何 DDL：{}",
+                    blocked.destructive.len(),
+                    details
+                )));
+            }
+        };
+
+        return Ok(Json(SyncSchemaDdlResponse {
+            ddl_statements: plan.statements.join("\n"),
+            ddl_statement_list: Some(plan.statements),
+            destructive_changes: plan.destructive,
+            unsupported_changes: plan.unsupported,
+        }));
+    }
+
+    if is_pg_client(&source_client) || is_pg_client(&target_client) {
+        return Err(same_engine_family_error(&source_client, &target_client));
+    }
+
     crate::handlers::util::require_mysql_client(&source_client, "结构同步（源库）")?;
     crate::handlers::util::require_mysql_client(&target_client, "结构同步（目标库）")?;
 
-    let ctx = crate::bridge::bridge_service_context(&state);
     let source = core_lib::service::schema::SchemaService::get_schema(&ctx, Some(&req.source_db_id))
         .await
         .map_err(|e| e.to_app_error())?;
@@ -2993,6 +3124,9 @@ async fn sync_schema_ddl(
     );
     Ok(Json(SyncSchemaDdlResponse {
         ddl_statements: ddl,
+        ddl_statement_list: None,
+        destructive_changes: Vec::new(),
+        unsupported_changes: Vec::new(),
     }))
 }
 

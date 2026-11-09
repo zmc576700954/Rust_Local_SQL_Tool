@@ -986,6 +986,7 @@ mod tests {
             column_default: None,
             extra: String::new(),
             type_warning: None,
+            generation_expression: None,
         }
     }
 

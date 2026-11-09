@@ -19,8 +19,9 @@ pub fn capability_level(db_type: &DbType) -> DbCapabilityLevel {
     match db_type {
         DbType::MySQL | DbType::MariaDB => DbCapabilityLevel::A,
         // PostgreSQL: connection, SQL execution, transactions, schema browsing,
-        // DDL execution and import/export are wired. Struct/data sync and the
-        // ops-center scenarios still depend on MySQL metadata and stay unsupported.
+        // DDL execution, import/export and structure sync are wired. Data sync
+        // and the ops-center scenarios still depend on MySQL metadata and stay
+        // unsupported.
         // SQLite: connection + SQL execution only; schema browsing and DDL are
         // deliberately not exposed yet.
         DbType::PostgreSQL | DbType::SQLite => DbCapabilityLevel::B,
@@ -45,15 +46,15 @@ impl DbCapabilities {
                 supports_struct_sync: true,
                 supports_data_sync: true,
             },
-            // PostgreSQL: SQL execution, schema introspection and import/export
-            // are wired against real PG metadata and syntax. Sync remains
-            // MySQL-only (the engine builds MySQL-specific compare/deploy SQL).
+            // PostgreSQL: SQL execution, schema introspection, import/export and
+            // structure sync are wired. Data sync still relies on MySQL-shaped
+            // compare/deploy SQL and stays unsupported.
             DbType::PostgreSQL => DbCapabilities {
                 level,
                 supports_sql: true,
                 supports_schema_introspection: true,
                 supports_import_export: true,
-                supports_struct_sync: false,
+                supports_struct_sync: true,
                 supports_data_sync: false,
             },
             // SQLite: connect + SQL execution only. Schema browsing, DDL,
@@ -119,13 +120,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_capabilities_pg_wires_sql_schema_and_import_export_without_sync() {
+    fn runtime_capabilities_pg_wires_structure_sync_but_not_data_sync() {
         let caps = DbCapabilities::runtime_capabilities(&DbType::PostgreSQL);
         assert_eq!(caps.level, DbCapabilityLevel::B);
         assert!(caps.supports_sql);
         assert!(caps.supports_schema_introspection);
         assert!(caps.supports_import_export);
-        assert!(!caps.supports_struct_sync);
+        assert!(caps.supports_struct_sync);
         assert!(!caps.supports_data_sync);
     }
 
@@ -176,12 +177,12 @@ mod tests {
     #[test]
     fn check_capability_failure_for_experimental_and_unsupported() {
         let pg_caps = DbCapabilities::runtime_capabilities(&DbType::PostgreSQL);
-        // PostgreSQL 已接通查询、结构内省与导入导出，但仍不提供同步能力
+        // PostgreSQL 已接通查询、结构内省、导入导出与结构同步，但数据同步仍未支持
         assert!(pg_caps.check_capability("sql").is_ok());
         assert!(pg_caps.check_capability("schema_introspection").is_ok());
         assert!(pg_caps.check_capability("import_export").is_ok());
+        assert!(pg_caps.check_capability("struct_sync").is_ok());
         assert!(pg_caps.check_capability("data_sync").is_err());
-        assert!(pg_caps.check_capability("struct_sync").is_err());
 
         // SQLite 仅接通连接与查询执行
         let sqlite_caps = DbCapabilities::runtime_capabilities(&DbType::SQLite);

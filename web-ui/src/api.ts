@@ -605,9 +605,29 @@ export const api = {
     client.get('/tools/go-live/audit', { params: { limit }, headers: { 'x-silent-error': '1' } }).then(res => res.data),
   // Structure Sync API
   syncSchemaDiff: (source_db_id: string, target_db_id: string) => 
-    client.post('/tools/schema-sync/diff', { source_db_id, target_db_id }).then(res => res.data.diff),
-  syncSchemaDdl: (source_db_id: string, target_db_id: string, selected_tables: string[]) => 
-    client.post('/tools/schema-sync/ddl', { source_db_id, target_db_id, selected_tables }).then(res => res.data.ddl_statements),
+    client.post('/tools/schema-sync/diff', { source_db_id, target_db_id }).then(res => ({
+      ...res.data.diff,
+      destructive_changes: res.data.destructive_changes ?? [],
+      unsupported_changes: res.data.unsupported_changes ?? [],
+      requires_confirmation: !!res.data.requires_confirmation,
+    })),
+  syncSchemaDdl: (
+    source_db_id: string,
+    target_db_id: string,
+    selected_tables: string[],
+    confirm_destructive = false,
+  ) =>
+    client.post('/tools/schema-sync/ddl', {
+      source_db_id,
+      target_db_id,
+      selected_tables,
+      confirm_destructive,
+    }).then(res => ({
+      ddl: String(res.data.ddl_statements || ''),
+      statements: (res.data.ddl_statement_list || []) as string[],
+      destructiveChanges: (res.data.destructive_changes || []) as Array<{ table_name: string; kind: string; detail: string }>,
+      unsupportedChanges: (res.data.unsupported_changes || []) as string[],
+    })),
   // Data Sync API
   syncDataDiff: (table_name: string, source_db_id: string, target_db_id: string, primary_key: string) => 
     client.post('/tools/data-sync/diff', { table_name, source_db_id, target_db_id, primary_key }).then(res => res.data.diff),

@@ -32,6 +32,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
   const [dataSelections, setDataSelections] = useState<Record<string, string[]>>({});
 
   const [previewSql, setPreviewSql] = useState('');
+  const [previewStatements, setPreviewStatements] = useState<string[]>([]);
   const [errorText, setErrorText] = useState('');
 
   useEffect(() => {
@@ -121,6 +122,7 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
     setIsLoading(true);
     setErrorText('');
     setPreviewSql('');
+    setPreviewStatements([]);
     try {
       if (mode === 'schema') {
         const diff = await api.syncSchemaDiff(sourceDbId, targetDbId);
@@ -156,8 +158,35 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
     setErrorText('');
     try {
       if (mode === 'schema') {
-        const ddl = await api.syncSchemaDdl(sourceDbId, targetDbId, selectedTables);
-        setPreviewSql(String(ddl || ''));
+        const destructive = (schemaDiff?.destructive_changes || []).filter((d: any) =>
+          selectedTables.includes(d.table_name)
+        );
+        let confirmDestructive = false;
+        if (destructive.length > 0) {
+          const detail = destructive.map((d: any) => `${d.table_name}: ${d.detail}`).join('\n');
+          confirmDestructive = window.confirm(
+            tr(
+              `检测到 ${destructive.length} 项破坏性结构变更，继续后不可撤销：\n\n${detail}\n\n确认生成 DDL？`,
+              `${destructive.length} destructive schema change(s) detected. This cannot be undone:\n\n${detail}\n\nGenerate DDL?`
+            )
+          );
+          if (!confirmDestructive) return false;
+        }
+        const result = await api.syncSchemaDdl(
+          sourceDbId,
+          targetDbId,
+          selectedTables,
+          confirmDestructive
+        );
+        setPreviewSql(String(result.ddl || ''));
+        setPreviewStatements(result.statements || []);
+        if (result.unsupportedChanges.length > 0) {
+          toast(
+            tr('部分差异暂不支持自动处理：', 'Some differences cannot be handled automatically: ') +
+              result.unsupportedChanges.join('；'),
+            'info'
+          );
+        }
       } else if (dataDiff) {
         const dml = await api.syncDataDml([dataDiff] as any, dataSelections, primaryKey.trim());
         setPreviewSql(String(dml || ''));
@@ -183,7 +212,13 @@ export function VisualSyncWizard({ onCancel }: VisualSyncWizardProps) {
     setErrorText('');
     try {
       if (mode === 'schema') {
-        await api.executeDdl(previewSql, targetDbId);
+        if (previewStatements.length > 0) {
+          for (const statement of previewStatements) {
+            await api.executeDdl(statement, targetDbId);
+          }
+        } else {
+          await api.executeDdl(previewSql, targetDbId);
+        }
       } else {
         await api.executeSql(previewSql, false, targetDbId);
       }

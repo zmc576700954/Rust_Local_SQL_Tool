@@ -121,6 +121,29 @@ impl SchemaService {
         Self::get_schema_internal(ctx).await
     }
 
+    /// 绕过缓存直接读取 schema。
+    ///
+    /// 结构同步在生成 DDL 后需要重新对比真实结构，若走 30s 缓存会读到旧结构，
+    /// 导致「执行后差异归零」无法成立。
+    pub async fn get_schema_fresh(
+        ctx: &ServiceContext,
+        db_id: Option<&str>,
+    ) -> Result<SchemaResponse, ServiceError> {
+        let (db_client, db_name) = Self::resolve_db_client(ctx, db_id).await?;
+        let schema = Self::fetch_schema_for_db(&db_client, &db_name).await?;
+        let key = Self::schema_cache_key(db_id, &db_name);
+        ctx.schema_state()
+            .insert_schema(
+                key,
+                CachedSchemaEntry {
+                    schema: schema.clone(),
+                    expires_at: Instant::now() + SCHEMA_CACHE_TTL,
+                },
+            )
+            .await;
+        Ok(schema)
+    }
+
     /// 解析虚拟 Schema（DDL → SchemaResponse）并存入 AiState
     pub async fn parse_virtual_schema(
         ctx: &ServiceContext,
