@@ -3150,7 +3150,8 @@ pub async fn run_import_sql_job(
         }
     };
 
-    let statements = core_lib::sql_util::split_sql_statements(&req.sql);
+    let statements = core_lib::sql_util::split_sql_statements(&req.sql)
+        .map_err(|err| AppError::BadRequest(err.to_string()))?;
     if statements.is_empty() {
         return Err(AppError::BadRequest(
             "SQL 脚本为空，未包含任何可执行语句".to_string(),

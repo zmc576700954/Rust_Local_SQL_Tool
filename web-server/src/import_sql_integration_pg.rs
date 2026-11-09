@@ -479,3 +479,40 @@ async fn pg_single_statement_script_executes_atomically() {
 
     drop_tables(&pool, &["it_pg_single"]).await;
 }
+
+// ------------------------- 美元引用的函数体 -------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pg_tagged_dollar_quoted_function_body_is_not_split() {
+    let Some(url) = pg_url() else { return };
+    let (client, pool) = connect(&url).await;
+    exec(&pool, "DROP FUNCTION IF EXISTS it_pg_dollar_fn(INT)").await;
+
+    // 函数体内含分号与注释里的分号；$fn$ 标签必须保护整体不被拆开。
+    let script = "CREATE OR REPLACE FUNCTION it_pg_dollar_fn(x INT) RETURNS INT AS $fn$\n\
+                  BEGIN\n\
+                    -- body comment with ; inside\n\
+                    RETURN x + 1;\n\
+                  END;\n\
+                  $fn$ LANGUAGE plpgsql;\n\
+                  SELECT it_pg_dollar_fn(41);";
+    let result = run_script(&client, script, false)
+        .await
+        .expect("美元引用的函数体应能成功导入");
+
+    assert_eq!(result["success"], Value::Bool(true), "{result}");
+    assert_eq!(result["total_statements"], Value::from(2), "{result}");
+    assert_eq!(
+        statuses(&result),
+        vec!["1:executed", "2:executed"],
+        "{result}"
+    );
+
+    let value: i32 = sqlx::query_scalar("SELECT it_pg_dollar_fn(41)")
+        .fetch_one(&pool)
+        .await
+        .expect("调用函数失败");
+    assert_eq!(value, 42);
+
+    exec(&pool, "DROP FUNCTION IF EXISTS it_pg_dollar_fn(INT)").await;
+}

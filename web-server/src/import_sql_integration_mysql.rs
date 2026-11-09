@@ -1104,3 +1104,241 @@ async fn mysql_ddl_keywords_in_comments_and_literals_do_not_trigger_non_atomic()
 
     drop_tables(&pool, &["it_literal"]).await;
 }
+
+// ------------------------- DELIMITER 与例程体 -------------------------
+
+async fn routine_exists(pool: &MySqlPool, name: &str) -> bool {
+    scalar_i64(
+        pool,
+        &format!(
+            "SELECT COUNT(*) FROM information_schema.ROUTINES \
+             WHERE routine_schema = DATABASE() AND routine_name = '{name}'"
+        ),
+    )
+    .await
+        > 0
+}
+
+async fn event_exists(pool: &MySqlPool, name: &str) -> bool {
+    scalar_i64(
+        pool,
+        &format!(
+            "SELECT COUNT(*) FROM information_schema.EVENTS \
+             WHERE event_schema = DATABASE() AND event_name = '{name}'"
+        ),
+    )
+    .await
+        > 0
+}
+
+async fn drop_procedure(pool: &MySqlPool, name: &str) {
+    exec(pool, &format!("DROP PROCEDURE IF EXISTS {name}")).await;
+}
+
+async fn drop_trigger(pool: &MySqlPool, name: &str) {
+    exec(pool, &format!("DROP TRIGGER IF EXISTS {name}")).await;
+}
+
+async fn drop_event(pool: &MySqlPool, name: &str) {
+    exec(pool, &format!("DROP EVENT IF EXISTS {name}")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_delimiter_script_creates_and_calls_procedure() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    drop_tables(&pool, &["it_delim_log"]).await;
+    drop_procedure(&pool, "it_delim_proc").await;
+    exec(
+        &pool,
+        "CREATE TABLE it_delim_log (id INT PRIMARY KEY, note VARCHAR(64)) ENGINE=InnoDB",
+    )
+    .await;
+
+    // 例程体内含分号、字符串里的分号、嵌套 BEGIN 与 END IF。
+    let script = "DELIMITER $$\n\
+                  CREATE PROCEDURE it_delim_proc(IN p_id INT)\n\
+                  BEGIN\n\
+                    INSERT INTO it_delim_log VALUES (p_id, 'semi;colon');\n\
+                    IF p_id > 0 THEN\n\
+                      BEGIN\n\
+                        INSERT INTO it_delim_log VALUES (p_id + 100, 'nested;begin');\n\
+                      END;\n\
+                    END IF;\n\
+                  END$$\n\
+                  DELIMITER ;\n\
+                  CALL it_delim_proc(1);";
+    let result = run_script(&client, script, false)
+        .await
+        .expect("DELIMITER 脚本应能成功导入");
+
+    assert_eq!(result["success"], Value::Bool(true), "{result}");
+    // 例程创建是 DDL，必须走非原子路径，不能谎报已回滚。
+    assert_eq!(result["atomic"], Value::Bool(false), "{result}");
+    assert_eq!(result["rolled_back"], Value::Bool(false), "{result}");
+    assert!(reason(&result).contains("第 1 条"), "{}", reason(&result));
+    assert!(
+        reason(&result).contains("CREATE PROCEDURE"),
+        "隐式提交原因应指向例程创建语句：{}",
+        reason(&result)
+    );
+    assert_eq!(
+        statuses(&result),
+        vec!["1:executed", "2:executed"],
+        "{result}"
+    );
+    assert_eq!(result["total_statements"], Value::from(2));
+
+    assert!(routine_exists(&pool, "it_delim_proc").await, "例程应已创建");
+    assert_eq!(row_count(&pool, "it_delim_log").await, 2);
+    let note: String = sqlx::query_scalar("SELECT note FROM it_delim_log WHERE id = 101")
+        .fetch_one(&pool)
+        .await
+        .expect("读取体内插入行失败");
+    assert_eq!(note, "nested;begin");
+
+    drop_procedure(&pool, "it_delim_proc").await;
+    drop_tables(&pool, &["it_delim_log"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_delimiter_script_creates_trigger_and_fires() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    drop_tables(&pool, &["it_delim_trg_src"]).await;
+    drop_trigger(&pool, "it_delim_trg").await;
+    exec(
+        &pool,
+        "CREATE TABLE it_delim_trg_src (id INT PRIMARY KEY, note VARCHAR(64)) ENGINE=InnoDB",
+    )
+    .await;
+
+    let script = "DELIMITER $$\n\
+                  CREATE TRIGGER it_delim_trg BEFORE INSERT ON it_delim_trg_src\n\
+                  FOR EACH ROW\n\
+                  BEGIN\n\
+                    SET NEW.note = CONCAT(NEW.note, ';triggered');\n\
+                  END$$\n\
+                  DELIMITER ;\n\
+                  INSERT INTO it_delim_trg_src VALUES (1, 'raw');";
+    let result = run_script(&client, script, false)
+        .await
+        .expect("触发器脚本应能成功导入");
+
+    assert_eq!(result["success"], Value::Bool(true), "{result}");
+    assert_eq!(result["atomic"], Value::Bool(false), "{result}");
+    assert_eq!(row_count(&pool, "it_delim_trg_src").await, 1);
+    let note: String = sqlx::query_scalar("SELECT note FROM it_delim_trg_src WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .expect("读取触发行失败");
+    assert_eq!(note, "raw;triggered");
+
+    drop_trigger(&pool, "it_delim_trg").await;
+    drop_tables(&pool, &["it_delim_trg_src"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_delimiter_script_creates_event_with_block_body() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    drop_tables(&pool, &["it_delim_event_log"]).await;
+    drop_event(&pool, "it_delim_event").await;
+    exec(
+        &pool,
+        "CREATE TABLE it_delim_event_log (id INT PRIMARY KEY) ENGINE=InnoDB",
+    )
+    .await;
+
+    let script = "DELIMITER $$\n\
+                  CREATE EVENT it_delim_event\n\
+                  ON SCHEDULE EVERY 1 DAY\n\
+                  DISABLE\n\
+                  DO\n\
+                  BEGIN\n\
+                    INSERT IGNORE INTO it_delim_event_log VALUES (1);\n\
+                  END$$\n\
+                  DELIMITER ;\n";
+    let result = run_script(&client, script, false)
+        .await
+        .expect("事件脚本应能成功导入");
+
+    assert_eq!(result["success"], Value::Bool(true), "{result}");
+    assert_eq!(result["atomic"], Value::Bool(false), "{result}");
+    assert!(event_exists(&pool, "it_delim_event").await, "事件应已创建");
+
+    drop_event(&pool, "it_delim_event").await;
+    drop_tables(&pool, &["it_delim_event_log"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_routine_block_without_delimiter_is_rejected_before_any_execution() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    drop_tables(&pool, &["it_nodelim_created"]).await;
+    drop_procedure(&pool, "it_nodelim_proc").await;
+
+    // 第一条是无害 DDL；若拆分器「猜着切」，它会被执行。拒绝必须发生在执行之前。
+    let script = "CREATE TABLE it_nodelim_created (id INT);\n\
+                  CREATE PROCEDURE it_nodelim_proc()\n\
+                  BEGIN\n\
+                    INSERT INTO it_nodelim_created VALUES (1);\n\
+                    INSERT INTO it_nodelim_created VALUES (2);\n\
+                  END;";
+    let err = run_script(&client, script, false)
+        .await
+        .expect_err("缺 DELIMITER 的例程必须前置拒绝");
+
+    let AppError::BadRequest(msg) = &err else {
+        panic!("应返回 BadRequest，实际：{err:?}");
+    };
+    assert!(msg.contains("DELIMITER"), "{msg}");
+    assert!(msg.contains("PROCEDURE"), "{msg}");
+    assert!(msg.contains("第 2 行"), "应指出例程起始行：{msg}");
+
+    // 通过回查确认没有任何语句被执行。
+    assert!(
+        !table_exists(&pool, "it_nodelim_created").await,
+        "拒绝必须发生在执行之前"
+    );
+    assert!(!routine_exists(&pool, "it_nodelim_proc").await);
+
+    drop_procedure(&pool, "it_nodelim_proc").await;
+    drop_tables(&pool, &["it_nodelim_created"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_skip_errors_locates_failure_after_routine_statements() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    drop_procedure(&pool, "it_delim_err").await;
+
+    // 例程体里的 SIGNAL 让第 2 条语句（CALL）失败；语句序号必须按拆分结果计数。
+    let script = "DELIMITER $$\n\
+                  CREATE PROCEDURE it_delim_err()\n\
+                  BEGIN\n\
+                    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'boom;inside';\n\
+                  END$$\n\
+                  DELIMITER ;\n\
+                  CALL it_delim_err();\n\
+                  SELECT 1;";
+    let result = run_script(&client, script, true)
+        .await
+        .expect("应返回结构化结果");
+
+    assert_eq!(result["success"], Value::Bool(false), "{result}");
+    assert_eq!(result["completed"], Value::Bool(true), "{result}");
+    assert_eq!(result["atomic"], Value::Bool(false), "{result}");
+    assert_eq!(result["failed_statement"], Value::from(2), "{result}");
+    assert_eq!(
+        statuses(&result),
+        vec!["1:executed", "2:failed", "3:executed"],
+        "{result}"
+    );
+    let error = result["failure_details"][0]["error"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(error.contains("boom;inside"), "失败原因应保留例程体内的消息：{error}");
+
+    drop_procedure(&pool, "it_delim_err").await;
+}

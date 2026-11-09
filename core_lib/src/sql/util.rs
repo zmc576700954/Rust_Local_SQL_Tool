@@ -469,12 +469,33 @@ pub fn mysql_dml_targets(
     Ok(targets)
 }
 
+/// SQL 脚本拆分错误（`line` 为 1-based 行号）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlSplitError {
+    pub line: usize,
+    pub message: String,
+}
+
+impl std::fmt::Display for SqlSplitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "第 {} 行：{}", self.line, self.message)
+    }
+}
+
+impl std::error::Error for SqlSplitError {}
+
 /// 把 SQL 脚本拆成独立语句。
 ///
-/// 按顶层分号拆分，字符串（单引号/双引号/反引号）、行注释、块注释与
-/// PostgreSQL 美元引号（`$$...$$`、`$tag$...$tag$`）里的分号不参与拆分。
-/// 纯空白或纯注释片段会被丢弃。
-pub fn split_sql_statements(sql: &str) -> Vec<String> {
+/// 支持：
+/// - 客户端 `DELIMITER xx` / `DELIMITER ;` 指令（指令本身不进入结果）；
+/// - 字符串（单引号/双引号/反引号）、行注释、块注释、PostgreSQL 美元引号
+///   （`$$...$$`、`$tag$...$tag$`）里的分号不参与拆分；
+/// - MySQL `CREATE PROCEDURE/FUNCTION/TRIGGER/EVENT` 的 `BEGIN...END` 复合体
+///   （含嵌套 `BEGIN`、`END IF/LOOP/WHILE/REPEAT/CASE` 与 CASE 表达式）。
+///
+/// 安全约束：例程体使用 `BEGIN...END` 但当前终止符仍是 `;` 时，无法确定
+/// 例程边界。此时返回带行号的错误并建议补 `DELIMITER`，绝不「猜着切」。
+pub fn split_sql_statements(sql: &str) -> Result<Vec<String>, SqlSplitError> {
     #[derive(Clone, PartialEq)]
     enum State {
         Normal,
@@ -484,6 +505,145 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
         DoubleQuote,
         Backtick,
         DollarQuote(String),
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Frame {
+        Block,
+        CaseExpression,
+    }
+
+    struct RoutineCtx {
+        saw_create: bool,
+        header_done: bool,
+        routine: bool,
+        routine_label: &'static str,
+        body_started: bool,
+        frames: Vec<Frame>,
+        start_line: usize,
+        /// `END IF/LOOP/WHILE/REPEAT/CASE` 里的后缀关键字不应再被当成块起点。
+        skip_word_once: Option<String>,
+    }
+
+    impl RoutineCtx {
+        fn new() -> Self {
+            Self {
+                saw_create: false,
+                header_done: false,
+                routine: false,
+                routine_label: "",
+                body_started: false,
+                frames: Vec::new(),
+                start_line: 0,
+                skip_word_once: None,
+            }
+        }
+
+        fn reset(&mut self) {
+            *self = Self::new();
+        }
+    }
+
+    fn is_word_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_'
+    }
+
+    /// 读取 `END` 之后的下一个关键字（跳过空白，含换行，
+    /// 以兼容 `END\nIF` 这种换行书写；终止符本身不是单词字符，会自然停止）。
+    fn peek_keyword(chars: &[char], mut idx: usize) -> String {
+        while idx < chars.len() && chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        let start = idx;
+        while idx < chars.len() && is_word_char(chars[idx]) {
+            idx += 1;
+        }
+        chars[start..idx].iter().collect::<String>().to_ascii_uppercase()
+    }
+
+    fn pop_case(frames: &mut Vec<Frame>) {
+        if matches!(frames.last(), Some(Frame::CaseExpression)) {
+            frames.pop();
+        }
+    }
+
+    fn register_word(ctx: &mut RoutineCtx, raw: &str, chars: &[char], next_idx: usize) {
+        let word = raw.to_ascii_uppercase();
+        if ctx.header_done {
+            if !ctx.routine {
+                return;
+            }
+            if let Some(expected) = ctx.skip_word_once.take() {
+                if word == expected {
+                    return;
+                }
+            }
+            match word.as_str() {
+                "BEGIN" => {
+                    ctx.body_started = true;
+                    ctx.frames.push(Frame::Block);
+                }
+                "CASE" if ctx.body_started => ctx.frames.push(Frame::CaseExpression),
+                "END" if ctx.body_started => {
+                    let suffix = peek_keyword(chars, next_idx);
+                    match suffix.as_str() {
+                        // IF/LOOP/WHILE/REPEAT 的结束标记，不关闭 BEGIN 块；
+                        // CASE 结束标记关闭 CASE 帧。后缀关键字随后会被跳过。
+                        "IF" | "LOOP" | "WHILE" | "REPEAT" | "CASE" => {
+                            if suffix == "CASE" {
+                                pop_case(&mut ctx.frames);
+                            }
+                            ctx.skip_word_once = Some(suffix);
+                        }
+                        _ => match ctx.frames.last() {
+                            Some(Frame::CaseExpression) => {
+                                ctx.frames.pop();
+                            }
+                            Some(Frame::Block) => {
+                                ctx.frames.pop();
+                            }
+                            None => {}
+                        },
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if !ctx.saw_create {
+            ctx.saw_create = true;
+            if word != "CREATE" {
+                ctx.header_done = true;
+            }
+            return;
+        }
+
+        match word.as_str() {
+            "OR" | "REPLACE" | "DEFINER" | "ALGORITHM" | "SQL" | "SECURITY" | "INVOKER"
+            | "AGGREGATE" | "TEMPORARY" => {}
+            "PROCEDURE" => {
+                ctx.routine = true;
+                ctx.routine_label = "PROCEDURE";
+                ctx.header_done = true;
+            }
+            "FUNCTION" => {
+                ctx.routine = true;
+                ctx.routine_label = "FUNCTION";
+                ctx.header_done = true;
+            }
+            "TRIGGER" => {
+                ctx.routine = true;
+                ctx.routine_label = "TRIGGER";
+                ctx.header_done = true;
+            }
+            "EVENT" => {
+                ctx.routine = true;
+                ctx.routine_label = "EVENT";
+                ctx.header_done = true;
+            }
+            _ => ctx.header_done = true,
+        }
     }
 
     // 尝试识别 `$tag$` 形式的美元引号开头，返回 (tag, 开标记长度)。
@@ -502,163 +662,338 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
         None
     }
 
+    fn starts_with_ci(chars: &[char], start: usize, needle: &str) -> bool {
+        let needle: Vec<char> = needle.chars().collect();
+        if start + needle.len() > chars.len() {
+            return false;
+        }
+        chars[start..start + needle.len()]
+            .iter()
+            .zip(&needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    }
+
     let chars: Vec<char> = sql.chars().collect();
-    let mut statements = Vec::new();
+    let mut statements: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut has_code = false;
     let mut state = State::Normal;
+    let mut delimiter: Vec<char> = vec![';'];
     let mut i = 0usize;
+    let mut line = 1usize;
+    let mut at_line_start = true;
+    let mut word = String::new();
+    let mut ctx = RoutineCtx::new();
 
     while i < chars.len() {
         let c = chars[i];
-        match state.clone() {
-            State::Normal => match c {
+
+        if matches!(state, State::Normal) {
+            // DELIMITER 指令只在自己行首、且当前没有语句内容时生效。
+            if at_line_start
+                && !has_code
+                && starts_with_ci(&chars, i, "DELIMITER")
+                && chars
+                    .get(i + "DELIMITER".len())
+                    .map(|ch| ch.is_whitespace())
+                    .unwrap_or(false)
+            {
+                let mut end = i + "DELIMITER".len();
+                while end < chars.len() && chars[end] != '\n' {
+                    end += 1;
+                }
+                let rest: String = chars[i + "DELIMITER".len()..end].iter().collect();
+                let token = rest.split_whitespace().next().unwrap_or("");
+                if token.is_empty() {
+                    return Err(SqlSplitError {
+                        line,
+                        message: "DELIMITER 指令缺少终止符，例如应写成 `DELIMITER $$` 或 `DELIMITER ;`"
+                            .to_string(),
+                    });
+                }
+                delimiter = token.chars().collect();
+                current.clear();
+                word.clear();
+                has_code = false;
+                ctx.reset();
+                if end < chars.len() {
+                    end += 1;
+                    line += 1;
+                }
+                i = end;
+                at_line_start = true;
+                continue;
+            }
+
+            // 先判断终止符：它可能以 `$`、`/` 等字符开头，必须先于引号/注释判断。
+            let delim_len = delimiter.len();
+            if delim_len > 0
+                && i + delim_len <= chars.len()
+                && chars[i..i + delim_len] == delimiter[..]
+            {
+                if !word.is_empty() {
+                    register_word(&mut ctx, &word, &chars, i + delim_len);
+                    word.clear();
+                }
+                if !ctx.frames.is_empty() {
+                    // 例程体未闭合前就撞上了终止符：若终止符还是默认的 `;`，
+                    // 说明脚本缺少 `DELIMITER` 指令，明确拒绝而不是猜着切。
+                    if delimiter.len() == 1 && delimiter[0] == ';' {
+                        return Err(SqlSplitError {
+                            line: ctx.start_line.max(1),
+                            message: format!(
+                                "第 {} 行开始的 CREATE {} 语句包含 BEGIN...END 复合体，但终止符仍是 ';'（首次在体内遇到分号于第 {} 行），无法确定例程边界，已拒绝拆分以避免执行半截 SQL。请在例程前添加 `DELIMITER $$`、以 `$$` 结束该例程，并在其后用 `DELIMITER ;` 恢复；PostgreSQL 请用 $$...$$ 美元引用包裹函数体",
+                                ctx.start_line.max(1),
+                                ctx.routine_label,
+                                line
+                            ),
+                        });
+                    }
+                    return Err(SqlSplitError {
+                        line: ctx.start_line.max(1),
+                        message: format!(
+                            "第 {} 行开始的 CREATE {} 语句 BEGIN...END 体未闭合（当前终止符 '{}'）",
+                            ctx.start_line.max(1),
+                            ctx.routine_label,
+                            delimiter.iter().collect::<String>()
+                        ),
+                    });
+                }
+                if has_code {
+                    let stmt = current.trim();
+                    if !stmt.is_empty() {
+                        statements.push(stmt.to_string());
+                    }
+                }
+                current.clear();
+                has_code = false;
+                ctx.reset();
+                i += delim_len;
+                at_line_start = false;
+                continue;
+            }
+
+            match c {
                 '-' if chars.get(i + 1) == Some(&'-') => {
+                    if !word.is_empty() {
+                        register_word(&mut ctx, &word, &chars, i);
+                        word.clear();
+                    }
                     current.push('-');
                     current.push('-');
+                    at_line_start = false;
                     i += 2;
                     state = State::LineComment;
                 }
                 '#' => {
+                    if !word.is_empty() {
+                        register_word(&mut ctx, &word, &chars, i);
+                        word.clear();
+                    }
                     current.push(c);
+                    at_line_start = false;
                     i += 1;
                     state = State::LineComment;
                 }
                 '/' if chars.get(i + 1) == Some(&'*') => {
+                    if !word.is_empty() {
+                        register_word(&mut ctx, &word, &chars, i);
+                        word.clear();
+                    }
                     current.push('/');
                     current.push('*');
+                    at_line_start = false;
                     i += 2;
                     state = State::BlockComment;
                 }
-                '\'' => {
+                '\'' | '"' | '`' => {
+                    if !word.is_empty() {
+                        register_word(&mut ctx, &word, &chars, i);
+                        word.clear();
+                    }
+                    if !has_code {
+                        ctx.start_line = line;
+                    }
                     current.push(c);
                     has_code = true;
+                    at_line_start = false;
                     i += 1;
-                    state = State::SingleQuote;
-                }
-                '"' => {
-                    current.push(c);
-                    has_code = true;
-                    i += 1;
-                    state = State::DoubleQuote;
-                }
-                '`' => {
-                    current.push(c);
-                    has_code = true;
-                    i += 1;
-                    state = State::Backtick;
+                    state = match c {
+                        '\'' => State::SingleQuote,
+                        '"' => State::DoubleQuote,
+                        _ => State::Backtick,
+                    };
                 }
                 '$' => match dollar_open(&chars, i) {
                     Some((tag, len)) => {
+                        if !has_code {
+                            ctx.start_line = line;
+                        }
                         current.extend(&chars[i..i + len]);
                         has_code = true;
+                        at_line_start = false;
                         i += len;
                         state = State::DollarQuote(tag);
                     }
                     None => {
+                        if !has_code {
+                            ctx.start_line = line;
+                        }
                         current.push(c);
                         has_code = true;
+                        at_line_start = false;
                         i += 1;
                     }
                 },
-                ';' => {
-                    if has_code {
-                        let stmt = current.trim();
-                        if !stmt.is_empty() {
-                            statements.push(stmt.to_string());
-                        }
+                _ if is_word_char(c) => {
+                    if !has_code {
+                        ctx.start_line = line;
+                        has_code = true;
                     }
-                    current.clear();
-                    has_code = false;
+                    current.push(c);
+                    word.push(c);
+                    at_line_start = false;
                     i += 1;
                 }
                 _ => {
+                    if !word.is_empty() {
+                        register_word(&mut ctx, &word, &chars, i);
+                        word.clear();
+                    }
                     if !c.is_whitespace() {
+                        if !has_code {
+                            ctx.start_line = line;
+                        }
                         has_code = true;
+                        at_line_start = false;
+                    } else if c == '\n' {
+                        line += 1;
+                        at_line_start = true;
                     }
                     current.push(c);
                     i += 1;
                 }
-            },
-            State::LineComment => {
-                current.push(c);
-                i += 1;
-                if c == '\n' {
-                    state = State::Normal;
-                }
             }
-            State::BlockComment => {
-                current.push(c);
-                i += 1;
-                if c == '*' && chars.get(i) == Some(&'/') {
-                    current.push('/');
+        } else {
+            match state.clone() {
+                State::LineComment => {
+                    current.push(c);
                     i += 1;
-                    state = State::Normal;
+                    if c == '\n' {
+                        line += 1;
+                        at_line_start = true;
+                        state = State::Normal;
+                    }
                 }
-            }
-            State::SingleQuote => {
-                current.push(c);
-                i += 1;
-                if c == '\'' {
-                    if chars.get(i) == Some(&'\'') {
-                        current.push('\'');
+                State::BlockComment => {
+                    current.push(c);
+                    i += 1;
+                    if c == '\n' {
+                        line += 1;
+                        at_line_start = true;
+                    }
+                    if c == '*' && chars.get(i) == Some(&'/') {
+                        current.push('/');
                         i += 1;
-                    } else {
                         state = State::Normal;
                     }
                 }
-            }
-            State::DoubleQuote => {
-                current.push(c);
-                i += 1;
-                if c == '"' {
-                    if chars.get(i) == Some(&'"') {
-                        current.push('"');
-                        i += 1;
-                    } else {
-                        state = State::Normal;
+                State::SingleQuote => {
+                    current.push(c);
+                    i += 1;
+                    if c == '\n' {
+                        line += 1;
+                        at_line_start = true;
+                    }
+                    if c == '\'' {
+                        if chars.get(i) == Some(&'\'') {
+                            current.push('\'');
+                            i += 1;
+                        } else {
+                            state = State::Normal;
+                        }
                     }
                 }
-            }
-            State::Backtick => {
-                current.push(c);
-                i += 1;
-                if c == '`' {
-                    if chars.get(i) == Some(&'`') {
-                        current.push('`');
-                        i += 1;
-                    } else {
-                        state = State::Normal;
+                State::DoubleQuote => {
+                    current.push(c);
+                    i += 1;
+                    if c == '\n' {
+                        line += 1;
+                        at_line_start = true;
+                    }
+                    if c == '"' {
+                        if chars.get(i) == Some(&'"') {
+                            current.push('"');
+                            i += 1;
+                        } else {
+                            state = State::Normal;
+                        }
                     }
                 }
-            }
-            State::DollarQuote(tag) => {
-                if c == '$' {
-                    let tag_len = tag.chars().count();
-                    let closes = tag.chars().enumerate().all(|(k, tc)| {
-                        chars.get(i + 1 + k) == Some(&tc)
-                    }) && chars.get(i + 1 + tag_len) == Some(&'$');
-                    if closes {
-                        let len = tag_len + 2;
-                        current.extend(&chars[i..i + len]);
-                        i += len;
-                        state = State::Normal;
-                        continue;
+                State::Backtick => {
+                    current.push(c);
+                    i += 1;
+                    if c == '\n' {
+                        line += 1;
+                        at_line_start = true;
+                    }
+                    if c == '`' {
+                        if chars.get(i) == Some(&'`') {
+                            current.push('`');
+                            i += 1;
+                        } else {
+                            state = State::Normal;
+                        }
                     }
                 }
-                current.push(c);
-                i += 1;
+                State::DollarQuote(tag) => {
+                    if c == '$' {
+                        let tag_len = tag.chars().count();
+                        let closes = tag
+                            .chars()
+                            .enumerate()
+                            .all(|(k, tc)| chars.get(i + 1 + k) == Some(&tc))
+                            && chars.get(i + 1 + tag_len) == Some(&'$');
+                        if closes {
+                            let len = tag_len + 2;
+                            current.extend(&chars[i..i + len]);
+                            i += len;
+                            state = State::Normal;
+                            continue;
+                        }
+                    }
+                    current.push(c);
+                    i += 1;
+                    if c == '\n' {
+                        line += 1;
+                        at_line_start = true;
+                    }
+                }
+                State::Normal => unreachable!(),
             }
         }
     }
 
+    if !word.is_empty() {
+        register_word(&mut ctx, &word, &chars, chars.len());
+    }
+    if ctx.routine && !ctx.frames.is_empty() {
+        return Err(SqlSplitError {
+            line: ctx.start_line.max(1),
+            message: format!(
+                "第 {} 行开始的 CREATE {} 语句 BEGIN...END 体未闭合",
+                ctx.start_line.max(1),
+                ctx.routine_label
+            ),
+        });
+    }
     if has_code {
         let stmt = current.trim();
         if !stmt.is_empty() {
             statements.push(stmt.to_string());
         }
     }
-    statements
+    Ok(statements)
 }
 
 /// MySQL 表名引用：支持 `db.table` 两级，分别加反引号。
@@ -1610,7 +1945,7 @@ mod tests {
     #[test]
     fn split_sql_statements_ignores_semicolons_in_strings_and_comments() {
         let script = "SELECT 1; SELECT ';' AS s; -- comment ;\n/* block ; */ SELECT 2;";
-        let stmts = split_sql_statements(script);
+        let stmts = split_sql_statements(script).expect("拆分失败");
         assert_eq!(stmts.len(), 3, "实际拆分：{stmts:?}");
         assert!(stmts[1].contains("';'"));
         assert!(stmts[2].contains("SELECT 2"));
@@ -1620,7 +1955,7 @@ mod tests {
     fn split_sql_statements_handles_dollar_quotes_and_escaped_quotes() {
         let script = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN PERFORM 1; END $$ LANGUAGE plpgsql;\
                       SELECT 'it''s;ok'; SELECT `a;b` FROM t;";
-        let stmts = split_sql_statements(script);
+        let stmts = split_sql_statements(script).expect("拆分失败");
         assert_eq!(stmts.len(), 3, "实际拆分：{stmts:?}");
         assert!(stmts[0].contains("PERFORM 1; END"));
         assert!(stmts[1].contains("it''s;ok"));
@@ -1629,11 +1964,126 @@ mod tests {
 
     #[test]
     fn split_sql_statements_drops_empty_and_comment_only_fragments() {
-        let stmts = split_sql_statements(" ; -- only comment\n /* another */ ;  ");
+        let stmts = split_sql_statements(" ; -- only comment\n /* another */ ;  ").expect("拆分失败");
         assert!(stmts.is_empty(), "实际拆分：{stmts:?}");
 
-        let stmts = split_sql_statements("SELECT 1; ; ; SELECT 2");
+        let stmts = split_sql_statements("SELECT 1; ; ; SELECT 2").expect("拆分失败");
         assert_eq!(stmts, vec!["SELECT 1".to_string(), "SELECT 2".to_string()]);
+    }
+
+    #[test]
+    fn split_sql_statements_switches_delimiter_for_routine_body() {
+        let script = "DELIMITER $$\n\
+                      CREATE PROCEDURE p()\n\
+                      BEGIN\n\
+                        SELECT 'a;b';\n\
+                        IF 1 THEN\n\
+                          SELECT 2;\n\
+                        END IF;\n\
+                      END$$\n\
+                      DELIMITER ;\n\
+                      INSERT INTO t VALUES (1);";
+        let stmts = split_sql_statements(script).expect("拆分失败");
+        assert_eq!(stmts.len(), 2, "实际拆分：{stmts:?}");
+        assert!(stmts[0].starts_with("CREATE PROCEDURE p()"), "{:?}", stmts[0]);
+        assert!(stmts[0].contains("SELECT 'a;b';"));
+        assert!(stmts[0].contains("END IF;"));
+        assert!(stmts[0].ends_with("END"), "{:?}", stmts[0]);
+        assert_eq!(stmts[1], "INSERT INTO t VALUES (1)");
+    }
+
+    #[test]
+    fn split_sql_statements_handles_nested_begin_end() {
+        let script = "DELIMITER //\n\
+                      CREATE PROCEDURE p()\n\
+                      BEGIN\n\
+                        BEGIN\n\
+                          SELECT 1;\n\
+                        END;\n\
+                        SELECT 2;\n\
+                      END//\n\
+                      DELIMITER ;\n";
+        let stmts = split_sql_statements(script).expect("拆分失败");
+        assert_eq!(stmts.len(), 1, "实际拆分：{stmts:?}");
+        assert!(stmts[0].contains("SELECT 2;"), "{:?}", stmts[0]);
+        assert!(stmts[0].ends_with("END"), "{:?}", stmts[0]);
+    }
+
+    #[test]
+    fn split_sql_statements_handles_case_and_loop_end_markers() {
+        let script = "DELIMITER $$\n\
+                      CREATE PROCEDURE p(IN x INT)\n\
+                      BEGIN\n\
+                        CASE x\n\
+                          WHEN 1 THEN SELECT 'one;';\n\
+                          ELSE SELECT 'other;';\n\
+                        END CASE;\n\
+                        SELECT CASE WHEN x > 0 THEN 1 ELSE 0 END;\n\
+                        LOOP\n\
+                          SET x = x + 1;\n\
+                          IF x > 3 THEN LEAVE l; END IF;\n\
+                        END LOOP;\n\
+                      END$$\n\
+                      DELIMITER ;\n";
+        let stmts = split_sql_statements(script).expect("拆分失败");
+        assert_eq!(stmts.len(), 1, "实际拆分：{stmts:?}");
+        assert!(stmts[0].contains("END CASE;"), "{:?}", stmts[0]);
+        assert!(stmts[0].contains("END LOOP;"), "{:?}", stmts[0]);
+    }
+
+    #[test]
+    fn split_sql_statements_rejects_routine_body_without_delimiter() {
+        let script = "CREATE PROCEDURE p()\n\
+                      BEGIN\n\
+                        SELECT 1;\n\
+                        SELECT 2;\n\
+                      END;";
+        let err = split_sql_statements(script).expect_err("缺少 DELIMITER 必须拒绝拆分");
+        assert_eq!(err.line, 1, "错误行号应指向例程起始行：{err}");
+        assert!(err.message.contains("PROCEDURE"), "{err}");
+        assert!(err.message.contains("DELIMITER"), "{err}");
+        assert!(err.message.contains("第 3 行"), "应指出体内首个分号的行号：{err}");
+
+        // 触发器体同样拒绝。
+        let trigger = "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW\n\
+                       BEGIN\n\
+                         SET NEW.a = 1;\n\
+                       END;";
+        let err = split_sql_statements(trigger).expect_err("触发器体缺少 DELIMITER 必须拒绝");
+        assert!(err.message.contains("TRIGGER"), "{err}");
+        assert!(err.message.contains("DELIMITER"), "{err}");
+    }
+
+    #[test]
+    fn split_sql_statements_reports_unclosed_routine_body() {
+        let script = "DELIMITER $$\nCREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n";
+        let err = split_sql_statements(script).expect_err("未闭合的例程体必须报错");
+        assert_eq!(err.line, 2, "错误行号应指向 CREATE 所在行：{err}");
+        assert!(err.message.contains("未闭合"), "{err}");
+    }
+
+    #[test]
+    fn split_sql_statements_rejects_delimiter_without_token() {
+        let err = split_sql_statements("DELIMITER\nSELECT 1;").expect_err("缺少终止符必须报错");
+        assert_eq!(err.line, 1, "{err}");
+        assert!(err.message.contains("DELIMITER"), "{err}");
+    }
+
+    #[test]
+    fn split_sql_statements_splits_single_statement_routine_with_default_delimiter() {
+        let stmts = split_sql_statements("CREATE PROCEDURE p() SELECT 1; SELECT 2;").expect("拆分失败");
+        assert_eq!(stmts.len(), 2, "实际拆分：{stmts:?}");
+        assert!(stmts[0].contains("CREATE PROCEDURE p() SELECT 1"));
+    }
+
+    #[test]
+    fn split_sql_statements_handles_pg_tagged_dollar_quote() {
+        let script = "CREATE FUNCTION f() RETURNS int AS $body$ SELECT 1; $body$ LANGUAGE sql;\n\
+                      SELECT 2;";
+        let stmts = split_sql_statements(script).expect("拆分失败");
+        assert_eq!(stmts.len(), 2, "实际拆分：{stmts:?}");
+        assert!(stmts[0].contains("$body$ SELECT 1; $body$"), "{:?}", stmts[0]);
+        assert_eq!(stmts[1], "SELECT 2");
     }
 
     #[test]
