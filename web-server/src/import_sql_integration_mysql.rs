@@ -2,10 +2,15 @@
 //!
 //! 运行方式：
 //! ```bash
-//! IMPORT_SQL_MYSQL_URL='mysql://root:password@127.0.0.1:13306/e2e' \
-//!   cargo test -p web-server --bin web-server import_sql_mysql -- --nocapture
+//! IMPORT_SQL_MYSQL_URL='mysql://root:password@127.0.0.1:33306/e2e' \
+//!   cargo test -p web-server --bin web-server import_sql_integration_mysql -- --nocapture
 //! ```
 //! 未设置环境变量时逐条打印跳过信息并直接返回，不影响常规 `cargo test`。
+//!
+//! 同一套用例已验证 MySQL 8.0 与 MariaDB 11：隐式提交判定清单（DDL、LOCK TABLES、
+//! SET autocommit、CALL、事务控制）、PREPARE/EXECUTE、DDL 失败残留、纯 DML 回滚、
+//! 跳过继续模式与引擎降级行为均一致。MariaDB 额外支持 Aria 引擎，由「非 InnoDB
+//! 引擎一律降级」的判定覆盖，未单独构造 Aria 用例。
 //!
 //! 断言一律回查数据库真实状态（表是否存在、行数、残留主键），不只信接口返回的
 //! atomic/rolled_back 字段。
@@ -533,6 +538,43 @@ async fn mysql_skip_errors_summarizes_failures_and_continues() {
 }
 
 // ------------------------- 事务引擎边界 -------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_explicit_transaction_control_uses_non_atomic_path() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    drop_tables(&pool, &["it_tx"]).await;
+    exec(
+        &pool,
+        "CREATE TABLE it_tx (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB",
+    )
+    .await;
+
+    // 脚本自带 BEGIN/ROLLBACK：不能在外层再包事务，走非原子路径逐条执行。
+    let result = run_script(
+        &client,
+        "BEGIN;
+         INSERT INTO it_tx VALUES (1, 'a');
+         ROLLBACK;",
+        false,
+    )
+    .await
+    .expect("应返回结构化结果");
+
+    assert_eq!(result["success"], Value::Bool(true));
+    assert_eq!(result["completed"], Value::Bool(true));
+    assert_eq!(result["atomic"], Value::Bool(false));
+    assert_eq!(result["executed_statements"], Value::from(3));
+    let reason = reason(&result);
+    assert!(
+        reason.contains("隐式提交") && reason.contains("BEGIN"),
+        "no_transaction_reason 应指向事务控制语句：{reason}"
+    );
+    // 脚本自己的 ROLLBACK 生效：库内没有残留。
+    assert_eq!(row_count(&pool, "it_tx").await, 0);
+
+    drop_tables(&pool, &["it_tx"]).await;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_myisam_script_downgrades_full_rollback_claim() {
