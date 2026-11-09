@@ -166,8 +166,44 @@ impl TableSnapshot {
     }
 
     pub fn snapshot_hash(&self) -> String {
-        hash_json(self)
+        // 结构哈希只应对“结构”负责：
+        // - MariaDB 的 SHOW CREATE TABLE 会带上当前自增值（AUTO_INCREMENT=n），写入数据后会变；
+        // - 索引 CARDINALITY 是统计信息，随数据写入实时变化。
+        // 两者都会让续跑误判结构漂移，这里统一剔除。
+        let mut normalized = self.clone();
+        if let Some(sql) = &normalized.create_table_sql {
+            normalized.create_table_sql = Some(strip_auto_increment_counter(sql));
+        }
+        for index in &mut normalized.indexes {
+            for column in &mut index.columns {
+                column.cardinality = None;
+            }
+        }
+        hash_json(&normalized)
     }
+}
+
+/// 去掉 SHOW CREATE TABLE 输出中的 `AUTO_INCREMENT=<数字>` 易变计数。
+fn strip_auto_increment_counter(sql: &str) -> String {
+    let lower = sql.to_ascii_lowercase();
+    let needle = "auto_increment=";
+    let mut out = String::with_capacity(sql.len());
+    let mut cursor = 0;
+    while let Some(offset) = lower[cursor..].find(needle) {
+        let mut start = cursor + offset;
+        let mut end = start + needle.len();
+        while end < sql.len() && sql.as_bytes()[end].is_ascii_digit() {
+            end += 1;
+        }
+        // 连同前导空格一起删掉，避免留下两个连续空格导致哈希仍不稳定。
+        if start > 0 && sql.as_bytes()[start - 1] == b' ' {
+            start -= 1;
+        }
+        out.push_str(&sql[cursor..start]);
+        cursor = end;
+    }
+    out.push_str(&sql[cursor..]);
+    out
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -782,4 +818,59 @@ pub fn hash_token(token: &str) -> String {
 
 pub fn now() -> i64 {
     now_ts()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(create_sql: &str) -> TableSnapshot {
+        TableSnapshot {
+            db_name: "e2e".into(),
+            table_name: "t".into(),
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            create_table_sql: Some(create_sql.into()),
+        }
+    }
+
+    #[test]
+    fn snapshot_hash_ignores_index_cardinality() {
+        let mut fresh = snapshot("CREATE TABLE `t` (`id` int, KEY `idx` (`id`)) ENGINE=InnoDB");
+        fresh.indexes.push(IndexDefinition {
+            name: "idx".into(),
+            unique: false,
+            index_type: "BTREE".into(),
+            columns: vec![IndexColumn {
+                name: "id".into(),
+                seq: 1,
+                cardinality: Some(0),
+            }],
+        });
+        let mut grown = fresh.clone();
+        grown.indexes[0].columns[0].cardinality = Some(100_000);
+        assert_eq!(fresh.snapshot_hash(), grown.snapshot_hash());
+    }
+
+    #[test]
+    fn snapshot_hash_ignores_auto_increment_counter() {
+        let fresh = snapshot(
+            "CREATE TABLE `t` (`id` int NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        );
+        let grown = snapshot(
+            "CREATE TABLE `t` (`id` int NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB AUTO_INCREMENT=42 DEFAULT CHARSET=utf8mb4",
+        );
+        assert_eq!(fresh.snapshot_hash(), grown.snapshot_hash());
+    }
+
+    #[test]
+    fn snapshot_hash_still_detects_real_ddl_change() {
+        let v1 = snapshot(
+            "CREATE TABLE `t` (`id` int NOT NULL AUTO_INCREMENT, `v` int DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        );
+        let v2 = snapshot(
+            "CREATE TABLE `t` (`id` int NOT NULL AUTO_INCREMENT, `v` bigint DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=utf8mb4",
+        );
+        assert_ne!(v1.snapshot_hash(), v2.snapshot_hash());
+    }
 }
