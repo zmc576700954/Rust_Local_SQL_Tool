@@ -23,6 +23,9 @@ use core_lib::db::DbClient;
 use core_lib::error::AppError;
 use serde_json::Value;
 use sqlx::MySqlPool;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static DB_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn mysql_url() -> Option<String> {
     match std::env::var("IMPORT_SQL_MYSQL_URL") {
@@ -32,6 +35,64 @@ fn mysql_url() -> Option<String> {
             None
         }
     }
+}
+
+/// 运行内唯一的库名后缀：进程号 + 自增序号 + 纳秒时间，避免并行用例互相干扰。
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        DB_SEQ.fetch_add(1, Ordering::Relaxed),
+        nanos
+    )
+}
+
+fn unique_db(prefix: &str) -> String {
+    format!("{prefix}_{}", unique_suffix())
+}
+
+/// 换掉 URL 里的库名，保留账号、主机、端口与查询参数。
+fn with_database(url: &str, db: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((base, tail)) => {
+            let query = tail.find('?').map(|i| &tail[i..]).unwrap_or("");
+            format!("{base}/{db}{query}")
+        }
+        None => format!("{url}/{db}"),
+    }
+}
+
+/// 创建本用例独占的库；同名库若存在（极端情况下的残留）先整体清掉。
+async fn create_database(admin_pool: &MySqlPool, db: &str) {
+    exec(admin_pool, &format!("DROP DATABASE IF EXISTS `{db}`")).await;
+    exec(
+        admin_pool,
+        &format!("CREATE DATABASE IF NOT EXISTS `{db}`"),
+    )
+    .await;
+}
+
+/// 只删除本用例创建的库；失败必须显式报错，不能静默吞掉。
+async fn cleanup_database(admin_pool: &MySqlPool, db: &str) {
+    let sql = format!("DROP DATABASE IF EXISTS `{db}`");
+    if let Err(err) = sqlx::Executor::execute(admin_pool, sqlx::raw_sql(&sql)).await {
+        eprintln!("清理失败: 数据库 `{db}`: {err}\nSQL: {sql}");
+        panic!("清理失败: 数据库 `{db}`: {err}");
+    }
+}
+
+/// 连接管理库并创建本用例独占的库，返回库名与管理连接。
+async fn isolated_database(base_url: &str, prefix: &str) -> (String, MySqlPool) {
+    let admin_pool = MySqlPool::connect(base_url)
+        .await
+        .expect("连接 MySQL 失败，请确认 compose 服务已就绪");
+    let db = unique_db(prefix);
+    create_database(&admin_pool, &db).await;
+    (db, admin_pool)
 }
 
 async fn connect(url: &str) -> (DbClient, MySqlPool) {
@@ -148,7 +209,9 @@ fn reason(result: &Value) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_ddl_script_failure_reports_partial_state_and_keeps_rows() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_ddl_fail"]).await;
 
@@ -186,11 +249,14 @@ async fn mysql_ddl_script_failure_reports_partial_state_and_keeps_rows() {
     assert!(!message(&result).is_empty());
 
     drop_tables(&pool, &["it_ddl_fail"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_failure_at_first_statement_leaves_no_new_rows() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_fail_first"]).await;
     exec(
@@ -222,11 +288,14 @@ async fn mysql_failure_at_first_statement_leaves_no_new_rows() {
     assert_eq!(row_count(&pool, "it_fail_first").await, 1);
 
     drop_tables(&pool, &["it_fail_first"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_failure_at_middle_statement_keeps_only_earlier_rows() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_fail_mid"]).await;
     exec(
@@ -264,11 +333,14 @@ async fn mysql_failure_at_middle_statement_keeps_only_earlier_rows() {
     assert!(table_exists(&pool, "it_fail_mid_aux").await);
 
     drop_tables(&pool, &["it_fail_mid", "it_fail_mid_aux"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_failure_at_last_statement_reports_zero_remaining() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_fail_last"]).await;
     exec(
@@ -300,13 +372,16 @@ async fn mysql_failure_at_last_statement_reports_zero_remaining() {
     assert_eq!(row_count(&pool, "it_fail_last").await, 0);
 
     drop_tables(&pool, &["it_fail_last"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 各类非原子触发语句 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_dynamic_sql_prepare_execute_uses_non_atomic_path() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_dyn_rows", "it_dyn_created"]).await;
     exec(
@@ -353,11 +428,14 @@ async fn mysql_dynamic_sql_prepare_execute_uses_non_atomic_path() {
     assert_eq!(row_count(&pool, "it_dyn_rows").await, 1);
 
     drop_tables(&pool, &["it_dyn_rows", "it_dyn_created"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_call_statement_uses_non_atomic_path() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_call_rows"]).await;
     exec(&pool, "DROP PROCEDURE IF EXISTS it_call_proc").await;
@@ -395,11 +473,14 @@ async fn mysql_call_statement_uses_non_atomic_path() {
 
     drop_tables(&pool, &["it_call_rows"]).await;
     exec(&pool, "DROP PROCEDURE IF EXISTS it_call_proc").await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_set_autocommit_uses_non_atomic_path() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_autocommit"]).await;
     exec(
@@ -431,11 +512,14 @@ async fn mysql_set_autocommit_uses_non_atomic_path() {
     assert_eq!(row_count(&pool, "it_autocommit").await, 2);
 
     drop_tables(&pool, &["it_autocommit"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_lock_tables_uses_non_atomic_path() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_lock"]).await;
     exec(
@@ -465,11 +549,14 @@ async fn mysql_lock_tables_uses_non_atomic_path() {
     assert_eq!(row_count(&pool, "it_lock").await, 1);
 
     drop_tables(&pool, &["it_lock"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_reason_points_to_first_offending_statement() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_reason", "it_reason_aux"]).await;
     exec(
@@ -495,13 +582,16 @@ async fn mysql_reason_points_to_first_offending_statement() {
     assert_eq!(result["atomic"], Value::Bool(false));
 
     drop_tables(&pool, &["it_reason", "it_reason_aux"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 跳过继续 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_skip_errors_summarizes_failures_and_continues() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_skip", "it_skip_aux"]).await;
     exec(
@@ -552,13 +642,16 @@ async fn mysql_skip_errors_summarizes_failures_and_continues() {
     assert_eq!(row_count(&pool, "it_skip").await, 3);
 
     drop_tables(&pool, &["it_skip", "it_skip_aux"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 事务引擎边界 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_explicit_transaction_control_uses_non_atomic_path() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_tx"]).await;
     exec(
@@ -591,11 +684,14 @@ async fn mysql_explicit_transaction_control_uses_non_atomic_path() {
     assert_eq!(row_count(&pool, "it_tx").await, 0);
 
     drop_tables(&pool, &["it_tx"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_myisam_script_downgrades_full_rollback_claim() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_myisam"]).await;
     exec(
@@ -654,11 +750,14 @@ async fn mysql_myisam_script_downgrades_full_rollback_claim() {
     );
 
     drop_tables(&pool, &["it_myisam"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_mixed_engine_dml_lists_only_non_transactional_targets() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_mix_innodb", "it_mix_myisam"]).await;
     exec(
@@ -706,11 +805,14 @@ async fn mysql_mixed_engine_dml_lists_only_non_transactional_targets() {
     assert_eq!(ids_of(&pool, "it_mix_myisam").await, vec![1]);
 
     drop_tables(&pool, &["it_mix_innodb", "it_mix_myisam"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_memory_engine_script_downgrades_rollback_claim() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_memory"]).await;
     exec(
@@ -742,6 +844,7 @@ async fn mysql_memory_engine_script_downgrades_rollback_claim() {
     assert_eq!(row_count(&pool, "it_memory").await, 2);
 
     drop_tables(&pool, &["it_memory"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 跨库 DML 引擎核查 -------------------------
@@ -749,12 +852,16 @@ async fn mysql_memory_engine_script_downgrades_rollback_claim() {
 /// 跨库 MyISAM 表：必须降级，并且返回里要能看出是哪个库的表、什么引擎。
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_cross_database_myisam_table_downgrades_with_schema() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
-    exec(&pool, "CREATE DATABASE IF NOT EXISTS it_cross_mydb").await;
-    drop_tables(
+    let cross_db = unique_db("it_xdb");
+    create_database(&admin_pool, &cross_db).await;
+    exec(&pool, "DROP TABLE IF EXISTS it_xdb_local").await;
+    exec(
         &pool,
-        &["it_xdb_local", "it_cross_mydb.it_xdb_myisam"],
+        &format!("DROP TABLE IF EXISTS `{cross_db}`.it_xdb_myisam"),
     )
     .await;
     exec(
@@ -764,16 +871,20 @@ async fn mysql_cross_database_myisam_table_downgrades_with_schema() {
     .await;
     exec(
         &pool,
-        "CREATE TABLE it_cross_mydb.it_xdb_myisam (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=MyISAM",
+        &format!(
+            "CREATE TABLE `{cross_db}`.it_xdb_myisam (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=MyISAM"
+        ),
     )
     .await;
 
     let result = run_script(
         &client,
-        "INSERT INTO it_xdb_local VALUES (1, 'a');
-         INSERT INTO it_cross_mydb.it_xdb_myisam VALUES (1, 'm');
-         INSERT INTO it_xdb_local VALUES (2, 'b');
-         INSERT INTO it_cross_mydb.it_xdb_myisam VALUES (1, 'dup');",
+        &format!(
+            "INSERT INTO it_xdb_local VALUES (1, 'a');
+             INSERT INTO `{cross_db}`.it_xdb_myisam VALUES (1, 'm');
+             INSERT INTO it_xdb_local VALUES (2, 'b');
+             INSERT INTO `{cross_db}`.it_xdb_myisam VALUES (1, 'dup');"
+        ),
         false,
     )
     .await
@@ -789,7 +900,7 @@ async fn mysql_cross_database_myisam_table_downgrades_with_schema() {
         .expect("non_transactional_tables 应为数组");
     assert_eq!(listed.len(), 1, "{result}");
     // 跨库表必须能区分库名。
-    assert_eq!(listed[0]["schema"], "it_cross_mydb");
+    assert_eq!(listed[0]["schema"], cross_db);
     assert_eq!(listed[0]["table"], "it_xdb_myisam");
     assert_eq!(listed[0]["engine"], "MyISAM");
 
@@ -797,7 +908,7 @@ async fn mysql_cross_database_myisam_table_downgrades_with_schema() {
         .as_array()
         .expect("cross_database_tables 应为数组");
     assert_eq!(cross.len(), 1, "{result}");
-    assert_eq!(cross[0]["schema"], "it_cross_mydb");
+    assert_eq!(cross[0]["schema"], cross_db);
     assert_eq!(cross[0]["table"], "it_xdb_myisam");
     assert_eq!(cross[0]["engine"], "MyISAM");
     assert_eq!(cross[0]["transactional"], Value::Bool(false));
@@ -806,7 +917,7 @@ async fn mysql_cross_database_myisam_table_downgrades_with_schema() {
         result["engine_note"]
             .as_str()
             .unwrap_or_default()
-            .contains("it_cross_mydb.it_xdb_myisam(MyISAM)"),
+            .contains(&format!("{cross_db}.it_xdb_myisam(MyISAM)")),
         "engine_note 必须点名跨库非事务表：{}",
         result["engine_note"]
     );
@@ -817,29 +928,44 @@ async fn mysql_cross_database_myisam_table_downgrades_with_schema() {
 
     // 回查真实状态：当前库 InnoDB 回滚，跨库 MyISAM 残留。
     assert_eq!(row_count(&pool, "it_xdb_local").await, 0);
-    assert_eq!(row_count(&pool, "it_cross_mydb.it_xdb_myisam").await, 1);
+    assert_eq!(
+        row_count(&pool, &format!("`{cross_db}`.it_xdb_myisam")).await,
+        1
+    );
 
-    drop_tables(&pool, &["it_xdb_local", "it_cross_mydb.it_xdb_myisam"]).await;
+    cleanup_database(&admin_pool, &cross_db).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 /// 跨库 InnoDB 表：同实例内能查到真实引擎 → 维持 atomic=true。
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_cross_database_innodb_table_keeps_atomic_promise() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
-    exec(&pool, "CREATE DATABASE IF NOT EXISTS it_cross_mydb").await;
-    drop_tables(&pool, &["it_cross_mydb.it_xdb_innodb"]).await;
+    let cross_db = unique_db("it_xdb");
+    create_database(&admin_pool, &cross_db).await;
     exec(
         &pool,
-        "CREATE TABLE it_cross_mydb.it_xdb_innodb (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB",
+        &format!("DROP TABLE IF EXISTS `{cross_db}`.it_xdb_innodb"),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!(
+            "CREATE TABLE `{cross_db}`.it_xdb_innodb (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB"
+        ),
     )
     .await;
 
     let result = run_script(
         &client,
-        "INSERT INTO it_cross_mydb.it_xdb_innodb VALUES (1, 'a');
-         INSERT INTO it_cross_mydb.it_xdb_innodb VALUES (2, 'b');
-         INSERT INTO it_cross_mydb.it_xdb_innodb VALUES (1, 'dup');",
+        &format!(
+            "INSERT INTO `{cross_db}`.it_xdb_innodb VALUES (1, 'a');
+             INSERT INTO `{cross_db}`.it_xdb_innodb VALUES (2, 'b');
+             INSERT INTO `{cross_db}`.it_xdb_innodb VALUES (1, 'dup');"
+        ),
         false,
     )
     .await
@@ -860,34 +986,45 @@ async fn mysql_cross_database_innodb_table_keeps_atomic_promise() {
         .as_array()
         .expect("cross_database_tables 应为数组");
     assert_eq!(cross.len(), 1, "{result}");
-    assert_eq!(cross[0]["schema"], "it_cross_mydb");
+    assert_eq!(cross[0]["schema"], cross_db);
     assert_eq!(cross[0]["table"], "it_xdb_innodb");
     assert_eq!(cross[0]["engine"], "InnoDB");
     assert_eq!(cross[0]["transactional"], Value::Bool(true));
     let note = result["engine_note"].as_str().unwrap_or_default();
     assert!(note.contains("跨库表引擎已核实"), "{note}");
-    assert!(note.contains("it_cross_mydb.it_xdb_innodb=InnoDB"), "{note}");
+    assert!(
+        note.contains(&format!("{cross_db}.it_xdb_innodb=InnoDB")),
+        "{note}"
+    );
 
     assert_eq!(
         statuses(&result),
         vec!["1:rolled_back", "2:rolled_back", "3:failed"]
     );
-    assert_eq!(row_count(&pool, "it_cross_mydb.it_xdb_innodb").await, 0);
+    assert_eq!(
+        row_count(&pool, &format!("`{cross_db}`.it_xdb_innodb")).await,
+        0
+    );
 
-    drop_tables(&pool, &["it_cross_mydb.it_xdb_innodb"]).await;
+    cleanup_database(&admin_pool, &cross_db).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 /// 受限账号读不到目标库元数据：无法验证 → 降级，并说明是哪条语句、哪个库表、为什么。
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_cross_database_unverified_metadata_downgrades() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (_root_client, root_pool) = connect(&url).await;
+    let cross_db = unique_db("it_xdb");
+    create_database(&admin_pool, &cross_db).await;
     let limit_user = "it_xdb_limited";
     let limit_pw = "limited_pw";
-    exec(&root_pool, "CREATE DATABASE IF NOT EXISTS it_cross_mydb").await;
-    drop_tables(
+    exec(&root_pool, "DROP TABLE IF EXISTS it_xdb_local").await;
+    exec(
         &root_pool,
-        &["it_xdb_local", "it_cross_mydb.it_xdb_hidden"],
+        &format!("DROP TABLE IF EXISTS `{cross_db}`.it_xdb_hidden"),
     )
     .await;
     exec(
@@ -897,7 +1034,9 @@ async fn mysql_cross_database_unverified_metadata_downgrades() {
     .await;
     exec(
         &root_pool,
-        "CREATE TABLE it_cross_mydb.it_xdb_hidden (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB",
+        &format!(
+            "CREATE TABLE `{cross_db}`.it_xdb_hidden (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB"
+        ),
     )
     .await;
     // 只授权当前库；目标库的表存在但该账号看不到其元数据。
@@ -922,8 +1061,10 @@ async fn mysql_cross_database_unverified_metadata_downgrades() {
 
     let result = run_script(
         &limited_client,
-        "INSERT INTO it_xdb_local VALUES (1, 'a');
-         INSERT INTO it_cross_mydb.it_xdb_hidden VALUES (1, 'h');",
+        &format!(
+            "INSERT INTO it_xdb_local VALUES (1, 'a');
+             INSERT INTO `{cross_db}`.it_xdb_hidden VALUES (1, 'h');"
+        ),
         false,
     )
     .await
@@ -946,7 +1087,7 @@ async fn mysql_cross_database_unverified_metadata_downgrades() {
         .expect("unverified_tables 应为数组");
     assert_eq!(unverified.len(), 1, "{result}");
     assert_eq!(unverified[0]["statement"], 2);
-    assert_eq!(unverified[0]["schema"], "it_cross_mydb");
+    assert_eq!(unverified[0]["schema"], cross_db);
     assert_eq!(unverified[0]["table"], "it_xdb_hidden");
     let reason = unverified[0]["reason"].as_str().unwrap_or_default();
     assert!(
@@ -956,7 +1097,10 @@ async fn mysql_cross_database_unverified_metadata_downgrades() {
     let note = result["engine_note"].as_str().unwrap_or_default();
     assert!(note.contains("无法核实引擎"), "{note}");
     assert!(note.contains("第 2 条语句"), "{note}");
-    assert!(note.contains("it_cross_mydb.it_xdb_hidden"), "{note}");
+    assert!(
+        note.contains(&format!("{cross_db}.it_xdb_hidden")),
+        "{note}"
+    );
 
     // 降级时不能出现 rolled_back=true；语句状态也不允许标 rolled_back。
     assert_eq!(statuses(&result), vec!["1:executed", "2:failed"]);
@@ -966,16 +1110,15 @@ async fn mysql_cross_database_unverified_metadata_downgrades() {
         &format!("DROP USER IF EXISTS '{limit_user}'@'%'"),
     )
     .await;
-    drop_tables(
-        &root_pool,
-        &["it_xdb_local", "it_cross_mydb.it_xdb_hidden"],
-    )
-    .await;
+    cleanup_database(&admin_pool, &cross_db).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_all_innodb_script_keeps_full_rollback_promise() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_all_innodb"]).await;
     exec(
@@ -1027,13 +1170,16 @@ async fn mysql_all_innodb_script_keeps_full_rollback_promise() {
     assert_eq!(row_count(&pool, "it_all_innodb").await, 0);
 
     drop_tables(&pool, &["it_all_innodb"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 脚本形态 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_empty_script_is_rejected() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, _pool) = connect(&url).await;
 
     let err = run_script(&client, "   \n -- only comment\n /* x */ ", false)
@@ -1043,11 +1189,14 @@ async fn mysql_empty_script_is_rejected() {
         matches!(err, AppError::BadRequest(_)),
         "空脚本应返回 BadRequest，实际：{err:?}"
     );
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_single_statement_script_executes_atomically() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_single"]).await;
     exec(
@@ -1070,11 +1219,14 @@ async fn mysql_single_statement_script_executes_atomically() {
     assert_eq!(row_count(&pool, "it_single").await, 1);
 
     drop_tables(&pool, &["it_single"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_ddl_keywords_in_comments_and_literals_do_not_trigger_non_atomic() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_literal", "it_literal_phantom"]).await;
     exec(
@@ -1103,6 +1255,7 @@ async fn mysql_ddl_keywords_in_comments_and_literals_do_not_trigger_non_atomic()
     assert!(!table_exists(&pool, "it_literal_phantom").await);
 
     drop_tables(&pool, &["it_literal"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- DELIMITER 与例程体 -------------------------
@@ -1145,7 +1298,9 @@ async fn drop_event(pool: &MySqlPool, name: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_delimiter_script_creates_and_calls_procedure() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_delim_log"]).await;
     drop_procedure(&pool, "it_delim_proc").await;
@@ -1199,11 +1354,14 @@ async fn mysql_delimiter_script_creates_and_calls_procedure() {
 
     drop_procedure(&pool, "it_delim_proc").await;
     drop_tables(&pool, &["it_delim_log"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_delimiter_script_creates_trigger_and_fires() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_delim_trg_src"]).await;
     drop_trigger(&pool, "it_delim_trg").await;
@@ -1236,11 +1394,14 @@ async fn mysql_delimiter_script_creates_trigger_and_fires() {
 
     drop_trigger(&pool, "it_delim_trg").await;
     drop_tables(&pool, &["it_delim_trg_src"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_delimiter_script_creates_event_with_block_body() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_delim_event_log"]).await;
     drop_event(&pool, "it_delim_event").await;
@@ -1269,11 +1430,14 @@ async fn mysql_delimiter_script_creates_event_with_block_body() {
 
     drop_event(&pool, "it_delim_event").await;
     drop_tables(&pool, &["it_delim_event_log"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_routine_block_without_delimiter_is_rejected_before_any_execution() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_nodelim_created"]).await;
     drop_procedure(&pool, "it_nodelim_proc").await;
@@ -1305,11 +1469,14 @@ async fn mysql_routine_block_without_delimiter_is_rejected_before_any_execution(
 
     drop_procedure(&pool, "it_nodelim_proc").await;
     drop_tables(&pool, &["it_nodelim_created"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_skip_errors_locates_failure_after_routine_statements() {
-    let Some(url) = mysql_url() else { return };
+    let Some(base_url) = mysql_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_imp").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_procedure(&pool, "it_delim_err").await;
 
@@ -1341,4 +1508,5 @@ async fn mysql_skip_errors_locates_failure_after_routine_statements() {
     assert!(error.contains("boom;inside"), "失败原因应保留例程体内的消息：{error}");
 
     drop_procedure(&pool, "it_delim_err").await;
+    cleanup_database(&admin_pool, &db).await;
 }

@@ -13,6 +13,7 @@
 //! 3) 已完成批次目标数据被改坏后重新执行，停在该批并给出差异主键；
 //! 4) 行/秒限速生效 + 暂停/继续/中止。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,8 +36,71 @@ use core_lib::sql::util::escape_sql_string;
 
 const DB_ID: &str = "field-migration-s2-e2e";
 
-fn db_name(url: &str) -> String {
-    DbClient::extract_db_name(url).unwrap_or_else(|| "s2_e2e".to_string())
+static DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 运行内唯一的库名后缀：进程号 + 自增序号 + 纳秒时间，避免并行用例互相干扰。
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        DB_SEQ.fetch_add(1, Ordering::Relaxed),
+        nanos
+    )
+}
+
+fn unique_db(prefix: &str) -> String {
+    format!("{prefix}_{}", unique_suffix())
+}
+
+/// 换掉 URL 里的库名，保留账号、主机、端口与查询参数。
+fn with_database(url: &str, db: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((base, tail)) => {
+            let query = tail.find('?').map(|i| &tail[i..]).unwrap_or("");
+            format!("{base}/{db}{query}")
+        }
+        None => format!("{url}/{db}"),
+    }
+}
+
+async fn admin_exec(pool: &MySqlPool, sql: &str) {
+    if let Err(err) = sqlx::query(sql).execute(pool).await {
+        panic!("执行管理 SQL 失败: {err}\nSQL: {sql}");
+    }
+}
+
+/// 创建本用例独占的库；同名库若存在（极端情况下的残留）先整体清掉。
+async fn create_database(pool: &MySqlPool, db: &str) {
+    admin_exec(pool, &format!("DROP DATABASE IF EXISTS `{db}`")).await;
+    admin_exec(pool, &format!("CREATE DATABASE IF NOT EXISTS `{db}`")).await;
+}
+
+/// 只删除本用例创建的库；失败必须显式报错，不能静默吞掉。
+async fn cleanup_database(pool: &MySqlPool, db: &str) {
+    let sql = format!("DROP DATABASE IF EXISTS `{db}`");
+    if let Err(err) = sqlx::query(&sql).execute(pool).await {
+        eprintln!("清理失败: 数据库 `{db}`: {err}\nSQL: {sql}");
+        panic!("清理失败: 数据库 `{db}`: {err}");
+    }
+}
+
+/// 连接管理库并创建本用例独占的库，返回库名与管理连接。
+async fn isolated_database(base_url: &str, prefix: &str) -> (String, MySqlPool) {
+    let admin_pool = MySqlPool::connect(base_url)
+        .await
+        .expect("连接 MySQL 管理库失败，请确认 compose 服务已就绪");
+    let db = unique_db(prefix);
+    create_database(&admin_pool, &db).await;
+    (db, admin_pool)
+}
+
+async fn close_pool(pool: MySqlPool) {
+    // sqlx 该版本 close() 不返回错误，调用即完成关闭。
+    pool.close().await;
 }
 
 async fn exec(conn: &mut MySqlConnection, sql: &str) {
@@ -230,17 +294,17 @@ async fn verify_v(pool: &MySqlPool, source: &str, target: &str) -> [i64; 4] {
 
 #[tokio::test]
 async fn backfill_100k_full_roundtrip_v1_v4_zero() {
-    let Ok(url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
         eprintln!("跳过 S2 真实库验证：未设置 FIELD_MIGRATION_MYSQL_URL");
         return;
     };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s2").await;
+    let url = with_database(&base_url, &db_name);
     let source = "fm_s2_full_source";
     let target = "fm_s2_full_target";
     let pool = MySqlPool::connect(&url).await.expect("连接 MySQL 失败");
     let mut conn = pool.acquire().await.expect("获取连接失败");
-    let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {target}"))
-        .execute(&mut *conn)
-        .await;
+    exec(&mut conn, &format!("DROP TABLE IF EXISTS {target}")).await;
     seed(&mut conn, source, 100_000).await;
     drop(conn);
 
@@ -255,7 +319,7 @@ async fn backfill_100k_full_roundtrip_v1_v4_zero() {
             .as_nanos()
     ));
     let audit = Arc::new(AuditLog::new(Some(audit_path)));
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name(&url), false)
+    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone())
         .with_audit(Some(audit.clone()), Some("s2-e2e".into()));
 
@@ -302,26 +366,30 @@ async fn backfill_100k_full_roundtrip_v1_v4_zero() {
         .count();
     println!("逐批审计条数: {batch_audits}");
     assert_eq!(batch_audits, 10);
+
+    drop(ctx);
+    close_pool(pool).await;
+    cleanup_database(&admin_pool, &db_name).await;
 }
 
 #[tokio::test]
 async fn backfill_interrupt_then_resume_from_checkpoint() {
-    let Ok(url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
         return;
     };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s2").await;
+    let url = with_database(&base_url, &db_name);
     let source = "fm_s2_resume_source";
     let target = "fm_s2_resume_target";
     let pool = MySqlPool::connect(&url).await.expect("连接 MySQL 失败");
     let mut conn = pool.acquire().await.expect("获取连接失败");
-    let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {target}"))
-        .execute(&mut *conn)
-        .await;
+    exec(&mut conn, &format!("DROP TABLE IF EXISTS {target}")).await;
     seed(&mut conn, source, 100_000).await;
     drop(conn);
 
     let policy = Arc::new(OpsPolicy::default());
     let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name(&url), false)
+    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
     let job = build_job(
         &ctx,
@@ -379,7 +447,7 @@ async fn backfill_interrupt_then_resume_from_checkpoint() {
     let checkpoint_before = interrupted.checkpoint.clone().expect("中断后缺少 checkpoint");
 
     let resume_client = DbClient::new_default(&url).await.expect("重建 DbClient 失败");
-    let resume_ctx = OpsContext::new(resume_client, DB_ID.into(), db_name(&url), false)
+    let resume_ctx = OpsContext::new(resume_client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
     backfill::run_job(
         job_id.clone(),
@@ -418,26 +486,30 @@ async fn backfill_interrupt_then_resume_from_checkpoint() {
     println!("重复主键行数: {duplicates}");
     assert_eq!(duplicates, 0);
     assert!(resumed.run_count >= 2);
+
+    drop(ctx);
+    close_pool(pool).await;
+    cleanup_database(&admin_pool, &db_name).await;
 }
 
 #[tokio::test]
 async fn backfill_blocks_at_corrupted_completed_batch_and_reports_pks() {
-    let Ok(url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
         return;
     };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s2").await;
+    let url = with_database(&base_url, &db_name);
     let source = "fm_s2_block_source";
     let target = "fm_s2_block_target";
     let pool = MySqlPool::connect(&url).await.expect("连接 MySQL 失败");
     let mut conn = pool.acquire().await.expect("获取连接失败");
-    let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {target}"))
-        .execute(&mut *conn)
-        .await;
+    exec(&mut conn, &format!("DROP TABLE IF EXISTS {target}")).await;
     seed(&mut conn, source, 20_000).await;
     drop(conn);
 
     let policy = Arc::new(OpsPolicy::default());
     let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name(&url), false)
+    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
     let job = build_job(
         &ctx,
@@ -492,7 +564,7 @@ async fn backfill_blocks_at_corrupted_completed_batch_and_reports_pks() {
     .expect("改坏目标数据失败");
 
     let resume_client = DbClient::new_default(&url).await.expect("重建 DbClient 失败");
-    let resume_ctx = OpsContext::new(resume_client, DB_ID.into(), db_name(&url), false)
+    let resume_ctx = OpsContext::new(resume_client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
     backfill::run_job(
         job_id.clone(),
@@ -526,26 +598,30 @@ async fn backfill_blocks_at_corrupted_completed_batch_and_reports_pks() {
     );
     assert_eq!(target_rows, 20_000);
     assert_eq!(blocked.checkpoint.as_ref().map(|c| c.completed_batches), Some(20));
+
+    drop(ctx);
+    close_pool(pool).await;
+    cleanup_database(&admin_pool, &db_name).await;
 }
 
 #[tokio::test]
 async fn backfill_replays_committed_but_uncheckpointed_batch_idempotently() {
-    let Ok(url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
         return;
     };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s2").await;
+    let url = with_database(&base_url, &db_name);
     let source = "fm_s2_window_source";
     let target = "fm_s2_window_target";
     let pool = MySqlPool::connect(&url).await.expect("连接 MySQL 失败");
     let mut conn = pool.acquire().await.expect("获取连接失败");
-    let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {target}"))
-        .execute(&mut *conn)
-        .await;
+    exec(&mut conn, &format!("DROP TABLE IF EXISTS {target}")).await;
     seed(&mut conn, source, 5_000).await;
     drop(conn);
 
     let policy = Arc::new(OpsPolicy::default());
     let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name(&url), false)
+    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
     let job = build_job(
         &ctx,
@@ -608,7 +684,7 @@ async fn backfill_replays_committed_but_uncheckpointed_batch_idempotently() {
     assert_eq!(target_rows, 3_000);
 
     let resume_client = DbClient::new_default(&url).await.expect("重建 DbClient 失败");
-    let resume_ctx = OpsContext::new(resume_client, DB_ID.into(), db_name(&url), false)
+    let resume_ctx = OpsContext::new(resume_client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
     backfill::run_job(
         job_id.clone(),
@@ -643,27 +719,31 @@ async fn backfill_replays_committed_but_uncheckpointed_batch_idempotently() {
     .await;
     assert_eq!(duplicates, 0);
     println!("窗口续跑: 无重复行，V1-V4 全 0");
+
+    drop(ctx);
+    close_pool(pool).await;
+    cleanup_database(&admin_pool, &db_name).await;
 }
 
 #[tokio::test]
 async fn backfill_rate_limit_pause_and_abort() {
-    let Ok(url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
         return;
     };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s2").await;
+    let url = with_database(&base_url, &db_name);
     let source = "fm_s2_rate_source";
     let pool = MySqlPool::connect(&url).await.expect("连接 MySQL 失败");
     let mut conn = pool.acquire().await.expect("获取连接失败");
     for table in ["fm_s2_rate_fast", "fm_s2_rate_slow", "fm_s2_rate_abort"] {
-        let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
-            .execute(&mut *conn)
-            .await;
+        exec(&mut conn, &format!("DROP TABLE IF EXISTS {table}")).await;
     }
     seed(&mut conn, source, 6_000).await;
     drop(conn);
 
     let policy = Arc::new(OpsPolicy::default());
     let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name(&url), false)
+    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
 
     // 不限速基线。
@@ -810,4 +890,8 @@ async fn backfill_rate_limit_pause_and_abort() {
         aborted.checkpoint.as_ref().map(|c| c.completed_batches).unwrap_or(0)
     );
     assert_eq!(aborted.status, MigrationStatus::Aborted);
+
+    drop(ctx);
+    close_pool(pool).await;
+    cleanup_database(&admin_pool, &db_name).await;
 }

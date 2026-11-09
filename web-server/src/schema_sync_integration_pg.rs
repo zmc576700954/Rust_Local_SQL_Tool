@@ -17,9 +17,27 @@ use core_lib::db::DbClient;
 use core_lib::pg_schema_sync::{DestructiveChange, PgSchemaSyncEngine};
 use core_lib::schema::{SchemaExtractor, SchemaResponse, TableWithDetails};
 use sqlx::{Executor, PgPool};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-const SOURCE_DB: &str = "it_sync_source";
-const TARGET_DB: &str = "it_sync_target";
+static DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 运行内唯一的库名后缀：进程号 + 自增序号 + 纳秒时间，避免并行用例互相干扰。
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        DB_SEQ.fetch_add(1, Ordering::Relaxed),
+        nanos
+    )
+}
+
+fn unique_db(prefix: &str) -> String {
+    format!("{prefix}_{}", unique_suffix())
+}
 
 fn pg_url() -> Option<String> {
     match std::env::var("IMPORT_SQL_PG_URL") {
@@ -44,6 +62,25 @@ fn with_database(url: &str, db: &str) -> String {
 async fn exec(pool: &PgPool, sql: &str) {
     if let Err(err) = Executor::execute(pool, sqlx::raw_sql(sql)).await {
         panic!("执行 SQL 失败: {err}\nSQL: {sql}");
+    }
+}
+
+/// 创建本用例独占的库；同名库若存在（极端情况下的残留）先整体清掉。
+async fn create_database(pool: &PgPool, db: &str) {
+    exec(
+        pool,
+        &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"),
+    )
+    .await;
+    exec(pool, &format!("CREATE DATABASE \"{db}\"")).await;
+}
+
+/// 只删除本用例创建的库；失败必须显式报错，不能静默吞掉。
+async fn cleanup_database(pool: &PgPool, db: &str) {
+    let sql = format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)");
+    if let Err(err) = Executor::execute(pool, sqlx::raw_sql(&sql)).await {
+        eprintln!("清理失败: 数据库 \"{db}\": {err}\nSQL: {sql}");
+        panic!("清理失败: 数据库 \"{db}\": {err}");
     }
 }
 
@@ -122,6 +159,8 @@ fn assert_has_kind(destructive: &[DestructiveChange], kind: &str, table: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_schema_sync_diff_execute_and_idempotent() {
     let Some(url) = pg_url() else { return };
+    let source_db = unique_db("it_sync_source");
+    let target_db = unique_db("it_sync_target");
 
     let admin = DbClient::new_default(&url)
         .await
@@ -129,21 +168,11 @@ async fn pg_schema_sync_diff_execute_and_idempotent() {
     let admin_pool = PgPool::connect(&url)
         .await
         .expect("连接 PostgreSQL 失败，请确认 compose 服务已就绪");
-    exec(
-        &admin_pool,
-        &format!("DROP DATABASE IF EXISTS {TARGET_DB} WITH (FORCE)"),
-    )
-    .await;
-    exec(
-        &admin_pool,
-        &format!("DROP DATABASE IF EXISTS {SOURCE_DB} WITH (FORCE)"),
-    )
-    .await;
-    exec(&admin_pool, &format!("CREATE DATABASE {SOURCE_DB}")).await;
-    exec(&admin_pool, &format!("CREATE DATABASE {TARGET_DB}")).await;
+    create_database(&admin_pool, &source_db).await;
+    create_database(&admin_pool, &target_db).await;
 
-    let source_url = with_database(&url, SOURCE_DB);
-    let target_url = with_database(&url, TARGET_DB);
+    let source_url = with_database(&url, &source_db);
+    let target_url = with_database(&url, &target_db);
     let source_client = DbClient::new_default(&source_url)
         .await
         .expect("创建源库连接失败");
@@ -417,16 +446,8 @@ async fn pg_schema_sync_diff_execute_and_idempotent() {
     drop(target_pool);
     drop(source_client);
     drop(source_pool);
-    exec(
-        &admin_pool,
-        &format!("DROP DATABASE IF EXISTS {TARGET_DB} WITH (FORCE)"),
-    )
-    .await;
-    exec(
-        &admin_pool,
-        &format!("DROP DATABASE IF EXISTS {SOURCE_DB} WITH (FORCE)"),
-    )
-    .await;
+    cleanup_database(&admin_pool, &target_db).await;
+    cleanup_database(&admin_pool, &source_db).await;
     drop(admin);
     drop(admin_pool);
 }

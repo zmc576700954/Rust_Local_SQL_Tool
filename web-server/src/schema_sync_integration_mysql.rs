@@ -12,9 +12,27 @@ use core_lib::db::DbClient;
 use core_lib::schema::{SchemaExtractor, SchemaResponse, TableWithDetails};
 use core_lib::tools::SyncEngine;
 use sqlx::{Executor, MySqlPool};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-const SOURCE_DB: &str = "it_sync_mysql_src";
-const TARGET_DB: &str = "it_sync_mysql_tgt";
+static DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 运行内唯一的库名后缀：进程号 + 自增序号 + 纳秒时间，避免并行用例互相干扰。
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        DB_SEQ.fetch_add(1, Ordering::Relaxed),
+        nanos
+    )
+}
+
+fn unique_db(prefix: &str) -> String {
+    format!("{prefix}_{}", unique_suffix())
+}
 
 fn mysql_url() -> Option<String> {
     match std::env::var("IMPORT_SQL_MYSQL_URL") {
@@ -39,6 +57,21 @@ fn with_database(url: &str, db: &str) -> String {
 async fn exec(pool: &MySqlPool, sql: &str) {
     if let Err(err) = Executor::execute(pool, sqlx::raw_sql(sql)).await {
         panic!("执行 SQL 失败: {err}\nSQL: {sql}");
+    }
+}
+
+/// 创建本用例独占的库；同名库若存在（极端情况下的残留）先整体清掉。
+async fn create_database(pool: &MySqlPool, db: &str) {
+    exec(pool, &format!("DROP DATABASE IF EXISTS `{db}`")).await;
+    exec(pool, &format!("CREATE DATABASE IF NOT EXISTS `{db}`")).await;
+}
+
+/// 只删除本用例创建的库；失败必须显式报错，不能静默吞掉。
+async fn cleanup_database(pool: &MySqlPool, db: &str) {
+    let sql = format!("DROP DATABASE IF EXISTS `{db}`");
+    if let Err(err) = Executor::execute(pool, sqlx::raw_sql(&sql)).await {
+        eprintln!("清理失败: 数据库 `{db}`: {err}\nSQL: {sql}");
+        panic!("清理失败: 数据库 `{db}`: {err}");
     }
 }
 
@@ -81,6 +114,8 @@ async fn schema_of(client: &DbClient, db_name: &str) -> SchemaResponse {
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_schema_sync_diff_still_works_with_extended_metadata() {
     let Some(url) = mysql_url() else { return };
+    let source_db = unique_db("it_sync_src");
+    let target_db = unique_db("it_sync_tgt");
 
     let admin = DbClient::new_default(&url)
         .await
@@ -88,13 +123,12 @@ async fn mysql_schema_sync_diff_still_works_with_extended_metadata() {
     let admin_pool = MySqlPool::connect(&url)
         .await
         .expect("连接 MySQL/MariaDB 失败，请确认 compose 服务已就绪");
-    for db in [SOURCE_DB, TARGET_DB] {
-        exec(&admin_pool, &format!("DROP DATABASE IF EXISTS `{db}`")).await;
-        exec(&admin_pool, &format!("CREATE DATABASE `{db}`")).await;
+    for db in [&source_db, &target_db] {
+        create_database(&admin_pool, db).await;
     }
 
-    let source_url = with_database(&url, SOURCE_DB);
-    let target_url = with_database(&url, TARGET_DB);
+    let source_url = with_database(&url, &source_db);
+    let target_url = with_database(&url, &target_db);
     let source_client = DbClient::new_default(&source_url)
         .await
         .expect("创建源库连接失败");
@@ -132,8 +166,8 @@ async fn mysql_schema_sync_diff_still_works_with_extended_metadata() {
     )
     .await;
 
-    let source = schema_of(&source_client, SOURCE_DB).await;
-    let target = schema_of(&target_client, TARGET_DB).await;
+    let source = schema_of(&source_client, &source_db).await;
+    let target = schema_of(&target_client, &target_db).await;
 
     // 扩展元数据必须被 MySQL 正确填充。
     let pk = source.tables[0]
@@ -191,8 +225,8 @@ async fn mysql_schema_sync_diff_still_works_with_extended_metadata() {
     drop(target_pool);
     drop(source_client);
     drop(source_pool);
-    for db in [SOURCE_DB, TARGET_DB] {
-        exec(&admin_pool, &format!("DROP DATABASE IF EXISTS `{db}`")).await;
+    for db in [&source_db, &target_db] {
+        cleanup_database(&admin_pool, db).await;
     }
     drop(admin);
     drop(admin_pool);

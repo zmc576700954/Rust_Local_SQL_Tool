@@ -47,6 +47,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -126,7 +127,7 @@ mod tests {
             Ok(url) if !url.trim().is_empty() && url.contains('@') => url,
             _ => return,
         };
-        let bad = wrong_password_url(&url);
+        let bad = unique_auth_database_url(&wrong_password_url(&url));
         let err = match core_lib::db::DbClient::new_default(&bad).await {
             Ok(_) => panic!("错误密码不应连接成功: {bad}"),
             Err(err) => err,
@@ -145,6 +146,29 @@ mod tests {
             !core_lib::ops::inspection::redact::contains_sensitive_shape(&output),
             "log still sensitive: {output}"
         );
+    }
+
+    /// 认证失败发生在选库之前，因此这里只把库名换成运行内唯一值，
+    /// 不创建也不删除任何库，避免与并行用例共享同一个库名。
+    fn unique_auth_database_url(url: &str) -> String {
+        static AUTH_DB_SEQ: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let db = format!(
+            "it_auth_{}_{}_{}",
+            std::process::id(),
+            AUTH_DB_SEQ.fetch_add(1, Ordering::Relaxed),
+            nanos
+        );
+        match url.rsplit_once('/') {
+            Some((base, tail)) => {
+                let query = tail.find('?').map(|i| &tail[i..]).unwrap_or("");
+                format!("{base}/{db}{query}")
+            }
+            None => format!("{url}/{db}"),
+        }
     }
 
     /// 把 URL 里的密码替换成固定错误值，保留账号、主机与库名。

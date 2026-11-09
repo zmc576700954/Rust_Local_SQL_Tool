@@ -18,6 +18,9 @@ use core_lib::db::DbClient;
 use core_lib::error::AppError;
 use serde_json::Value;
 use sqlx::PgPool;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static DB_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn pg_url() -> Option<String> {
     match std::env::var("IMPORT_SQL_PG_URL") {
@@ -27,6 +30,65 @@ fn pg_url() -> Option<String> {
             None
         }
     }
+}
+
+/// 运行内唯一的库名后缀：进程号 + 自增序号 + 纳秒时间，避免并行用例互相干扰。
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        DB_SEQ.fetch_add(1, Ordering::Relaxed),
+        nanos
+    )
+}
+
+fn unique_db(prefix: &str) -> String {
+    format!("{prefix}_{}", unique_suffix())
+}
+
+/// 换掉 URL 里的库名，保留账号、主机、端口与查询参数。
+fn with_database(url: &str, db: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((base, tail)) => {
+            let query = tail.find('?').map(|i| &tail[i..]).unwrap_or("");
+            format!("{base}/{db}{query}")
+        }
+        None => format!("{url}/{db}"),
+    }
+}
+
+/// 创建本用例独占的库；同名库若存在（极端情况下的残留）先整体清掉。
+async fn create_database(admin_pool: &PgPool, db: &str) {
+    exec(
+        admin_pool,
+        &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"),
+    )
+    .await;
+    exec(admin_pool, &format!("CREATE DATABASE \"{db}\"")).await;
+}
+
+/// 只删除本用例创建的库；失败必须显式报错，不能静默吞掉。
+async fn cleanup_database(admin_pool: &PgPool, db: &str) {
+    let sql = format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)");
+    use sqlx::Executor;
+    if let Err(err) = Executor::execute(admin_pool, sqlx::raw_sql(&sql)).await {
+        eprintln!("清理失败: 数据库 \"{db}\": {err}\nSQL: {sql}");
+        panic!("清理失败: 数据库 \"{db}\": {err}");
+    }
+}
+
+/// 连接管理库并创建本用例独占的库，返回库名与管理连接。
+async fn isolated_database(base_url: &str, prefix: &str) -> (String, PgPool) {
+    let admin_pool = PgPool::connect(base_url)
+        .await
+        .expect("连接 PostgreSQL 失败，请确认 compose 服务已就绪");
+    let db = unique_db(prefix);
+    create_database(&admin_pool, &db).await;
+    (db, admin_pool)
 }
 
 async fn connect(url: &str) -> (DbClient, PgPool) {
@@ -143,7 +205,9 @@ fn assert_non_transactional_rejection(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_create_table_then_failure_leaves_no_table() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_pg_ddl"]).await;
 
@@ -181,11 +245,14 @@ async fn pg_create_table_then_failure_leaves_no_table() {
         !table_exists(&pool, "it_pg_ddl").await,
         "建表成功后失败，整段回滚，表不应存在"
     );
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_ddl_dml_mix_failure_rolls_back_everything() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_pg_mix"]).await;
     exec(
@@ -227,13 +294,16 @@ async fn pg_ddl_dml_mix_failure_rolls_back_everything() {
     );
 
     drop_tables(&pool, &["it_pg_mix"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 不可事务语句前置拒绝 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_rejects_create_index_concurrently_before_execution() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_pg_reject_cic"]).await;
 
@@ -249,11 +319,14 @@ async fn pg_rejects_create_index_concurrently_before_execution() {
     assert_non_transactional_rejection(err, 2, "CREATE INDEX CONCURRENTLY");
     // 前置拒绝意味着一条都没执行：表与索引都不存在。
     assert!(!table_exists(&pool, "it_pg_reject_cic").await);
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_rejects_vacuum_before_execution() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_pg_reject_vacuum"]).await;
 
@@ -268,37 +341,47 @@ async fn pg_rejects_vacuum_before_execution() {
 
     assert_non_transactional_rejection(err, 2, "VACUUM");
     assert!(!table_exists(&pool, "it_pg_reject_vacuum").await);
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_rejects_create_database_before_execution() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
-    exec(&pool, "DROP DATABASE IF EXISTS it_pg_forbidden_db").await;
+    let forbidden_db = unique_db("it_pg_forbidden");
+    cleanup_database(&admin_pool, &forbidden_db).await;
 
     let err = run_script(
         &client,
-        "CREATE TABLE it_pg_reject_db (id INT);
-         CREATE DATABASE it_pg_forbidden_db;",
+        &format!(
+            "CREATE TABLE it_pg_reject_db (id INT);
+             CREATE DATABASE \"{forbidden_db}\";"
+        ),
         false,
     )
     .await
     .expect_err("CREATE DATABASE 必须被前置拒绝");
 
     assert_non_transactional_rejection(err, 2, "CREATE DATABASE");
-    let created = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'it_pg_forbidden_db')",
-    )
+    let created = sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = '{forbidden_db}')"
+    ))
     .fetch_one(&pool)
     .await
     .expect("查询 pg_database 失败");
     assert!(!created, "CREATE DATABASE 不应被执行");
     assert!(!table_exists(&pool, "it_pg_reject_db").await);
+    cleanup_database(&admin_pool, &forbidden_db).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_rejects_alter_system_before_execution() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_pg_reject_alter"]).await;
 
@@ -313,13 +396,16 @@ async fn pg_rejects_alter_system_before_execution() {
 
     assert_non_transactional_rejection(err, 2, "ALTER SYSTEM");
     assert!(!table_exists(&pool, "it_pg_reject_alter").await);
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- PREPARE / EXECUTE -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_prepare_execute_runs_in_transaction_and_rolls_back() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_pg_dyn"]).await;
     exec(&pool, "CREATE TABLE it_pg_dyn (id INT PRIMARY KEY, note TEXT)").await;
@@ -355,13 +441,16 @@ async fn pg_prepare_execute_runs_in_transaction_and_rolls_back() {
     assert_eq!(row_count(&pool, "it_pg_dyn").await, 0);
 
     drop_tables(&pool, &["it_pg_dyn"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 保存点跳过模式 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_skip_errors_keeps_only_successful_statements() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_pg_skip"]).await;
     exec(
@@ -410,13 +499,16 @@ async fn pg_skip_errors_keeps_only_successful_statements() {
     assert_eq!(ids(&pool, "it_pg_skip").await, vec![1, 2, 3]);
 
     drop_tables(&pool, &["it_pg_skip"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 脚本自带事务控制 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_script_with_explicit_begin_commit_is_rejected() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_pg_tx"]).await;
 
@@ -439,13 +531,16 @@ async fn pg_script_with_explicit_begin_commit_is_rejected() {
         other => panic!("应返回 BadRequest，实际: {other:?}"),
     }
     assert!(!table_exists(&pool, "it_pg_tx").await);
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 脚本形态 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_empty_script_is_rejected() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, _pool) = connect(&url).await;
 
     let err = run_script(&client, "   \n -- only comment\n /* x */ ", false)
@@ -455,11 +550,14 @@ async fn pg_empty_script_is_rejected() {
         matches!(err, AppError::BadRequest(_)),
         "空脚本应返回 BadRequest，实际：{err:?}"
     );
+    cleanup_database(&admin_pool, &db).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_single_statement_script_executes_atomically() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_pg_single"]).await;
     exec(
@@ -478,13 +576,16 @@ async fn pg_single_statement_script_executes_atomically() {
     assert_eq!(ids(&pool, "it_pg_single").await, vec![1]);
 
     drop_tables(&pool, &["it_pg_single"]).await;
+    cleanup_database(&admin_pool, &db).await;
 }
 
 // ------------------------- 美元引用的函数体 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_tagged_dollar_quoted_function_body_is_not_split() {
-    let Some(url) = pg_url() else { return };
+    let Some(base_url) = pg_url() else { return };
+    let (db, admin_pool) = isolated_database(&base_url, "it_pg").await;
+    let url = with_database(&base_url, &db);
     let (client, pool) = connect(&url).await;
     exec(&pool, "DROP FUNCTION IF EXISTS it_pg_dollar_fn(INT)").await;
 
@@ -515,4 +616,5 @@ async fn pg_tagged_dollar_quoted_function_body_is_not_split() {
     assert_eq!(value, 42);
 
     exec(&pool, "DROP FUNCTION IF EXISTS it_pg_dollar_fn(INT)").await;
+    cleanup_database(&admin_pool, &db).await;
 }

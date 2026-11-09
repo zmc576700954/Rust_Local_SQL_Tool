@@ -7,6 +7,7 @@
 //! ```
 //! 未设置环境变量时自动跳过，不影响常规单测。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use sqlx::mysql::MySqlPool;
@@ -23,6 +24,76 @@ use core_lib::ops::types::ActionSpec;
 const DB_ID: &str = "perf-e2e";
 const TABLE: &str = "perf_orders";
 const TARGET_SQL: &str = "SELECT id, status FROM perf_orders WHERE user_id = 12345 AND status = 'paid'";
+
+static DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 运行内唯一的库名后缀：进程号 + 自增序号 + 纳秒时间，避免并行用例互相干扰。
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        DB_SEQ.fetch_add(1, Ordering::Relaxed),
+        nanos
+    )
+}
+
+fn unique_db(prefix: &str) -> String {
+    format!("{prefix}_{}", unique_suffix())
+}
+
+/// 换掉 URL 里的库名，保留账号、主机、端口与查询参数。
+fn with_database(url: &str, db: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((base, tail)) => {
+            let query = tail.find('?').map(|i| &tail[i..]).unwrap_or("");
+            format!("{base}/{db}{query}")
+        }
+        None => format!("{url}/{db}"),
+    }
+}
+
+async fn admin_exec(pool: &MySqlPool, sql: &str) {
+    if let Err(err) = sqlx::query(sql).execute(pool).await {
+        panic!("执行管理 SQL 失败: {err}\nSQL: {sql}");
+    }
+}
+
+/// 创建本用例独占的库；同名库若存在（极端情况下的残留）先整体清掉。
+async fn create_database(pool: &MySqlPool, db: &str) {
+    admin_exec(pool, &format!("DROP DATABASE IF EXISTS `{db}`")).await;
+    admin_exec(pool, &format!("CREATE DATABASE IF NOT EXISTS `{db}`")).await;
+}
+
+/// 只删除本用例创建的库；失败必须显式报错，不能静默吞掉。
+async fn cleanup_database(pool: &MySqlPool, db: &str) {
+    let sql = format!("DROP DATABASE IF EXISTS `{db}`");
+    if let Err(err) = sqlx::query(&sql).execute(pool).await {
+        eprintln!("清理失败: 数据库 `{db}`: {err}\nSQL: {sql}");
+        panic!("清理失败: 数据库 `{db}`: {err}");
+    }
+}
+
+fn remove_if_exists(path: &std::path::Path) {
+    if let Err(err) = std::fs::remove_file(path) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("清理失败: 文件 {}: {err}", path.display());
+        }
+    }
+}
+
+/// 连接管理库并创建本用例独占的库，返回库名与管理连接。
+async fn isolated_database(base_url: &str, prefix: &str) -> (String, MySqlPool) {
+    let admin_pool = MySqlPool::connect(base_url)
+        .await
+        .expect("连接 MySQL 管理库失败，请确认 compose 服务已就绪");
+    let db = unique_db(prefix);
+    create_database(&admin_pool, &db).await;
+    (db, admin_pool)
+}
 
 async fn exec(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>, sql: &str) {
     if let Err(err) = sqlx::query(sql).execute(&mut **conn).await {
@@ -83,11 +154,12 @@ async fn run_target_once(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>) {
 
 #[tokio::test]
 async fn perf_explain_analyze_timeout_degrades_and_audits() {
-    let Ok(url) = std::env::var("PERF_MYSQL_URL") else {
+    let Ok(base_url) = std::env::var("PERF_MYSQL_URL") else {
         eprintln!("跳过 EXPLAIN ANALYZE 超时验证：未设置 PERF_MYSQL_URL");
         return;
     };
-    let db_name = DbClient::extract_db_name(&url).unwrap_or_else(|| "e2e".to_string());
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_perf").await;
+    let url = with_database(&base_url, &db_name);
     let pool = MySqlPool::connect(&url)
         .await
         .expect("连接 MySQL 失败");
@@ -109,7 +181,7 @@ async fn perf_explain_analyze_timeout_degrades_and_audits() {
         "perf-e2e-timeout-audit-{}.jsonl",
         std::process::id()
     ));
-    let _ = std::fs::remove_file(&audit_path);
+    remove_if_exists(&audit_path);
     let audit = Arc::new(AuditLog::new(Some(audit_path.clone())));
     let client = DbClient::new_default(&url)
         .await
@@ -187,17 +259,22 @@ async fn perf_explain_analyze_timeout_degrades_and_audits() {
         );
     }
     exec(&mut conn, "DROP TABLE IF EXISTS perf_timeout_demo").await;
-    let _ = std::fs::remove_file(&audit_path);
+    drop(conn);
+    drop(pool);
+    drop(ctx);
+    cleanup_database(&admin_pool, &db_name).await;
+    remove_if_exists(&audit_path);
 }
 
 #[tokio::test]
 async fn perf_diagnostics_real_mysql_flow() {
-    let Ok(url) = std::env::var("PERF_MYSQL_URL") else {
+    let Ok(base_url) = std::env::var("PERF_MYSQL_URL") else {
         eprintln!("跳过真实库性能诊断验证：未设置 PERF_MYSQL_URL");
         return;
     };
 
-    let db_name = DbClient::extract_db_name(&url).unwrap_or_else(|| "e2e".to_string());
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_perf").await;
+    let url = with_database(&base_url, &db_name);
     let pool = MySqlPool::connect(&url)
         .await
         .expect("连接 MySQL 失败，请确认 compose 服务已就绪");
@@ -214,7 +291,7 @@ async fn perf_diagnostics_real_mysql_flow() {
     eprintln!("目标语句 digest 命中数: {digest_hits}");
 
     let audit_path = std::env::temp_dir().join(format!("perf-e2e-audit-{}.jsonl", std::process::id()));
-    let _ = std::fs::remove_file(&audit_path);
+    remove_if_exists(&audit_path);
     let audit = Arc::new(AuditLog::new(Some(audit_path.clone())));
     let client = DbClient::new_default(&url)
         .await
@@ -350,7 +427,15 @@ async fn perf_diagnostics_real_mysql_flow() {
             "MariaDB 不应产生 EXPLAIN ANALYZE 已执行审计"
         );
         exec(&mut conn, &format!("DROP TABLE IF EXISTS {TABLE}")).await;
-        let _ = std::fs::remove_file(&audit_path);
+        drop(conn);
+        drop(pool);
+        drop(ctx);
+        cleanup_database(&admin_pool, &db_name).await;
+        if let Err(err) = std::fs::remove_file(&audit_path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("清理失败: 审计文件 {}: {err}", audit_path.display());
+            }
+        }
         return;
     }
 
@@ -437,5 +522,9 @@ async fn perf_diagnostics_real_mysql_flow() {
     println!("\n回滚 SQL: {:?}", rollback.compiled_sql);
 
     exec(&mut conn, &format!("DROP TABLE IF EXISTS {TABLE}")).await;
-    let _ = std::fs::remove_file(&audit_path);
+    drop(conn);
+    drop(pool);
+    drop(ctx);
+    cleanup_database(&admin_pool, &db_name).await;
+    remove_if_exists(&audit_path);
 }

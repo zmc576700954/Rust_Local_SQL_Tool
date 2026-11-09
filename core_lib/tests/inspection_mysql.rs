@@ -20,8 +20,84 @@ use core_lib::ops::inspection::types::{
 use core_lib::ops::types::Severity;
 use core_lib::ops::OpsContext;
 use serde_json::json;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const DB_ID: &str = "inspection-e2e";
+
+static DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 运行内唯一的库名后缀：进程号 + 自增序号 + 纳秒时间，避免并行用例互相干扰。
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        DB_SEQ.fetch_add(1, Ordering::Relaxed),
+        nanos
+    )
+}
+
+fn unique_db(prefix: &str) -> String {
+    format!("{prefix}_{}", unique_suffix())
+}
+
+/// 换掉 URL 里的库名，保留账号、主机、端口与查询参数。
+fn with_database(url: &str, db: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((base, tail)) => {
+            let query = tail.find('?').map(|i| &tail[i..]).unwrap_or("");
+            format!("{base}/{db}{query}")
+        }
+        None => format!("{url}/{db}"),
+    }
+}
+
+async fn admin_exec(pool: &MySqlPool, sql: &str) {
+    if let Err(err) = sqlx::query(sql).execute(pool).await {
+        panic!("执行管理 SQL 失败: {err}\nSQL: {sql}");
+    }
+}
+
+/// 创建本用例独占的库；同名库若存在（极端情况下的残留）先整体清掉。
+async fn create_database(pool: &MySqlPool, db: &str) {
+    admin_exec(pool, &format!("DROP DATABASE IF EXISTS `{db}`")).await;
+    admin_exec(pool, &format!("CREATE DATABASE IF NOT EXISTS `{db}`")).await;
+}
+
+/// 只删除本用例创建的库；失败必须显式报错，不能静默吞掉。
+async fn cleanup_database(pool: &MySqlPool, db: &str) {
+    let sql = format!("DROP DATABASE IF EXISTS `{db}`");
+    if let Err(err) = sqlx::query(&sql).execute(pool).await {
+        eprintln!("清理失败: 数据库 `{db}`: {err}\nSQL: {sql}");
+        panic!("清理失败: 数据库 `{db}`: {err}");
+    }
+}
+
+/// 连接管理库并创建本用例独占的库，返回库名与管理连接。
+async fn isolated_database(base_url: &str, prefix: &str) -> (String, MySqlPool) {
+    let admin_pool = MySqlPool::connect(base_url)
+        .await
+        .expect("连接 MySQL 管理库失败，请确认 compose 服务已就绪");
+    let db = unique_db(prefix);
+    create_database(&admin_pool, &db).await;
+    (db, admin_pool)
+}
+
+fn remove_if_exists(path: &std::path::Path) {
+    if let Err(err) = std::fs::remove_file(path) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("清理失败: 文件 {}: {err}", path.display());
+        }
+    }
+}
+
+async fn close_pool(pool: MySqlPool) {
+    // sqlx 该版本 close() 不返回错误，调用即完成关闭。
+    pool.close().await;
+}
 
 async fn exec(conn: &mut sqlx::pool::PoolConnection<sqlx::MySql>, sql: &str) {
     if let Err(err) = sqlx::query(sql).execute(&mut **conn).await {
@@ -268,12 +344,13 @@ async fn print_raw_queries(pool: &MySqlPool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn inspection_against_real_mysql() {
-    let Ok(url) = std::env::var("INSPECTION_MYSQL_URL") else {
+    let Ok(base_url) = std::env::var("INSPECTION_MYSQL_URL") else {
         eprintln!("跳过真实库巡检验证：未设置 INSPECTION_MYSQL_URL");
         return;
     };
 
-    let db_name = DbClient::extract_db_name(&url).unwrap_or_else(|| "e2e".to_string());
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_inspect").await;
+    let url = with_database(&base_url, &db_name);
     let pool = MySqlPool::connect(&url)
         .await
         .expect("连接 MySQL 失败，请确认 compose 服务已就绪");
@@ -544,24 +621,22 @@ async fn inspection_against_real_mysql() {
         );
         cleanup(&mut conn).await;
         drop(conn);
-        let _ = std::fs::remove_file(path);
-        let _ = pool.close().await;
+        remove_if_exists(&path);
+        drop(limited_ctx);
+        drop(ctx);
+        close_pool(pool).await;
+        cleanup_database(&admin_pool, &db_name).await;
         println!("\nMariaDB（performance_schema 关闭）巡检降级验证通过。");
         return;
     }
 
-    // 用 TRUNCATE P_S 计数器模拟“所有索引 COUNT_STAR 归零”，验证：
-    // 第 1/2 次只记 info，第 3 次升级 warning 并告警；uptime 回退视为重启，重置窗口且不 resolve 告警；
+    // 独占库里的表与索引都是全新的，P_S 计数天然从零开始，无需 TRUNCATE 全局计数器。
+    // 验证：第 1/2 次只记 info，第 3 次升级 warning 并告警；uptime 回退视为重启，重置窗口且不 resolve 告警；
     // 真正使用索引（COUNT_STAR>0）后才 resolve。
     exec(&mut conn, "DROP TABLE IF EXISTS unused_window_demo").await;
     exec(
         &mut conn,
         "CREATE TABLE unused_window_demo (id INT PRIMARY KEY, v INT, KEY idx_never_used (v)) ENGINE=InnoDB",
-    )
-    .await;
-    exec(
-        &mut conn,
-        "TRUNCATE performance_schema.table_io_waits_summary_by_index_usage",
     )
     .await;
     // 打开表以让 P_S 生成索引行（不走二级索引）。
@@ -722,12 +797,15 @@ async fn inspection_against_real_mysql() {
     println!("\n未使用索引判定窗口真库验证通过。");
 
     exec(&mut conn, "DROP TABLE IF EXISTS unused_window_demo").await;
-    let _ = std::fs::remove_file(window_path);
+    remove_if_exists(&window_path);
 
     cleanup(&mut conn).await;
     drop(conn);
-    let _ = std::fs::remove_file(path);
-    let _ = pool.close().await;
+    remove_if_exists(&path);
+    drop(limited_ctx);
+    drop(ctx);
+    close_pool(pool).await;
+    cleanup_database(&admin_pool, &db_name).await;
 
     println!("\n真实库巡检验证通过。");
 }

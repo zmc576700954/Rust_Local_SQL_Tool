@@ -10,6 +10,7 @@
 //! ```
 //! 未设置环境变量时自动跳过。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,68 @@ const PAYLOAD_TABLE: &str = "fm_big_payload_ext";
 const TEXT_TABLE: &str = "fm_big_text_ext";
 const TOTAL_ROWS: i64 = 100_000;
 const BATCH_SIZE: i64 = 10_000;
+
+static DB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 运行内唯一的库名后缀：进程号 + 自增序号 + 纳秒时间，避免并行用例互相干扰。
+fn unique_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}_{}_{}",
+        std::process::id(),
+        DB_SEQ.fetch_add(1, Ordering::Relaxed),
+        nanos
+    )
+}
+
+fn unique_db(prefix: &str) -> String {
+    format!("{prefix}_{}", unique_suffix())
+}
+
+/// 换掉 URL 里的库名，保留账号、主机、端口与查询参数。
+fn with_database(url: &str, db: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((base, tail)) => {
+            let query = tail.find('?').map(|i| &tail[i..]).unwrap_or("");
+            format!("{base}/{db}{query}")
+        }
+        None => format!("{url}/{db}"),
+    }
+}
+
+async fn admin_exec(pool: &MySqlPool, sql: &str) {
+    if let Err(err) = sqlx::query(sql).execute(pool).await {
+        panic!("执行管理 SQL 失败: {err}\nSQL: {sql}");
+    }
+}
+
+/// 创建本用例独占的库；同名库若存在（极端情况下的残留）先整体清掉。
+async fn create_database(pool: &MySqlPool, db: &str) {
+    admin_exec(pool, &format!("DROP DATABASE IF EXISTS `{db}`")).await;
+    admin_exec(pool, &format!("CREATE DATABASE IF NOT EXISTS `{db}`")).await;
+}
+
+/// 只删除本用例创建的库；失败必须显式报错，不能静默吞掉。
+async fn cleanup_database(pool: &MySqlPool, db: &str) {
+    let sql = format!("DROP DATABASE IF EXISTS `{db}`");
+    if let Err(err) = sqlx::query(&sql).execute(pool).await {
+        eprintln!("清理失败: 数据库 `{db}`: {err}\nSQL: {sql}");
+        panic!("清理失败: 数据库 `{db}`: {err}");
+    }
+}
+
+/// 连接管理库并创建本用例独占的库，返回库名与管理连接。
+async fn isolated_database(base_url: &str, prefix: &str) -> (String, MySqlPool) {
+    let admin_pool = MySqlPool::connect(base_url)
+        .await
+        .expect("连接 MySQL 管理库失败，请确认 compose 服务已就绪");
+    let db = unique_db(prefix);
+    create_database(&admin_pool, &db).await;
+    (db, admin_pool)
+}
 
 async fn exec(conn: &mut MySqlConnection, sql: &str) {
     if let Err(err) = sqlx::query(sql).execute(&mut *conn).await {
@@ -288,11 +351,13 @@ fn assert_only(pks: &[i64], expected: i64, label: &str) {
 
 #[tokio::test]
 async fn field_governance_verify_v1_v4_at_100k_scale() {
-    let Ok(url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_MYSQL_URL") else {
         eprintln!("跳过 V1-V4 真实规模验收：未设置 FIELD_MIGRATION_MYSQL_URL");
         return;
     };
-    let schema = DbClient::extract_db_name(&url).unwrap_or_else(|| "e2e".to_string());
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_verify").await;
+    let url = with_database(&base_url, &db_name);
+    let schema = db_name.clone();
     let pool = MySqlPool::connect(&url).await.expect("连接 MySQL 失败");
     let mut conn = pool.acquire().await.expect("获取连接失败");
     let conn: &mut MySqlConnection = &mut conn;
@@ -867,8 +932,10 @@ async fn field_governance_verify_v1_v4_at_100k_scale() {
     )
     .await;
 
-    // 清理
+    // 清理：先删对象，再删除本用例独占的库（连接仍打开时 MySQL 允许 DROP DATABASE）。
     exec(conn, &format!("DROP TABLE IF EXISTS {schema}.{SOURCE_TABLE}")).await;
     exec(conn, &format!("DROP TABLE IF EXISTS {schema}.{PAYLOAD_TABLE}")).await;
     exec(conn, &format!("DROP TABLE IF EXISTS {schema}.{TEXT_TABLE}")).await;
+    drop(ctx);
+    cleanup_database(&admin_pool, &db_name).await;
 }
