@@ -365,12 +365,17 @@ pub fn mysql_dml_target_tables(statements: &[String]) -> Option<Vec<String>> {
     let dialect = sqlparser::dialect::MySqlDialect {};
     let mut tables: Vec<String> = Vec::new();
     for statement in statements {
+        let tokens = leading_tokens(statement);
+        let first = tokens.first().map(String::as_str);
+        // 数据修改型 CTE / LOAD DATA 的写入目标静态上不可靠，走保守口径。
+        if matches!(first, Some("WITH" | "LOAD")) {
+            return None;
+        }
         let parsed = match sqlparser::parser::Parser::parse_sql(&dialect, statement) {
             Ok(parsed) => parsed,
             Err(_) => {
-                let tokens = leading_tokens(statement);
                 let looks_like_dml = matches!(
-                    tokens.first().map(String::as_str),
+                    first,
                     Some("INSERT" | "UPDATE" | "DELETE" | "REPLACE")
                 );
                 if looks_like_dml {
@@ -385,10 +390,19 @@ pub fn mysql_dml_target_tables(statements: &[String]) -> Option<Vec<String>> {
                     TableObject::TableName(name) => push_relation(name, &mut tables),
                     TableObject::TableFunction(_) => false,
                 },
-                Statement::Update(update) => match &update.table.relation {
-                    TableFactor::Table { name, .. } => push_relation(name, &mut tables),
-                    _ => false,
-                },
+                Statement::Update(update) => {
+                    // 多表 UPDATE 的写入列可能落在 JOIN 表上，无法逐一确认。
+                    if !update.table.joins.is_empty() {
+                        false
+                    } else {
+                        match &update.table.relation {
+                            TableFactor::Table { name, .. } => {
+                                push_relation(name, &mut tables)
+                            }
+                            _ => false,
+                        }
+                    }
+                }
                 Statement::Delete(delete) => {
                     let mut ok = true;
                     for name in &delete.tables {
@@ -1975,6 +1989,24 @@ mod tests {
     fn mysql_dml_target_tables_falls_back_for_schema_qualified_targets() {
         let statements = vec!["INSERT INTO other_db.t (id) VALUES (1)".to_string()];
         assert!(mysql_dml_target_tables(&statements).is_none());
+    }
+
+    #[test]
+    fn mysql_dml_target_tables_falls_back_for_ambiguous_write_targets() {
+        // 多表 UPDATE：写入列可能落在 JOIN 表上，不能只取主表。
+        assert!(mysql_dml_target_tables(&[
+            "UPDATE a JOIN b ON a.id = b.id SET a.note = 'x'".to_string()
+        ])
+        .is_none());
+        // 数据修改型 CTE 与 LOAD DATA 同样无法可靠提取目标。
+        assert!(mysql_dml_target_tables(&[
+            "WITH picked AS (SELECT 1) INSERT INTO t SELECT * FROM picked".to_string()
+        ])
+        .is_none());
+        assert!(mysql_dml_target_tables(&[
+            "LOAD DATA INFILE '/tmp/x.csv' INTO TABLE t".to_string()
+        ])
+        .is_none());
     }
 
     #[test]
