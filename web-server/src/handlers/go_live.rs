@@ -3320,10 +3320,59 @@ fn failed_positions_text(failed: &[(usize, String)]) -> String {
         .join(", ")
 }
 
+/// 查询脚本 DML 命中的非事务引擎表。
+///
+/// MyISAM / Aria / MEMORY 等引擎上的写入不参与事务回滚，必须在返回结果里
+/// 降级「可回滚」承诺，避免出现 `rolled_back=true` 但库里仍有残留的结论。
+/// sqlparser 解析不可靠或 DML 跨库引用时退回保守口径：扫描当前库全部非事务表。
+async fn mysql_non_transactional_tables(
+    conn: &mut core_lib::db::EngineConnection,
+    statements: &[String],
+) -> Result<Vec<(String, String)>, AppError> {
+    let targets = core_lib::sql_util::mysql_dml_target_tables(statements);
+    if matches!(&targets, Some(names) if names.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let scope = match &targets {
+        Some(names) => {
+            let list = names
+                .iter()
+                .map(|name| format!("'{}'", name.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("table_name IN ({list})")
+        }
+        None => "1 = 1".to_string(),
+    };
+    let sql = format!(
+        "SELECT table_name, COALESCE(engine, 'VIEW') FROM information_schema.tables \
+         WHERE table_schema = DATABASE() AND {scope} \
+         AND COALESCE(engine, 'VIEW') NOT IN ('InnoDB', 'NDB', 'NDBCLUSTER')"
+    );
+    let result = conn
+        .fetch_all(&sql)
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    Ok(result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let table = row.first()?.as_str()?.to_string();
+            let engine = row
+                .get(1)
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            Some((table, engine))
+        })
+        .collect())
+}
+
 /// PostgreSQL / SQLite：整段脚本包在一个事务内。
 ///
 /// 遇错即停时任一语句失败立即 `ROLLBACK`（DDL 与 DML 一起回滚）；跳过模式用
 /// 保存点逐条隔离，失败语句回滚到保存点后继续，最后统一 `COMMIT`。
+/// MySQL/MariaDB 命中非事务引擎表时降级「可回滚」承诺。
 async fn run_import_script_atomic(
     conn: &mut core_lib::db::EngineConnection,
     statements: &[String],
@@ -3334,9 +3383,37 @@ async fn run_import_script_atomic(
 ) -> Result<serde_json::Value, AppError> {
     let total = statements.len();
     let engine = engine_label(db_type);
-    // MySQL 的「原子」只对支持事务的存储引擎成立，必须在结果里说清楚。
+    // MySQL 的「原子」只对支持事务的存储引擎成立。执行前先查脚本 DML 命中的
+    // 非事务引擎表（MyISAM/Aria/MEMORY 等），命中则降级「可回滚」承诺，
+    // 避免报 rolled_back=true 而库里仍有残留。
+    let non_transactional_tables = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
+        mysql_non_transactional_tables(conn, statements).await?
+    } else {
+        Vec::new()
+    };
+    let downgraded = !non_transactional_tables.is_empty();
+    let non_transactional_json = non_transactional_tables
+        .iter()
+        .map(|(table, engine)| serde_json::json!({"table": table, "engine": engine}))
+        .collect::<Vec<_>>();
+    let scope_desc = non_transactional_tables
+        .iter()
+        .map(|(table, engine)| format!("{table}({engine})"))
+        .collect::<Vec<_>>()
+        .join("、");
+    let rollback_scope = if downgraded {
+        Some("transactional_engines_only")
+    } else {
+        None
+    };
     let engine_note = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
-        Some("MySQL/MariaDB 事务仅对支持事务的存储引擎（如 InnoDB）生效；MyISAM 等非事务引擎的写入无法回滚。")
+        if downgraded {
+            Some(format!(
+                "事务回滚仅对支持事务的引擎（InnoDB/NDB）生效；脚本 DML 命中的以下表使用非事务引擎，写入无法回滚：{scope_desc}。"
+            ))
+        } else {
+            Some("脚本 DML 命中的表均支持事务，失败时可整体回滚。".to_string())
+        }
     } else {
         None
     };
@@ -3387,10 +3464,13 @@ async fn run_import_script_atomic(
                     let err_text = e.to_string();
                     entries.push(script_statement_entry(idx + 1, statement, "failed", 0, Some(&err_text)));
                     let applied_before_rollback = executed;
-                    // 已执行语句在回滚后全部不生效，状态改为 rolled_back。
-                    for entry in entries.iter_mut().take(idx) {
-                        if let Some(obj) = entry.as_object_mut() {
-                            obj.insert("status".to_string(), serde_json::json!("rolled_back"));
+                    // 仅当命中的表都支持事务时，已执行语句才真正「已回滚」。
+                    // 命中非事务引擎表时降级为 executed：事务回滚覆盖不到它们。
+                    if !downgraded {
+                        for entry in entries.iter_mut().take(idx) {
+                            if let Some(obj) = entry.as_object_mut() {
+                                obj.insert("status".to_string(), serde_json::json!("rolled_back"));
+                            }
                         }
                     }
                     for skipped_idx in (idx + 1)..total {
@@ -3404,21 +3484,31 @@ async fn run_import_script_atomic(
                     }
                     let _ = conn.execute_command("ROLLBACK").await;
                     let remaining = total - idx - 1;
-                    let rolled_back_desc = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
-                        format!("此前已执行的 {} 条语句均未生效", applied_before_rollback)
-                    } else {
+                    let message = if downgraded {
                         format!(
-                            "此前已执行的 {} 条语句（含 DDL 与 DML）均未生效",
-                            applied_before_rollback
+                            "第 {} 条语句执行失败，仅事务引擎（InnoDB/NDB）上的写入已回滚；以下非事务引擎表上的写入无法回滚：{scope_desc}，已执行的 {} 条语句在这些表上可能仍有残留，剩余 {} 条未执行。错误：{}",
+                            idx + 1,
+                            applied_before_rollback,
+                            remaining,
+                            err_text
+                        )
+                    } else {
+                        let rolled_back_desc = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
+                            format!("此前已执行的 {} 条语句均未生效", applied_before_rollback)
+                        } else {
+                            format!(
+                                "此前已执行的 {} 条语句（含 DDL 与 DML）均未生效",
+                                applied_before_rollback
+                            )
+                        };
+                        format!(
+                            "第 {} 条语句执行失败，事务已回滚：{}，剩余 {} 条未执行。错误：{}",
+                            idx + 1,
+                            rolled_back_desc,
+                            remaining,
+                            err_text
                         )
                     };
-                    let message = format!(
-                        "第 {} 条语句执行失败，事务已回滚：{}，剩余 {} 条未执行。错误：{}",
-                        idx + 1,
-                        rolled_back_desc,
-                        remaining,
-                        err_text
-                    );
                     update_tool_job(state, job_id, |j| {
                         j.progress.current = (idx + 1) as u64;
                     })
@@ -3427,17 +3517,19 @@ async fn run_import_script_atomic(
                         "success": false,
                         "completed": false,
                         "engine": engine,
-                        "atomic": true,
-                        "rolled_back": true,
+                        "atomic": !downgraded,
+                        "rolled_back": !downgraded,
+                        "rollback_scope": rollback_scope,
+                        "non_transactional_tables": non_transactional_json,
                         "engine_note": engine_note,
                         "failure_policy": "stop",
                         "total_statements": total,
-                        "executed_statements": 0,
+                        "executed_statements": if downgraded { applied_before_rollback } else { 0 },
                         "applied_before_rollback": applied_before_rollback,
                         "failed_statement": idx + 1,
                         "failed_statements": 1,
                         "remaining_statements": remaining,
-                        "affected_rows": 0,
+                        "affected_rows": if downgraded { affected_total } else { 0 },
                         "failure_details": [{"index": idx + 1, "error": err_text}],
                         "statements": entries,
                         "message": message,
@@ -3460,7 +3552,7 @@ async fn run_import_script_atomic(
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
     let success = failed.is_empty();
-    let message = if success {
+    let mut message = if success {
         format!("脚本执行成功：共 {} 条语句，全部提交。", total)
     } else {
         format!(
@@ -3470,13 +3562,20 @@ async fn run_import_script_atomic(
             failed_positions_text(&failed)
         )
     };
+    if downgraded {
+        message.push_str(&format!(
+            "注意：以下非事务引擎表不参与事务回滚：{scope_desc}。"
+        ));
+    }
 
     Ok(serde_json::json!({
         "success": success,
         "completed": true,
         "engine": engine,
-        "atomic": true,
+        "atomic": !downgraded,
         "rolled_back": false,
+        "rollback_scope": rollback_scope,
+        "non_transactional_tables": non_transactional_json,
         "engine_note": engine_note,
         "failure_policy": if continue_on_error { "continue" } else { "stop" },
         "total_statements": total,

@@ -325,6 +325,90 @@ pub fn pg_non_transactional_statement_kind(sql: &str) -> Option<&'static str> {
     }
 }
 
+/// 提取 MySQL/MariaDB 脚本中 DML 的目标表名（去重、去库名前缀、忽略大小写）。
+///
+/// 返回 `None` 表示脚本里存在「看起来是 DML、但 sqlparser 解析失败」的语句，
+/// 或者 DML 目标带了库名前缀（跨库无法可靠判断引擎）；调用方应改用保守口径
+/// （扫描当前库全部非事务引擎表），宁可多报也不漏报。
+pub fn mysql_dml_target_tables(statements: &[String]) -> Option<Vec<String>> {
+    use sqlparser::ast::{FromTable, ObjectName, Statement, TableFactor, TableObject, TableWithJoins};
+
+    fn push_relation(name: &ObjectName, tables: &mut Vec<String>) -> bool {
+        // 带库名前缀时无法只凭当前库判断引擎，交给调用方走保守口径。
+        if name.0.len() > 1 {
+            return false;
+        }
+        let Some(part) = name.0.last() else {
+            return true;
+        };
+        let Some(ident) = part.as_ident() else {
+            return false;
+        };
+        let value = ident.value.clone();
+        if !tables.iter().any(|t| t.eq_ignore_ascii_case(&value)) {
+            tables.push(value);
+        }
+        true
+    }
+
+    fn push_from(from: &[TableWithJoins], tables: &mut Vec<String>) -> bool {
+        for item in from {
+            if let TableFactor::Table { name, .. } = &item.relation {
+                if !push_relation(name, tables) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    let dialect = sqlparser::dialect::MySqlDialect {};
+    let mut tables: Vec<String> = Vec::new();
+    for statement in statements {
+        let parsed = match sqlparser::parser::Parser::parse_sql(&dialect, statement) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                let tokens = leading_tokens(statement);
+                let looks_like_dml = matches!(
+                    tokens.first().map(String::as_str),
+                    Some("INSERT" | "UPDATE" | "DELETE" | "REPLACE")
+                );
+                if looks_like_dml {
+                    return None;
+                }
+                continue;
+            }
+        };
+        for stmt in &parsed {
+            let reliable = match stmt {
+                Statement::Insert(insert) => match &insert.table {
+                    TableObject::TableName(name) => push_relation(name, &mut tables),
+                    TableObject::TableFunction(_) => false,
+                },
+                Statement::Update(update) => match &update.table.relation {
+                    TableFactor::Table { name, .. } => push_relation(name, &mut tables),
+                    _ => false,
+                },
+                Statement::Delete(delete) => {
+                    let mut ok = true;
+                    for name in &delete.tables {
+                        ok &= push_relation(name, &mut tables);
+                    }
+                    let from = match &delete.from {
+                        FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
+                    };
+                    ok && push_from(from, &mut tables)
+                }
+                _ => true,
+            };
+            if !reliable {
+                return None;
+            }
+        }
+    }
+    Some(tables)
+}
+
 /// 把 SQL 脚本拆成独立语句。
 ///
 /// 按顶层分号拆分，字符串（单引号/双引号/反引号）、行注释、块注释与
@@ -1865,5 +1949,41 @@ mod tests {
             (Some("app"), "orders")
         );
         assert_eq!(split_pg_table_ref("orders"), (None, "orders"));
+    }
+
+    #[test]
+    fn mysql_dml_target_tables_extracts_insert_update_delete() {
+        let statements = vec![
+            "INSERT INTO orders (id) VALUES (1)".to_string(),
+            "UPDATE customers SET name = 'x' WHERE id = 1".to_string(),
+            "DELETE FROM order_items WHERE id = 1".to_string(),
+            "INSERT INTO orders (id) VALUES (2) ON DUPLICATE KEY UPDATE id = id".to_string(),
+            "SELECT * FROM ignored_read_only".to_string(),
+        ];
+        let tables = mysql_dml_target_tables(&statements).expect("应能可靠解析");
+        assert_eq!(tables, vec!["orders", "customers", "order_items"]);
+    }
+
+    #[test]
+    fn mysql_dml_target_tables_falls_back_for_unparseable_dml() {
+        // 头部是 DML 但语法不完整：返回 None，调用方应走保守口径。
+        let statements = vec!["INSERT INTO broken (id VALUES (1)".to_string()];
+        assert!(mysql_dml_target_tables(&statements).is_none());
+    }
+
+    #[test]
+    fn mysql_dml_target_tables_falls_back_for_schema_qualified_targets() {
+        let statements = vec!["INSERT INTO other_db.t (id) VALUES (1)".to_string()];
+        assert!(mysql_dml_target_tables(&statements).is_none());
+    }
+
+    #[test]
+    fn mysql_dml_target_tables_ignores_comments_and_literals() {
+        let statements = vec![
+            "-- INSERT INTO phantom VALUES (1)\nSELECT 1".to_string(),
+            "INSERT INTO real_table (note) VALUES ('DELETE FROM phantom')".to_string(),
+        ];
+        let tables = mysql_dml_target_tables(&statements).expect("应能可靠解析");
+        assert_eq!(tables, vec!["real_table"]);
     }
 }

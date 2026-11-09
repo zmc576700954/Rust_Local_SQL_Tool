@@ -77,6 +77,13 @@ async fn row_count(pool: &MySqlPool, table: &str) -> i64 {
     scalar_i64(pool, &format!("SELECT COUNT(*) FROM {table}")).await
 }
 
+async fn ids_of(pool: &MySqlPool, table: &str) -> Vec<i64> {
+    sqlx::query_scalar::<_, i64>(&format!("SELECT id FROM {table} ORDER BY id"))
+        .fetch_all(pool)
+        .await
+        .unwrap_or_else(|err| panic!("读取主键失败: {err}\n表: {table}"))
+}
+
 async fn run_script(client: &DbClient, sql: &str, skip_errors: bool) -> Result<Value, AppError> {
     let state = test_state_with_config(AppConfig::default());
     let req = ImportSqlJobStartRequest {
@@ -528,7 +535,7 @@ async fn mysql_skip_errors_summarizes_failures_and_continues() {
 // ------------------------- 事务引擎边界 -------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mysql_myisam_rows_survive_reported_transaction_rollback() {
+async fn mysql_myisam_script_downgrades_full_rollback_claim() {
     let Some(url) = mysql_url() else { return };
     let (client, pool) = connect(&url).await;
     drop_tables(&pool, &["it_myisam"]).await;
@@ -538,7 +545,7 @@ async fn mysql_myisam_rows_survive_reported_transaction_rollback() {
     )
     .await;
 
-    // 纯 DML → 会走事务路径；但 MyISAM 不支持事务，ROLLBACK 不会撤销写入。
+    // 纯 DML → 会走事务路径；但 MyISAM 不支持事务，承诺必须降级。
     let result = run_script(
         &client,
         "INSERT INTO it_myisam VALUES (1, 'a');
@@ -549,13 +556,36 @@ async fn mysql_myisam_rows_survive_reported_transaction_rollback() {
     .await
     .expect("应返回结构化结果");
 
-    assert_eq!(result["atomic"], Value::Bool(true));
-    assert_eq!(result["rolled_back"], Value::Bool(true));
+    // 新行为：不再声称 atomic/rolled_back，明确只覆盖事务引擎。
+    assert_eq!(result["atomic"], Value::Bool(false));
+    assert_eq!(result["rolled_back"], Value::Bool(false));
+    assert_eq!(result["rollback_scope"], "transactional_engines_only");
+    let listed = result["non_transactional_tables"]
+        .as_array()
+        .expect("non_transactional_tables 应为数组");
+    assert_eq!(listed.len(), 1, "{result}");
+    assert_eq!(listed[0]["table"], "it_myisam");
+    assert_eq!(listed[0]["engine"], "MyISAM");
     assert!(
-        result["engine_note"].as_str().unwrap_or_default().contains("InnoDB"),
-        "必须说明事务只对支持事务的引擎生效"
+        result["engine_note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("it_myisam(MyISAM)"),
+        "engine_note 必须点名命中的非事务表：{}",
+        result["engine_note"]
     );
-    // 关键断言：接口声称已回滚，但 MyISAM 上两行确实留下了。
+    assert!(
+        message(&result).contains("无法回滚"),
+        "{}",
+        message(&result)
+    );
+    // 已执行语句不能标成 rolled_back（否则又变成与库内事实不符的结论）。
+    assert_eq!(
+        statuses(&result),
+        vec!["1:executed", "2:executed", "3:failed"]
+    );
+
+    // 回查真实状态：MyISAM 上两行确实留下。
     assert_eq!(
         row_count(&pool, "it_myisam").await,
         2,
@@ -563,6 +593,138 @@ async fn mysql_myisam_rows_survive_reported_transaction_rollback() {
     );
 
     drop_tables(&pool, &["it_myisam"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_mixed_engine_dml_lists_only_non_transactional_targets() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    drop_tables(&pool, &["it_mix_innodb", "it_mix_myisam"]).await;
+    exec(
+        &pool,
+        "CREATE TABLE it_mix_innodb (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE it_mix_myisam (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=MyISAM",
+    )
+    .await;
+
+    let result = run_script(
+        &client,
+        "INSERT INTO it_mix_innodb VALUES (1, 'a');
+         INSERT INTO it_mix_myisam VALUES (1, 'm');
+         INSERT INTO it_mix_innodb VALUES (2, 'b');
+         INSERT INTO it_mix_myisam VALUES (1, 'dup');",
+        false,
+    )
+    .await
+    .expect("应返回结构化结果");
+
+    assert_eq!(result["atomic"], Value::Bool(false));
+    assert_eq!(result["rolled_back"], Value::Bool(false));
+    assert_eq!(result["rollback_scope"], "transactional_engines_only");
+    // 精准识别：只列出被 DML 命中的非事务表，而不是全库扫出来的所有表。
+    let listed = result["non_transactional_tables"]
+        .as_array()
+        .expect("non_transactional_tables 应为数组");
+    assert_eq!(listed.len(), 1, "{result}");
+    assert_eq!(listed[0]["table"], "it_mix_myisam");
+    assert_eq!(listed[0]["engine"], "MyISAM");
+    assert_eq!(
+        statuses(&result),
+        vec!["1:executed", "2:executed", "3:executed", "4:failed"]
+    );
+
+    // 回查真实状态：InnoDB 的回滚了，MyISAM 的留下了。
+    assert_eq!(row_count(&pool, "it_mix_innodb").await, 0);
+    assert_eq!(row_count(&pool, "it_mix_myisam").await, 1);
+    assert_eq!(ids_of(&pool, "it_mix_myisam").await, vec![1]);
+
+    drop_tables(&pool, &["it_mix_innodb", "it_mix_myisam"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_memory_engine_script_downgrades_rollback_claim() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    drop_tables(&pool, &["it_memory"]).await;
+    exec(
+        &pool,
+        "CREATE TABLE it_memory (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=MEMORY",
+    )
+    .await;
+
+    let result = run_script(
+        &client,
+        "INSERT INTO it_memory VALUES (1, 'a');
+         INSERT INTO it_memory VALUES (2, 'b');
+         INSERT INTO it_memory VALUES (1, 'dup');",
+        false,
+    )
+    .await
+    .expect("应返回结构化结果");
+
+    assert_eq!(result["atomic"], Value::Bool(false));
+    assert_eq!(result["rolled_back"], Value::Bool(false));
+    let listed = result["non_transactional_tables"]
+        .as_array()
+        .expect("non_transactional_tables 应为数组");
+    assert_eq!(listed.len(), 1, "{result}");
+    assert_eq!(listed[0]["table"], "it_memory");
+    assert_eq!(listed[0]["engine"], "MEMORY");
+    assert_eq!(row_count(&pool, "it_memory").await, 2);
+
+    drop_tables(&pool, &["it_memory"]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_all_innodb_script_keeps_full_rollback_promise() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    drop_tables(&pool, &["it_all_innodb"]).await;
+    exec(
+        &pool,
+        "CREATE TABLE it_all_innodb (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB",
+    )
+    .await;
+
+    let result = run_script(
+        &client,
+        "INSERT INTO it_all_innodb VALUES (1, 'a');
+         INSERT INTO it_all_innodb VALUES (2, 'b');
+         INSERT INTO it_all_innodb VALUES (1, 'dup');",
+        false,
+    )
+    .await
+    .expect("应返回结构化结果");
+
+    // 对照组：命中的表全部支持事务时，仍给完整承诺。
+    assert_eq!(result["atomic"], Value::Bool(true));
+    assert_eq!(result["rolled_back"], Value::Bool(true));
+    assert_eq!(result["rollback_scope"], Value::Null);
+    assert_eq!(
+        result["non_transactional_tables"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    assert!(
+        result["engine_note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("均支持事务"),
+        "{}",
+        result["engine_note"]
+    );
+    assert_eq!(
+        statuses(&result),
+        vec!["1:rolled_back", "2:rolled_back", "3:failed"]
+    );
+    assert_eq!(row_count(&pool, "it_all_innodb").await, 0);
+
+    drop_tables(&pool, &["it_all_innodb"]).await;
 }
 
 // ------------------------- 脚本形态 -------------------------
