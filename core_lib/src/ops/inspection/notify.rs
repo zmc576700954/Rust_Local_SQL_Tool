@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use crate::ops::error::OpsError;
 use crate::ops::inspection::alert::{AlertEventKind, AlertNotification};
+use crate::ops::inspection::redact::{scrub_json, scrub_text};
 use crate::ops::types::Severity;
 
 /// 应用关闭后巡检与通知都会停止；该说明同时出现在接口、邮件与 Webhook 中。
@@ -57,6 +58,9 @@ pub struct EmailNotificationSettings {
     pub from: String,
     #[serde(default)]
     pub to: Vec<String>,
+    /// 可选：额外信任的 CA 证书（PEM 路径），用于自签名/私有 CA 的 TLS SMTP。
+    #[serde(default)]
+    pub ca_cert_path: String,
 }
 
 impl Default for EmailNotificationSettings {
@@ -69,6 +73,7 @@ impl Default for EmailNotificationSettings {
             username: String::new(),
             from: String::new(),
             to: Vec::new(),
+            ca_cert_path: String::new(),
         }
     }
 }
@@ -283,6 +288,8 @@ pub struct NotificationContent {
     pub subject: String,
     pub text: String,
     pub payload: Value,
+    /// 发送前清洗是否移除了连接串或凭据；为 true 时投递记录标记「已脱敏」。
+    pub redacted: bool,
 }
 
 pub fn event_label(kind: AlertEventKind) -> &'static str {
@@ -309,41 +316,54 @@ fn format_ts(ts: i64) -> String {
     .to_string()
 }
 
-/// 构造邮件与 Webhook 的内容；所有字段先脱敏再说。
+/// 构造邮件与 Webhook 的内容；所有字段先强制清洗再说。
+///
+/// 清洗是删除式：`scheme://`、`user:pass@`、`password=`、`@host:port` 形态的片段整段移除，
+/// 不会保留 `***` 结构。`redacted` 表示本次清洗是否改变了内容。
 pub fn build_content(
     notification: &AlertNotification,
     secrets: &NotificationSecrets,
 ) -> NotificationContent {
+    let values = secrets.redaction_values();
     let alert = &notification.alert;
-    let object = sanitize_text(&alert.evidence_key, secrets);
-    let summary = sanitize_text(&alert.message, secrets);
-    let db_name = sanitize_text(&alert.db_name, secrets);
-    let title = sanitize_text(&alert.title, secrets);
+    let (object, mut redacted) = scrub_text(&alert.evidence_key, &values);
+    let (summary, changed) = scrub_text(&alert.message, &values);
+    redacted = redacted || changed;
+    let (db_name, changed) = scrub_text(&alert.db_name, &values);
+    redacted = redacted || changed;
+    let (title, changed) = scrub_text(&alert.title, &values);
+    redacted = redacted || changed;
+    let (check_id, changed) = scrub_text(&alert.check_id, &values);
+    redacted = redacted || changed;
     let checked_at = format_ts(alert.last_seen_at);
 
-    let subject = format!(
+    let raw_subject = format!(
         "[巡检告警][{}] {} · {} · {}",
         severity_label(alert.severity),
         title,
         db_name,
         object
     );
+    let (subject, changed) = scrub_text(&raw_subject, &values);
+    redacted = redacted || changed;
 
-    let text = format!(
+    let raw_text = format!(
         "事件: {}\n库名: {}\n对象: {}\n检查项: {} ({})\n严重度: {}\n证据摘要: {}\n首次发现: {}\n最近出现: {}\n\n说明: {}\n",
         event_label(notification.kind),
         db_name,
         object,
         title,
-        alert.check_id,
+        check_id,
         severity_label(alert.severity),
         summary,
         format_ts(alert.first_seen_at),
         checked_at,
         SCOPE_NOTE,
     );
+    let (text, changed) = scrub_text(&raw_text, &values);
+    redacted = redacted || changed;
 
-    let payload = json!({
+    let mut payload = json!({
         "event": match notification.kind {
             AlertEventKind::Raised => "raised",
             AlertEventKind::Escalated => "escalated",
@@ -353,7 +373,7 @@ pub fn build_content(
         "alert_id": alert.alert_id,
         "db_name": db_name,
         "object": object,
-        "check_id": alert.check_id,
+        "check_id": check_id,
         "check_title": title,
         "severity": match alert.severity {
             Severity::Info => "info",
@@ -369,104 +389,14 @@ pub fn build_content(
         "state": alert.state,
         "scope_note": SCOPE_NOTE,
     });
+    redacted = scrub_json(&mut payload, &values) || redacted;
 
     NotificationContent {
         subject,
         text,
         payload,
+        redacted,
     }
-}
-
-/// 脱敏：抹掉已知凭据、URL userinfo 与 password=/token= 这类键值。
-pub fn sanitize_text(input: &str, secrets: &NotificationSecrets) -> String {
-    let mut output = input.to_string();
-    for value in secrets.redaction_values() {
-        if !value.is_empty() {
-            output = output.replace(&value, "***");
-        }
-    }
-    output = redact_url_userinfo(&output);
-    redact_secret_assignments(&output)
-}
-
-fn redact_url_userinfo(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(scheme_pos) = rest.find("://") {
-        let (before, after) = rest.split_at(scheme_pos + 3);
-        output.push_str(before);
-        // 在下一个空白或引号内寻找 userinfo@。
-        let end = after
-            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '>' || c == '<')
-            .unwrap_or(after.len());
-        let (url_part, tail) = after.split_at(end);
-        let at = url_part.find('@');
-        let slash = url_part.find('/').unwrap_or(url_part.len());
-        match at {
-            Some(at) if at < slash && url_part[..at].contains(':') => {
-                output.push_str("***:***@");
-                output.push_str(&url_part[at + 1..]);
-            }
-            _ => output.push_str(url_part),
-        }
-        rest = tail;
-    }
-    output.push_str(rest);
-    output
-}
-
-fn redact_secret_assignments(input: &str) -> String {
-    const KEYS: [&str; 6] = ["password", "passwd", "pwd", "token", "secret", "authorization"];
-    let mut output = String::with_capacity(input.len());
-    let chars: Vec<char> = input.chars().collect();
-    let mut index = 0;
-    while index < chars.len() {
-        let lower_rest: String = chars[index..]
-            .iter()
-            .take(24)
-            .collect::<String>()
-            .to_ascii_lowercase();
-        let mut matched = None;
-        for key in KEYS {
-            if lower_rest.starts_with(key) {
-                matched = Some(key.len());
-                break;
-            }
-        }
-        match matched {
-            Some(key_len) => {
-                let after_key = index + key_len;
-                let mut cursor = after_key;
-                while cursor < chars.len() && chars[cursor].is_whitespace() {
-                    cursor += 1;
-                }
-                if cursor < chars.len() && (chars[cursor] == '=' || chars[cursor] == ':') {
-                    let mut value_start = cursor + 1;
-                    while value_start < chars.len() && chars[value_start].is_whitespace() {
-                        value_start += 1;
-                    }
-                    let mut value_end = value_start;
-                    while value_end < chars.len()
-                        && !chars[value_end].is_whitespace()
-                        && !matches!(chars[value_end], '&' | ';' | ',' | '"' | '\'')
-                    {
-                        value_end += 1;
-                    }
-                    output.extend(&chars[index..value_start]);
-                    output.push_str("***");
-                    index = value_end;
-                } else {
-                    output.push(chars[index]);
-                    index += 1;
-                }
-            }
-            None => {
-                output.push(chars[index]);
-                index += 1;
-            }
-        }
-    }
-    output
 }
 
 #[cfg(test)]
@@ -524,20 +454,51 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_removes_secrets_and_connection_strings() {
+    fn content_removes_connection_strings_by_shape() {
+        use crate::ops::inspection::redact::{contains_sensitive_shape, scrub_text};
+
         let secrets = secrets();
         let raw = "连接 mysql://root:rootpass@127.0.0.1:3306/app 失败；password=plain123 token:abc456 Bearer webhook-token-123 smtp-super-secret";
-        let clean = sanitize_text(raw, &secrets);
+        let (clean, changed) = scrub_text(raw, &secrets.redaction_values());
+        assert!(changed);
+        assert!(!contains_sensitive_shape(&clean), "still sensitive: {clean}");
         for leaked in [
+            "mysql://",
             "rootpass",
+            "127.0.0.1:3306",
+            "password=",
             "plain123",
+            "token:",
             "abc456",
             "webhook-token-123",
             "smtp-super-secret",
         ] {
             assert!(!clean.contains(leaked), "leaked {leaked}: {clean}");
         }
-        assert!(clean.contains("mysql://***:***@127.0.0.1:3306/app"));
+        // 删除式清洗不保留 *** 结构。
+        assert!(!clean.contains("***"));
+    }
+
+    #[test]
+    fn build_content_flags_redaction_and_keeps_names() {
+        use crate::ops::inspection::redact::contains_sensitive_shape;
+
+        let polluted = "库 shop 的表 orders 索引 idx_created 异常；参考 mysql://root:rootpass@127.0.0.1:3306/shop?password=plain123";
+        let notification = AlertNotification {
+            kind: AlertEventKind::Raised,
+            alert: alert(polluted, "orders.idx_created"),
+        };
+        let content = build_content(&notification, &secrets());
+        assert!(content.redacted);
+        let payload_text = serde_json::to_string(&content.payload).unwrap();
+        for text in [&content.subject, &content.text, &payload_text] {
+            assert!(!contains_sensitive_shape(text), "still sensitive: {text}");
+            assert!(!text.contains("mysql://"));
+            assert!(!text.contains("password="));
+        }
+        assert!(content.text.contains("shop"));
+        assert!(content.text.contains("orders"));
+        assert!(content.text.contains("idx_created"));
     }
 
     #[test]

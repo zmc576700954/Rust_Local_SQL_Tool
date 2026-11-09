@@ -21,6 +21,9 @@ use core_lib::ops::inspection::notify::{
 use core_lib::ops::inspection::presets::{
     all_check_ids, resolve_check_ids, CHECK_DESCRIPTORS, presets,
 };
+use core_lib::ops::inspection::redact::{
+    scrub_alert, scrub_diff, scrub_json, scrub_run_result, scrub_snapshot, scrub_text,
+};
 use core_lib::ops::inspection::runner::run_inspection;
 use core_lib::ops::inspection::scheduler::{compute_next_run, validate_schedule};
 use core_lib::ops::inspection::types::{
@@ -98,13 +101,16 @@ async fn resolve_target(
 }
 
 fn target_json(target: &DbTarget) -> serde_json::Value {
-    json!({
+    let mut value = json!({
         "db_id": target.id.clone(),
         "db_name": target.db_name.clone(),
         "display_name": target.display_name.clone(),
         "db_type": format!("{:?}", target.db_type),
         "db_fingerprint": target.fingerprint.clone(),
-    })
+    });
+    // 连接名称可能被用户写成 DSN 形式，展示前统一按形态剔除。
+    scrub_json(&mut value, &[]);
+    value
 }
 
 // ── 元信息 / 计划 ───────────────────────────────────────────
@@ -456,7 +462,7 @@ pub(crate) async fn ops_inspection_run(
             Vec::new()
         }
     });
-    let result = execute_inspection(
+    let mut result = execute_inspection(
         &state,
         db_id.as_deref(),
         &preset_id,
@@ -465,6 +471,8 @@ pub(crate) async fn ops_inspection_run(
         "manual",
     )
     .await?;
+    // 展示与通知前的最后一道防线：历史/驱动错误里可能夹带连接串。
+    scrub_run_result(&mut result, &[]);
     Ok(Json(result))
 }
 
@@ -632,17 +640,29 @@ pub(crate) async fn ops_inspection_latest(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let target = resolve_target(&state, query.db_id.as_deref()).await?;
     let store = state.ops.inspections.read().await;
-    let latest: Option<InspectionSnapshot> = store.latest_for_db_id(&target.id_key).cloned();
-    let previous = latest
+    let mut latest: Option<InspectionSnapshot> = store.latest_for_db_id(&target.id_key).cloned();
+    if let Some(snapshot) = latest.as_mut() {
+        scrub_snapshot(snapshot, &[]);
+    }
+    let mut previous = latest
         .as_ref()
         .and_then(|snapshot| store.previous(&snapshot.db_fingerprint).cloned());
-    let diff: Option<SnapshotDiff> = latest
+    if let Some(snapshot) = previous.as_mut() {
+        scrub_snapshot(snapshot, &[]);
+    }
+    let mut diff: Option<SnapshotDiff> = latest
         .as_ref()
         .map(|snapshot| compare_snapshots(previous.as_ref(), snapshot));
+    if let Some(diff) = diff.as_mut() {
+        scrub_diff(diff, &[]);
+    }
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let mut alerts = store.alerts_for_db_id(&target.id_key, limit);
     if !query.include_resolved.unwrap_or(true) {
         alerts.retain(|alert| alert.state == AlertState::Active);
+    }
+    for alert in &mut alerts {
+        scrub_alert(alert, &[]);
     }
     Ok(Json(json!({
         "target": target_json(&target),
@@ -660,12 +680,16 @@ pub(crate) async fn ops_inspection_history(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let target = resolve_target(&state, query.db_id.as_deref()).await?;
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
-    let snapshots: Vec<SnapshotSummary> = state
+    let mut snapshots: Vec<SnapshotSummary> = state
         .ops
         .inspections
         .read()
         .await
         .history_for_db_id(&target.id_key, limit);
+    for summary in &mut snapshots {
+        let (db_name, _) = scrub_text(&summary.db_name, &[]);
+        summary.db_name = db_name;
+    }
     Ok(Json(json!({
         "target": target_json(&target),
         "snapshots": snapshots,
@@ -683,6 +707,9 @@ pub(crate) async fn ops_inspection_alerts(
     if !query.include_resolved.unwrap_or(true) {
         alerts.retain(|alert| alert.state == AlertState::Active);
     }
+    for alert in &mut alerts {
+        scrub_alert(alert, &[]);
+    }
     Ok(Json(json!({
         "target": target_json(&target),
         "alerts": alerts,
@@ -696,12 +723,13 @@ pub(crate) async fn ops_inspection_ack_alert(
     Path(alert_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     authorize_write(&state, &headers)?;
-    let alert = state
+    let mut alert = state
         .ops
         .inspections
         .write()
         .await
         .acknowledge(&alert_id)?;
+    scrub_alert(&mut alert, &[]);
     audit_event(
         &state,
         "inspection_alert_ack",

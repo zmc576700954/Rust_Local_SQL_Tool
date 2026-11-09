@@ -297,6 +297,9 @@ pub struct ChannelDelivery {
     /// 每次尝试的时间戳，用于核对退避间隔。
     #[serde(default)]
     pub attempt_times: Vec<i64>,
+    /// 发送前清洗是否移除了连接串/凭据；为 true 时界面上标记「已脱敏」。
+    #[serde(default)]
+    pub redacted: bool,
 }
 
 impl ChannelDelivery {
@@ -309,6 +312,7 @@ impl ChannelDelivery {
             last_attempt_at: None,
             delivered_at: None,
             attempt_times: Vec::new(),
+            redacted: false,
         }
     }
 
@@ -321,6 +325,7 @@ impl ChannelDelivery {
             last_attempt_at: None,
             delivered_at: None,
             attempt_times: Vec::new(),
+            redacted: false,
         }
     }
 }

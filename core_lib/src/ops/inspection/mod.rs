@@ -5,6 +5,7 @@ pub mod checks;
 pub mod diff;
 pub mod notify;
 pub mod presets;
+pub mod redact;
 pub mod runner;
 pub mod scheduler;
 pub mod sql;
@@ -14,7 +15,7 @@ pub mod types;
 pub use alert::{
     classify_http_status, classify_smtp_code, deliver_with_retry, AlertEventKind, AlertNotification,
     ChannelError, EmailChannel, InAppChannel, NotificationChannel, NotificationDispatcher,
-    RetryPolicy, WebhookChannel,
+    RetryPolicy, SendOutcome, WebhookChannel,
 };
 pub use checks::collect_check;
 pub use diff::compare_snapshots;
@@ -25,6 +26,10 @@ pub use notify::{
 pub use presets::{
     all_check_ids, check_descriptor, preset_by_id, presets, resolve_check_ids, CheckDescriptor,
     CHECK_DESCRIPTORS,
+};
+pub use redact::{
+    contains_sensitive_shape, scrub_alert, scrub_check, scrub_diff, scrub_evidence, scrub_json,
+    scrub_run_result, scrub_snapshot, scrub_text,
 };
 pub use runner::run_inspection;
 pub use scheduler::{compute_next_run, validate_schedule};

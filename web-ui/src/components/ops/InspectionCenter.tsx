@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle2, Clock, Loader2, Play, RefreshCw, Send, Shi
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api'
 import { tr } from '../../i18n'
+import { scrubSensitiveText } from '../../utils/redact'
 
 interface InspectionCenterProps {
   dbId?: string
@@ -100,6 +101,7 @@ interface ChannelDelivery {
   last_attempt_at: number | null
   delivered_at: number | null
   attempt_times: number[]
+  redacted?: boolean
 }
 
 interface AlertRecord {
@@ -127,6 +129,7 @@ interface NotificationEmailSettings {
   username: string
   from: string
   to: string[]
+  ca_cert_path?: string
 }
 
 interface NotificationWebhookSettings {
@@ -276,6 +279,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
   const [emailUsername, setEmailUsername] = useState('')
   const [emailFrom, setEmailFrom] = useState('')
   const [emailTo, setEmailTo] = useState('')
+  const [emailCaCertPath, setEmailCaCertPath] = useState('')
   const [smtpPassword, setSmtpPassword] = useState('')
   const [webhookEnabled, setWebhookEnabled] = useState(false)
   const [webhookUrl, setWebhookUrl] = useState('')
@@ -295,6 +299,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
     setEmailUsername(value.settings.email.username)
     setEmailFrom(value.settings.email.from)
     setEmailTo((value.settings.email.to || []).join(', '))
+    setEmailCaCertPath(value.settings.email.ca_cert_path || '')
     setWebhookEnabled(value.settings.webhook.enabled)
     setMaxRetries(value.settings.max_retries)
     setBackoffSeconds(value.settings.backoff_seconds)
@@ -415,6 +420,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
           username: emailUsername.trim(),
           from: emailFrom.trim(),
           to: recipients,
+          ca_cert_path: emailCaCertPath.trim(),
         },
         webhook: {
           enabled: webhookEnabled,
@@ -510,7 +516,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="rounded border border-dark-border px-2 py-1 text-gray-300">
-              {tr('目标', 'Target')}: {String(target?.display_name || schedule?.db_name || dbId || tr('跟随当前连接', 'active connection'))}
+              {tr('目标', 'Target')}: {scrubSensitiveText(String(target?.display_name || schedule?.db_name || dbId || tr('跟随当前连接', 'active connection')))}
             </span>
             {target?.db_fingerprint ? (
               <span className="rounded border border-dark-border px-2 py-1 font-mono text-[11px] text-gray-500">
@@ -662,7 +668,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
             </div>
             {schedule?.last_error && (
               <div className="rounded border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-300">
-                {tr('上次错误', 'Last error')}: {schedule.last_error}
+                {tr('上次错误', 'Last error')}: {scrubSensitiveText(schedule.last_error)}
               </div>
             )}
           </div>
@@ -752,6 +758,15 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
                 onChange={(event) => setEmailTo(event.target.value)}
                 placeholder={tr('收件人，逗号分隔', 'Recipients, comma separated')}
                 className="col-span-2 rounded border border-dark-border bg-dark-bg px-2 py-1 text-xs text-gray-200"
+              />
+              <input
+                value={emailCaCertPath}
+                onChange={(event) => setEmailCaCertPath(event.target.value)}
+                placeholder={tr(
+                  '可选：额外 CA 证书 PEM 路径（自签名/私有 CA）',
+                  'Optional: extra CA certificate PEM path (self-signed/private CA)'
+                )}
+                className="col-span-2 rounded border border-dark-border bg-dark-bg px-2 py-1 font-mono text-[11px] text-gray-200"
               />
             </div>
 
@@ -920,10 +935,10 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
                     </span>
                   </div>
                   <div className="mt-1 text-gray-500">{check.rule}</div>
-                  <div className="mt-1 text-gray-400">{check.summary}</div>
+                  <div className="mt-1 text-gray-400">{scrubSensitiveText(check.summary)}</div>
                   {check.skipped_reason && (
                     <div className="mt-1 text-amber-300">
-                      {tr('跳过原因', 'Skipped')}: {check.skipped_reason}
+                      {tr('跳过原因', 'Skipped')}: {scrubSensitiveText(check.skipped_reason)}
                     </div>
                   )}
                   {check.evidence.length > 0 && (
@@ -933,10 +948,10 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
                           <span className={`mr-2 ${severityClass(item.severity)}`}>
                             {SEVERITY_LABEL[item.severity] || item.severity}
                           </span>
-                          <span className="text-gray-300">{item.message}</span>
+                          <span className="text-gray-300">{scrubSensitiveText(item.message)}</span>
                           {describeFields(item.fields) && (
                             <div className="mt-0.5 break-all font-mono text-[10px] text-gray-500">
-                              {describeFields(item.fields)}
+                              {scrubSensitiveText(describeFields(item.fields))}
                             </div>
                           )}
                         </div>
@@ -982,7 +997,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
               <div className="space-y-1">
                 {diff.added.map((item) => (
                   <div key={`added:${item.check_id}:${item.evidence_key}`} className="rounded border border-red-500/30 bg-dark-bg p-2 text-[11px] text-gray-300">
-                    <span className={severityClass(item.severity)}>{SEVERITY_LABEL[item.severity]}</span> {item.message}
+                    <span className={severityClass(item.severity)}>{SEVERITY_LABEL[item.severity]}</span> {scrubSensitiveText(item.message)}
                   </div>
                 ))}
               </div>
@@ -994,7 +1009,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
               <div className="space-y-1">
                 {diff.resolved.map((item) => (
                   <div key={`resolved:${item.check_id}:${item.evidence_key}`} className="rounded border border-emerald-500/30 bg-dark-bg p-2 text-[11px] text-gray-300">
-                    {item.message}
+                    {scrubSensitiveText(item.message)}
                   </div>
                 ))}
               </div>
@@ -1006,9 +1021,9 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
               <div className="space-y-1">
                 {diff.changed.map((item) => (
                   <div key={`changed:${item.check_id}:${item.evidence_key}`} className="rounded border border-amber-500/30 bg-dark-bg p-2 text-[11px] text-gray-300">
-                    <div>{item.evidence_key}</div>
+                    <div>{scrubSensitiveText(item.evidence_key)}</div>
                     <div className="text-gray-500">
-                      {item.before.message} → {item.after.message}
+                      {scrubSensitiveText(item.before.message)} → {scrubSensitiveText(item.after.message)}
                     </div>
                   </div>
                 ))}
@@ -1044,7 +1059,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
                     <span className={severityClass(alert.severity)}>
                       {SEVERITY_LABEL[alert.severity] || alert.severity}
                     </span>
-                    <span className="text-gray-200">{alert.title}</span>
+                    <span className="text-gray-200">{scrubSensitiveText(alert.title)}</span>
                     <span className="text-gray-500">
                       {alert.state === 'active' ? tr('活跃', 'active') : tr('已恢复', 'resolved')}
                     </span>
@@ -1060,7 +1075,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
                     </button>
                   )}
                 </div>
-                <div className="mt-1 text-gray-400">{alert.message}</div>
+                <div className="mt-1 text-gray-400">{scrubSensitiveText(alert.message)}</div>
                 <div className="mt-1 text-[10px] text-gray-500">
                   {tr('首次', 'first')}: {formatTime(alert.first_seen_at)} · {tr('最近', 'last')}:{' '}
                   {formatTime(alert.last_seen_at)} · {tr('次数', 'count')}: {alert.occurrences}
@@ -1070,12 +1085,13 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
                     {alert.deliveries.map((delivery) => (
                       <span
                         key={delivery.channel}
-                        title={delivery.last_error || undefined}
+                        title={delivery.last_error ? scrubSensitiveText(delivery.last_error) : undefined}
                         className={`rounded border px-1.5 py-0.5 text-[10px] ${deliveryClass(delivery.status)}`}
                       >
                         {CHANNEL_LABEL[delivery.channel] || delivery.channel}:{' '}
                         {DELIVERY_LABEL[delivery.status] || delivery.status}
                         {delivery.attempts > 1 ? ` ×${delivery.attempts}` : ''}
+                        {delivery.redacted ? tr(' · 已脱敏', ' · redacted') : ''}
                         {delivery.last_error ? tr('（有错误）', ' (error)') : ''}
                       </span>
                     ))}
@@ -1085,7 +1101,7 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
                   <div className="mt-1 break-all text-[10px] text-red-300">
                     {alert.deliveries
                       .filter((delivery) => delivery.last_error)
-                      .map((delivery) => `${CHANNEL_LABEL[delivery.channel] || delivery.channel}: ${delivery.last_error}`)
+                      .map((delivery) => `${CHANNEL_LABEL[delivery.channel] || delivery.channel}: ${scrubSensitiveText(delivery.last_error || '')}`)
                       .join(' · ')}
                   </div>
                 ) : null}

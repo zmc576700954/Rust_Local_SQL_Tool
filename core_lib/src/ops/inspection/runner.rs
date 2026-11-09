@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::ops::error::OpsError;
 use crate::ops::inspection::checks::collect_check;
+use crate::ops::inspection::redact::scrub_snapshot;
 use crate::ops::inspection::types::{
     now_ts, CheckStatus, InspectionSnapshot, InspectionThresholds, SnapshotStatus,
 };
@@ -47,7 +48,7 @@ pub async fn run_inspection(
     }
 
     let status = aggregate_status(&checks);
-    Ok(InspectionSnapshot {
+    let mut snapshot = InspectionSnapshot {
         snapshot_id: Uuid::new_v4().to_string(),
         db_id: ctx.db_id.clone(),
         db_name: ctx.db_name.clone(),
@@ -58,7 +59,10 @@ pub async fn run_inspection(
         status,
         check_ids: check_ids.to_vec(),
         checks,
-    })
+    };
+    // 源头防线：检查文案可能夹带驱动返回的连接串/口令，落库前统一删除。
+    scrub_snapshot(&mut snapshot, &[]);
+    Ok(snapshot)
 }
 
 fn aggregate_status(checks: &[crate::ops::inspection::types::CheckResult]) -> SnapshotStatus {

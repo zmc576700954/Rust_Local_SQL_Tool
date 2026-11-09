@@ -1017,7 +1017,7 @@ pub fn detect_over_privileged_accounts(accounts: &[AccountRow]) -> (Vec<Evidence
             )
         };
         evidence.push(EvidenceItem::new(
-            format!("user:{}@{}", account.user, account.host),
+            format!("{}@{}", account.user, account.host),
             if critical {
                 Severity::Critical
             } else {
@@ -1050,7 +1050,7 @@ pub fn detect_passwordless_accounts(accounts: &[AccountRow]) -> (Vec<EvidenceIte
             continue;
         }
         evidence.push(EvidenceItem::new(
-            format!("user:{}@{}", account.user, account.host),
+            format!("{}@{}", account.user, account.host),
             if account.locked {
                 Severity::Warn
             } else {
@@ -1108,7 +1108,7 @@ pub fn detect_inactive_accounts(
         let current = stats.map(|row| row.current_connections).unwrap_or(0);
         if total == 0 && current == 0 {
             evidence.push(EvidenceItem::new(
-                format!("user:{}@{}", account.user, account.host),
+                format!("{}@{}", account.user, account.host),
                 Severity::Warn,
                 format!(
                     "账号 {}@{} 在实例连续运行 {} 天内累计连接数为 0",
@@ -2193,14 +2193,12 @@ mod tests {
         let (evidence, checked) = detect_over_privileged_accounts(&accounts);
         assert_eq!(checked, 4);
         assert_eq!(evidence.len(), 2);
-        assert!(evidence.iter().any(|item| item.key == "user:app@%"));
-        assert!(evidence.iter().any(|item| item.key == "user:readonly@%"));
+        assert!(evidence.iter().any(|item| item.key == "app@%"));
+        assert!(evidence.iter().any(|item| item.key == "readonly@%"));
+        assert!(evidence.iter().all(|item| item.key != "root@localhost"));
         assert!(evidence
             .iter()
-            .all(|item| item.key != "user:root@localhost"));
-        assert!(evidence
-            .iter()
-            .all(|item| item.key != "user:mysql.session@localhost"));
+            .all(|item| item.key != "mysql.session@localhost"));
     }
 
     #[test]
@@ -2257,7 +2255,7 @@ mod tests {
         assert_eq!(
             evidence
                 .iter()
-                .find(|item| item.key == "user:nopass@%")
+                .find(|item| item.key == "nopass@%")
                 .unwrap()
                 .severity,
             Severity::Critical
@@ -2265,7 +2263,7 @@ mod tests {
         assert_eq!(
             evidence
                 .iter()
-                .find(|item| item.key == "user:locked@localhost")
+                .find(|item| item.key == "locked@localhost")
                 .unwrap()
                 .severity,
             Severity::Warn

@@ -806,6 +806,7 @@ export const api = {
       username: string
       from: string
       to: string[]
+      ca_cert_path?: string
     }
     webhook?: {
       enabled: boolean

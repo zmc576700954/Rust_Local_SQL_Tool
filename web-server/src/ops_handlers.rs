@@ -101,6 +101,9 @@ async fn plan_ctx(state: &AppState, plan: &OpsPlan) -> Result<core_lib::ops::Ops
 pub(crate) fn audit_event(state: &AppState, event: &str, outcome: &str, detail: serde_json::Value) {
     let mut record = AuditRecord::new(event, outcome);
     record.actor = Some("local-user".into());
+    // 审计文件同样不允许出现连接串/凭据形态。
+    let mut detail = detail;
+    core_lib::ops::inspection::scrub_json(&mut detail, &[]);
     record.detail = detail;
     if let Err(err) = state.ops.audit.append(&record) {
         tracing::warn!("ops 审计写入失败: {}", err);

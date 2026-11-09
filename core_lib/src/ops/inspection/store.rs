@@ -17,6 +17,7 @@ use crate::ops::inspection::notify::{
     SCOPE_NOTE,
 };
 use crate::ops::inspection::presets::check_descriptor;
+use crate::ops::inspection::redact::scrub_snapshot;
 use crate::ops::inspection::scheduler::compute_next_run;
 use crate::ops::inspection::types::{
     fingerprint, max_severity, severity_rank, AlertRecord, AlertState, ChannelDelivery, CheckStatus,
@@ -173,7 +174,8 @@ impl InspectionStore {
     }
 
     pub fn record_error(&mut self, message: impl Into<String>) -> Result<(), OpsError> {
-        self.data.schedule.last_error = Some(message.into());
+        let (clean, _) = crate::ops::inspection::redact::scrub_text(&message.into(), &[]);
+        self.data.schedule.last_error = Some(clean);
         self.persist()
     }
 
@@ -183,7 +185,8 @@ impl InspectionStore {
         message: impl Into<String>,
         now: i64,
     ) -> Result<(), OpsError> {
-        self.data.schedule.last_error = Some(message.into());
+        let (clean, _) = crate::ops::inspection::redact::scrub_text(&message.into(), &[]);
+        self.data.schedule.last_error = Some(clean);
         self.data.schedule.last_run_at = Some(now);
         self.data.schedule.next_run_at = if self.data.schedule.enabled {
             compute_next_run(&self.data.schedule, now).ok()
@@ -360,8 +363,11 @@ impl InspectionStore {
     /// 落快照、与上一份对比、更新告警，并推进计划的下一次运行时间。
     pub fn record_snapshot(
         &mut self,
-        snapshot: InspectionSnapshot,
+        mut snapshot: InspectionSnapshot,
     ) -> Result<InspectionRunResult, OpsError> {
+        // 源头防线：即使检查文案里夹带了连接串或凭据，也不允许写入历史文件。
+        let secrets = self.secrets.secrets().redaction_values();
+        scrub_snapshot(&mut snapshot, &secrets);
         let fingerprint = snapshot.db_fingerprint.clone();
         let previous = self.latest(&fingerprint).cloned();
         let diff = compare_snapshots(previous.as_ref(), &snapshot);
@@ -629,6 +635,40 @@ mod tests {
     }
 
     #[test]
+    fn record_snapshot_scrubs_connection_strings_at_source() {
+        use crate::ops::inspection::redact::contains_sensitive_shape;
+
+        let mut store = InspectionStore::new(None);
+        let mut polluted = snapshot(
+            "s1",
+            100,
+            vec![warn(
+                "orders.idx_created",
+                "索引失效；连接 mysql://root:rootpass@127.0.0.1:3306/shop?password=plain123",
+            )],
+        );
+        polluted.db_name = "shop".into();
+        let result = store.record_snapshot(polluted).unwrap();
+
+        let stored = store.snapshot_by_id("s1").unwrap();
+        let stored_text = serde_json::to_string(stored).unwrap();
+        assert!(!contains_sensitive_shape(&stored_text), "snapshot leaked: {stored_text}");
+
+        let alert_text = serde_json::to_string(&result.alerts).unwrap();
+        assert!(!contains_sensitive_shape(&alert_text), "alert leaked: {alert_text}");
+        let event_text = serde_json::to_string(&result.events).unwrap();
+        assert!(!contains_sensitive_shape(&event_text), "event leaked: {event_text}");
+
+        for shape in ["mysql://", "password=", "@127.0.0.1:3306"] {
+            assert!(!stored_text.contains(shape), "snapshot leaked {shape}: {stored_text}");
+            assert!(!alert_text.contains(shape), "alert leaked {shape}: {alert_text}");
+        }
+        assert!(stored_text.contains("shop"));
+        assert!(stored_text.contains("orders"));
+        assert!(stored_text.contains("idx_created"));
+    }
+
+    #[test]
     fn unchanged_finding_emits_no_repeated_event() {
         use crate::ops::inspection::alert::AlertEventKind;
         let mut store = InspectionStore::new(None);
@@ -727,6 +767,7 @@ mod tests {
             last_attempt_at: Some(115),
             delivered_at: None,
             attempt_times: vec![100, 105, 115],
+            redacted: false,
         };
         store
             .update_deliveries(&alert_id, vec![delivery.clone()])

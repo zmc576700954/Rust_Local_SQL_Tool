@@ -66,13 +66,19 @@ impl std::fmt::Display for ChannelError {
 
 impl std::error::Error for ChannelError {}
 
+/// 发送结果：`redacted` 表示发送前清洗是否移除了连接串/凭据。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SendOutcome {
+    pub redacted: bool,
+}
+
 pub trait NotificationChannel: Send + Sync {
     fn id(&self) -> &'static str;
     fn enabled(&self) -> bool;
     fn send<'a>(
         &'a self,
         notification: &'a AlertNotification,
-    ) -> BoxFuture<'a, Result<(), ChannelError>>;
+    ) -> BoxFuture<'a, Result<SendOutcome, ChannelError>>;
 }
 
 /// 站内通知：告警已写入本地存储，这里只确认通道可用。
@@ -90,8 +96,8 @@ impl NotificationChannel for InAppChannel {
     fn send<'a>(
         &'a self,
         _notification: &'a AlertNotification,
-    ) -> BoxFuture<'a, Result<(), ChannelError>> {
-        Box::pin(async move { Ok(()) })
+    ) -> BoxFuture<'a, Result<SendOutcome, ChannelError>> {
+        Box::pin(async move { Ok(SendOutcome::default()) })
     }
 }
 
@@ -127,14 +133,17 @@ pub async fn deliver_with_retry(
         delivery.last_attempt_at = Some(attempt_at);
         delivery.attempt_times.push(attempt_at);
         match channel.send(notification).await {
-            Ok(()) => {
+            Ok(outcome) => {
                 delivery.status = DeliveryStatus::Success;
                 delivery.delivered_at = Some(attempt_at);
                 delivery.last_error = None;
+                delivery.redacted = outcome.redacted;
                 return delivery;
             }
             Err(err) => {
-                delivery.last_error = Some(err.to_string());
+                // 驱动/HTTP 客户端错误可能回显 URL 或 host:port，投递记录同样不能原样保存。
+                let (message, _) = crate::ops::inspection::redact::scrub_text(&err.to_string(), &[]);
+                delivery.last_error = Some(message);
                 if err.is_retryable() && delivery.attempts <= policy.max_retries {
                     delivery.status = DeliveryStatus::Retrying;
                     let sleep = policy
@@ -207,7 +216,7 @@ impl NotificationChannel for EmailChannel {
     fn send<'a>(
         &'a self,
         notification: &'a AlertNotification,
-    ) -> BoxFuture<'a, Result<(), ChannelError>> {
+    ) -> BoxFuture<'a, Result<SendOutcome, ChannelError>> {
         Box::pin(async move { send_email(&self.settings, &self.secrets, notification).await })
     }
 }
@@ -216,7 +225,7 @@ async fn send_email(
     settings: &EmailNotificationSettings,
     secrets: &NotificationSecrets,
     notification: &AlertNotification,
-) -> Result<(), ChannelError> {
+) -> Result<SendOutcome, ChannelError> {
     if settings.host.trim().is_empty() {
         return Err(ChannelError::NotConfigured("SMTP 主机为空".into()));
     }
@@ -239,9 +248,9 @@ async fn send_email(
         .await
         .map_err(|err| ChannelError::transient(format!("连接 SMTP 失败: {err}")))?;
     let conn = match settings.security {
-        EmailSecurity::Ssl => {
-            Conn::Tls(Box::new(tls_connect(tcp, settings.host.trim()).await?))
-        }
+        EmailSecurity::Ssl => Conn::Tls(Box::new(
+            tls_connect(tcp, settings.host.trim(), &settings.ca_cert_path).await?,
+        )),
         _ => Conn::Tcp(tcp),
     };
     let mut session = SmtpSession {
@@ -271,7 +280,7 @@ async fn send_email(
                 return Err(ChannelError::Permanent("SMTP 连接已加密".into()));
             }
         };
-        let tls = tls_connect(tcp, settings.host.trim()).await?;
+        let tls = tls_connect(tcp, settings.host.trim(), &settings.ca_cert_path).await?;
         session.conn = Some(Conn::Tls(Box::new(tls)));
         session.pending.clear();
         session.ehlo().await?;
@@ -310,14 +319,27 @@ async fn send_email(
         return Err(smtp_failure(code, &text));
     }
     let _ = session.command("QUIT").await;
-    Ok(())
+    Ok(SendOutcome {
+        redacted: content.redacted,
+    })
 }
 
 async fn tls_connect(
     stream: TcpStream,
     host: &str,
+    ca_cert_path: &str,
 ) -> Result<tokio_native_tls::TlsStream<TcpStream>, ChannelError> {
-    let connector = native_tls::TlsConnector::builder()
+    let mut builder = native_tls::TlsConnector::builder();
+    if !ca_cert_path.trim().is_empty() {
+        let pem = std::fs::read(ca_cert_path.trim()).map_err(|err| {
+            ChannelError::Permanent(format!("读取 CA 证书失败（{ca_cert_path}）: {err}"))
+        })?;
+        let certificate = native_tls::Certificate::from_pem(&pem).map_err(|err| {
+            ChannelError::Permanent(format!("解析 CA 证书失败（{ca_cert_path}）: {err}"))
+        })?;
+        builder.add_root_certificate(certificate);
+    }
+    let connector = builder
         .build()
         .map_err(|err| ChannelError::transient(format!("初始化 TLS 失败: {err}")))?;
     let connector = tokio_native_tls::TlsConnector::from(connector);
@@ -547,7 +569,7 @@ impl NotificationChannel for WebhookChannel {
     fn send<'a>(
         &'a self,
         notification: &'a AlertNotification,
-    ) -> BoxFuture<'a, Result<(), ChannelError>> {
+    ) -> BoxFuture<'a, Result<SendOutcome, ChannelError>> {
         Box::pin(async move { send_webhook(&self.settings, &self.secrets, notification).await })
     }
 }
@@ -556,7 +578,7 @@ async fn send_webhook(
     settings: &WebhookNotificationSettings,
     secrets: &NotificationSecrets,
     notification: &AlertNotification,
-) -> Result<(), ChannelError> {
+) -> Result<SendOutcome, ChannelError> {
     let url = secrets.webhook_url.trim();
     if url.is_empty() {
         return Err(ChannelError::NotConfigured("Webhook URL 为空".into()));
@@ -590,7 +612,9 @@ async fn send_webhook(
         .map_err(|err| ChannelError::transient(format!("Webhook 请求失败: {err}")))?;
     let status = response.status().as_u16();
     if (200..300).contains(&status) {
-        return Ok(());
+        return Ok(SendOutcome {
+            redacted: content.redacted,
+        });
     }
     let body = response
         .text()
@@ -600,6 +624,9 @@ async fn send_webhook(
         .take(200)
         .collect::<String>();
     classify_http_status(status)
+        .map(|_| SendOutcome {
+            redacted: content.redacted,
+        })
         .map_err(|err| match err {
             ChannelError::Transient(message) => {
                 ChannelError::Transient(format!("{message}: {body}"))
@@ -772,7 +799,7 @@ mod tests {
         fn send<'a>(
             &'a self,
             _notification: &'a AlertNotification,
-        ) -> BoxFuture<'a, Result<(), ChannelError>> {
+        ) -> BoxFuture<'a, Result<SendOutcome, ChannelError>> {
             let next = {
                 let mut errors = self.errors.lock().unwrap();
                 if errors.is_empty() {
@@ -785,7 +812,7 @@ mod tests {
             Box::pin(async move {
                 match next {
                     Some(err) => Err(err),
-                    None => Ok(()),
+                    None => Ok(SendOutcome::default()),
                 }
             })
         }
@@ -855,5 +882,39 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(delivery.status, DeliveryStatus::Success);
         assert_eq!(delivery.attempts, 2);
+    }
+
+    struct RedactedChannel;
+
+    impl NotificationChannel for RedactedChannel {
+        fn id(&self) -> &'static str {
+            "email"
+        }
+
+        fn enabled(&self) -> bool {
+            true
+        }
+
+        fn send<'a>(
+            &'a self,
+            _notification: &'a AlertNotification,
+        ) -> BoxFuture<'a, Result<SendOutcome, ChannelError>> {
+            Box::pin(async move { Ok(SendOutcome { redacted: true }) })
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_records_redaction_flag() {
+        let delivery = deliver_with_retry(
+            &RedactedChannel,
+            &notification(),
+            RetryPolicy {
+                max_retries: 0,
+                backoff_seconds: 0,
+            },
+        )
+        .await;
+        assert_eq!(delivery.status, DeliveryStatus::Success);
+        assert!(delivery.redacted, "delivery must carry the redacted flag");
     }
 }
