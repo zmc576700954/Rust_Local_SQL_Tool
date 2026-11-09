@@ -479,6 +479,11 @@ mod tests {
             "Failed to connect: mysql://root:rootpass@127.0.0.1:3306/shop?password=plain123",
         );
         runtime.write_log("stderr", "导入失败: postgres://ops:secret@10.0.0.5:5432/app");
+        // 驱动认证失败：错误码、SQLSTATE、原因、账号、主机必须保留，只删除凭据本体。
+        runtime.write_log(
+            "stderr",
+            "Failed to connect to database: error returned from database: (code: 1045) (SQLState: 28000) Access denied for user 'shop'@'localhost' (using password: YES) token:abc456 secret_access_key=AKIAEXAMPLE",
+        );
         drop(runtime);
 
         let content = std::fs::read_to_string(&path).unwrap();
@@ -487,7 +492,15 @@ mod tests {
             !core_lib::ops::inspection::redact::contains_sensitive_shape(&content),
             "log still sensitive: {content}"
         );
-        for shape in ["rootpass", "plain123", "secret@", "password="] {
+        for shape in [
+            "rootpass",
+            "plain123",
+            "secret@",
+            "password=",
+            "abc456",
+            "token:",
+            "AKIAEXAMPLE",
+        ] {
             assert!(!content.contains(shape), "log leaked {shape}: {content}");
         }
         // 主机、端口、库名保留，便于排查。
@@ -495,6 +508,18 @@ mod tests {
         assert!(content.contains("postgres://ops@10.0.0.5:5432/app"), "{content}");
         assert!(content.contains("Failed to connect"));
         assert!(content.contains("导入失败"));
+        // 认证失败诊断信息必须可读。
+        for expected in [
+            "1045",
+            "28000",
+            "SQLState",
+            "Access denied",
+            "'shop'@'localhost'",
+            "localhost",
+            "using password: YES",
+        ] {
+            assert!(content.contains(expected), "missing {expected}: {content}");
+        }
         let _ = std::fs::remove_file(&path);
     }
 }
