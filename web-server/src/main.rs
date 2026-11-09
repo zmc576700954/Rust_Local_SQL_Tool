@@ -5,6 +5,8 @@ mod bridge;
 mod handlers;
 #[cfg(test)]
 mod import_sql_integration_mysql;
+#[cfg(test)]
+mod import_sql_integration_pg;
 mod inspection_handlers;
 mod inspection_scheduler;
 mod mysql_codec;
