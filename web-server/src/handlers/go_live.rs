@@ -3190,8 +3190,50 @@ pub async fn run_import_sql_job(
         return Err(AppError::BadRequest(body));
     }
 
-    let atomic = !matches!(db_client.db_type, DbType::MySQL | DbType::MariaDB);
-    if atomic && statements.iter().any(|s| core_lib::sql_util::is_transaction_control_statement(s)) {
+    // PostgreSQL：不能在事务块中执行的语句必须在执行任何一条之前拒绝，
+    // 否则会先开事务、再由服务端抛一个费解的报错。
+    if matches!(db_client.db_type, DbType::PostgreSQL) {
+        if let Some((index, statement)) = statements
+            .iter()
+            .enumerate()
+            .find(|(_, s)| core_lib::sql_util::pg_non_transactional_statement_kind(s).is_some())
+        {
+            let kind = core_lib::sql_util::pg_non_transactional_statement_kind(statement)
+                .unwrap_or("非事务语句");
+            let body = serde_json::json!({
+                "error": "NON_TRANSACTIONAL_STATEMENT",
+                "message": format!(
+                    "第 {} 条语句属于 {}，不能在事务块中执行，因此无法放进脚本导入（脚本导入会把全部语句包进一个事务以保证失败整体回滚）。请单独执行该语句（例如在 SQL 编辑器中直接运行），或先移除它，再导入其余语句。语句：{}",
+                    index + 1,
+                    kind,
+                    statement_preview(statement)
+                ),
+                "statement_index": index + 1,
+                "statement_kind": kind,
+                "statement": statement_preview(statement),
+            })
+            .to_string();
+            return Err(AppError::BadRequest(body));
+        }
+    }
+
+    // MySQL/MariaDB：仅当脚本全部是可事务化 DML 时才包事务；只要出现一条
+    // 可能隐式提交的语句（DDL / LOCK TABLES / SET autocommit / 管理命令等），
+    // 就走非原子逐条路径，如实报告已生效范围。
+    let mysql_implicit_commit = if matches!(db_client.db_type, DbType::MySQL | DbType::MariaDB) {
+        core_lib::sql_util::mysql_script_implicit_commit_statement(&statements)
+    } else {
+        None
+    };
+
+    let atomic = !matches!(db_client.db_type, DbType::MySQL | DbType::MariaDB)
+        || mysql_implicit_commit.is_none();
+    if atomic
+        && matches!(db_client.db_type, DbType::PostgreSQL | DbType::SQLite)
+        && statements
+            .iter()
+            .any(|s| core_lib::sql_util::is_transaction_control_statement(s))
+    {
         return Err(AppError::BadRequest(
             "脚本包含显式事务控制语句（BEGIN/COMMIT/ROLLBACK/SAVEPOINT），与脚本级原子导入冲突；请移除后重试".to_string(),
         ));
@@ -3210,9 +3252,26 @@ pub async fn run_import_sql_job(
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
     if atomic {
-        run_import_script_atomic(&mut conn, &statements, req.skip_errors, state, job_id, &db_client.db_type).await
+        run_import_script_atomic(
+            &mut conn,
+            &statements,
+            req.skip_errors,
+            state,
+            job_id,
+            &db_client.db_type,
+        )
+        .await
     } else {
-        run_import_script_non_atomic(&mut conn, &statements, req.skip_errors, state, job_id, &db_client.db_type).await
+        run_import_script_non_atomic(
+            &mut conn,
+            &statements,
+            req.skip_errors,
+            state,
+            job_id,
+            &db_client.db_type,
+            mysql_implicit_commit.as_ref().map(|(_, preview)| preview.as_str()),
+        )
+        .await
     }
 }
 
@@ -3273,6 +3332,12 @@ async fn run_import_script_atomic(
 ) -> Result<serde_json::Value, AppError> {
     let total = statements.len();
     let engine = engine_label(db_type);
+    // MySQL 的「原子」只对支持事务的存储引擎成立，必须在结果里说清楚。
+    let engine_note = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
+        Some("MySQL/MariaDB 事务仅对支持事务的存储引擎（如 InnoDB）生效；MyISAM 等非事务引擎的写入无法回滚。")
+    } else {
+        None
+    };
     let mut entries: Vec<serde_json::Value> = Vec::with_capacity(total);
     let mut executed = 0u64;
     let mut affected_total = 0u64;
@@ -3337,10 +3402,18 @@ async fn run_import_script_atomic(
                     }
                     let _ = conn.execute_command("ROLLBACK").await;
                     let remaining = total - idx - 1;
+                    let rolled_back_desc = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
+                        format!("此前已执行的 {} 条语句均未生效", applied_before_rollback)
+                    } else {
+                        format!(
+                            "此前已执行的 {} 条语句（含 DDL 与 DML）均未生效",
+                            applied_before_rollback
+                        )
+                    };
                     let message = format!(
-                        "第 {} 条语句执行失败，事务已回滚：此前已执行的 {} 条语句（含 DDL 与 DML）均未生效，剩余 {} 条未执行。错误：{}",
+                        "第 {} 条语句执行失败，事务已回滚：{}，剩余 {} 条未执行。错误：{}",
                         idx + 1,
-                        applied_before_rollback,
+                        rolled_back_desc,
                         remaining,
                         err_text
                     );
@@ -3354,6 +3427,7 @@ async fn run_import_script_atomic(
                         "engine": engine,
                         "atomic": true,
                         "rolled_back": true,
+                        "engine_note": engine_note,
                         "failure_policy": "stop",
                         "total_statements": total,
                         "executed_statements": 0,
@@ -3401,6 +3475,7 @@ async fn run_import_script_atomic(
         "engine": engine,
         "atomic": true,
         "rolled_back": false,
+        "engine_note": engine_note,
         "failure_policy": if continue_on_error { "continue" } else { "stop" },
         "total_statements": total,
         "executed_statements": executed,
@@ -3419,6 +3494,8 @@ async fn run_import_script_atomic(
 ///
 /// 逐条执行并记录状态；遇错即停时明确报告「已成功执行到第 N 条、剩余 M 条未执行、
 /// 已生效部分无法自动回滚」，跳过模式汇总失败条数与位置。
+/// `implicit_commit_statement` 是脚本中第一条会隐式提交的语句预览，用于说明
+/// 为什么这次没有包事务。
 async fn run_import_script_non_atomic(
     conn: &mut core_lib::db::EngineConnection,
     statements: &[String],
@@ -3426,9 +3503,16 @@ async fn run_import_script_non_atomic(
     state: &AppState,
     job_id: &str,
     db_type: &DbType,
+    implicit_commit_statement: Option<&str>,
 ) -> Result<serde_json::Value, AppError> {
     let total = statements.len();
     let engine = engine_label(db_type);
+    let no_tx_reason = implicit_commit_statement.map(|s| {
+        format!(
+            "脚本包含会隐式提交的语句（{}），因此未开启事务，已生效的部分无法自动回滚。",
+            s
+        )
+    });
     let mut entries: Vec<serde_json::Value> = Vec::with_capacity(total);
     let mut executed = 0u64;
     let mut affected_total = 0u64;
@@ -3478,6 +3562,7 @@ async fn run_import_script_non_atomic(
                         "failed_statements": 1,
                         "remaining_statements": remaining,
                         "affected_rows": affected_total,
+                        "no_transaction_reason": no_tx_reason,
                         "failure_details": [{"index": idx + 1, "error": err_text}],
                         "statements": entries,
                         "message": message,
@@ -3521,6 +3606,7 @@ async fn run_import_script_non_atomic(
         "failed_statements": failed.len(),
         "remaining_statements": 0,
         "affected_rows": affected_total,
+        "no_transaction_reason": no_tx_reason,
         "failure_details": failed.iter().map(|(idx, err)| serde_json::json!({"index": idx, "error": err})).collect::<Vec<_>>(),
         "statements": entries,
         "message": message,

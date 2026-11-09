@@ -186,6 +186,129 @@ pub fn is_transaction_control_statement(sql: &str) -> bool {
     )
 }
 
+/// 取语句开头的若干个 token（已去注释、转大写），遇到 `(` 或含引号的字面量即停止。
+///
+/// 只用于识别语句「头部形态」，因此不需要完整解析：字符串字面量里的关键字
+/// （如 `INSERT ... VALUES ('DROP TABLE')`）不会出现在头部 token 里。
+fn leading_tokens(sql: &str) -> Vec<String> {
+    let stripped = strip_sql_comments(sql);
+    let mut tokens = Vec::new();
+    for raw in stripped.split_whitespace() {
+        let token = raw
+            .trim_matches(|c: char| c == '(' || c == ';')
+            .to_ascii_uppercase();
+        if raw.starts_with('(') || token.is_empty() {
+            break;
+        }
+        if token.contains('\'') || token.contains('`') || token.contains('"') {
+            break;
+        }
+        tokens.push(token);
+        if tokens.len() >= 8 {
+            break;
+        }
+    }
+    tokens
+}
+
+/// MySQL/MariaDB 语句是否会触发隐式提交。
+///
+/// 判定刻意保守：只要语句类别存在隐式提交可能（DDL、LOCK/UNLOCK TABLES、
+/// `SET autocommit`、事务控制、管理类命令、带 COMMIT 的存储过程调用等），
+/// 就返回 true，让脚本导入走非原子逐条路径。宁可少包一次事务，也不把可能
+/// 隐式提交的脚本包进事务后谎报「已回滚」。
+pub fn mysql_statement_causes_implicit_commit(sql: &str) -> bool {
+    let tokens = leading_tokens(sql);
+    let Some(first) = tokens.first().map(String::as_str) else {
+        return false;
+    };
+    match first {
+        // DDL：CREATE/ALTER/DROP/RENAME/TRUNCATE 一律视为隐式提交
+        // （CREATE TEMPORARY TABLE 等例外也按不安全处理）。
+        "CREATE" | "ALTER" | "DROP" | "RENAME" | "TRUNCATE" => true,
+        // 锁表与事务控制。
+        "LOCK" | "UNLOCK" | "BEGIN" | "START" | "COMMIT" | "ROLLBACK" | "SAVEPOINT"
+        | "RELEASE" | "XA" => true,
+        // 账号与权限。
+        "GRANT" | "REVOKE" => true,
+        // 管理类命令。
+        "ANALYZE" | "OPTIMIZE" | "REPAIR" | "CHECK" | "FLUSH" | "RESET" | "CACHE" | "INSTALL"
+        | "UNINSTALL" | "LOAD" | "CHANGE" | "PURGE" | "SHUTDOWN" | "RESTART" | "KILL" => true,
+        // 存储过程内部可能自带 COMMIT。
+        "CALL" => true,
+        // SET autocommit / SET PASSWORD 会隐式提交；其余 SET 视为安全。
+        "SET" => tokens.iter().any(|t| {
+            let ident = t.split('=').next().unwrap_or("").trim_end_matches(';');
+            let bare = ident
+                .trim_start_matches('@')
+                .trim_start_matches("GLOBAL")
+                .trim_start_matches("SESSION")
+                .trim_start_matches("LOCAL");
+            bare == "AUTOCOMMIT" || bare == "PASSWORD"
+        }),
+        _ => false,
+    }
+}
+
+/// 返回脚本中第一条会触发 MySQL 隐式提交的语句 (1-based 序号, 语句预览)。
+///
+/// `None` 表示整个脚本都是可事务化的 DML，可以安全地用 `START TRANSACTION`
+/// 包住并在失败时整体回滚。
+pub fn mysql_script_implicit_commit_statement(statements: &[String]) -> Option<(usize, String)> {
+    statements
+        .iter()
+        .enumerate()
+        .find(|(_, sql)| mysql_statement_causes_implicit_commit(sql))
+        .map(|(idx, sql)| {
+            let preview: String = sql.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
+            (idx + 1, preview)
+        })
+}
+
+/// 该语句是否属于「不能在 PostgreSQL 事务块中执行」的类别。
+///
+/// 返回类别标签（用于错误信息），`None` 表示可在事务内执行。
+pub fn pg_non_transactional_statement_kind(sql: &str) -> Option<&'static str> {
+    let tokens = leading_tokens(sql);
+    let first = tokens.first()?.as_str();
+    let second = tokens.get(1).map(String::as_str).unwrap_or("");
+    let prefix_has = |kw: &str| tokens.iter().any(|t| t == kw);
+
+    match first {
+        "VACUUM" => Some("VACUUM"),
+        "CREATE" | "DROP" => {
+            let is_create = first == "CREATE";
+            // `CREATE UNIQUE INDEX` 允许 UNIQUE 出现在对象类型之前。
+            let mut rest = &tokens[1..];
+            if rest.first().map(String::as_str) == Some("UNIQUE") {
+                rest = &rest[1..];
+            }
+            match rest.first().map(String::as_str).unwrap_or("") {
+                "DATABASE" => Some(if is_create { "CREATE DATABASE" } else { "DROP DATABASE" }),
+                "TABLESPACE" => {
+                    Some(if is_create { "CREATE TABLESPACE" } else { "DROP TABLESPACE" })
+                }
+                "SUBSCRIPTION" => {
+                    Some(if is_create { "CREATE SUBSCRIPTION" } else { "DROP SUBSCRIPTION" })
+                }
+                "INDEX" if prefix_has("CONCURRENTLY") => Some(if is_create {
+                    "CREATE INDEX CONCURRENTLY"
+                } else {
+                    "DROP INDEX CONCURRENTLY"
+                }),
+                _ => None,
+            }
+        }
+        "REINDEX" if prefix_has("CONCURRENTLY") => Some("REINDEX CONCURRENTLY"),
+        "ALTER" => match second {
+            "SYSTEM" => Some("ALTER SYSTEM"),
+            "DATABASE" if prefix_has("TABLESPACE") => Some("ALTER DATABASE ... SET TABLESPACE"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// 把 SQL 脚本拆成独立语句。
 ///
 /// 按顶层分号拆分，字符串（单引号/双引号/反引号）、行注释、块注释与
@@ -1391,6 +1514,116 @@ mod tests {
         assert!(!stripped.contains("tail"));
         assert!(!stripped.contains("block"));
         assert!(stripped.contains("SELECT"));
+    }
+
+    #[test]
+    fn mysql_implicit_commit_detection_is_conservative() {
+        for sql in [
+            "CREATE TABLE t (id int)",
+            "ALTER TABLE t ADD COLUMN c int",
+            "DROP TABLE t",
+            "RENAME TABLE a TO b",
+            "TRUNCATE TABLE t",
+            "LOCK TABLES t WRITE",
+            "UNLOCK TABLES",
+            "SET autocommit = 0",
+            "SET SESSION autocommit=1",
+            "SET @@autocommit = 1",
+            "SET PASSWORD FOR 'u'@'%' = 'x'",
+            "START TRANSACTION",
+            "COMMIT",
+            "GRANT SELECT ON *.* TO 'u'@'%'",
+            "ANALYZE TABLE t",
+            "FLUSH TABLES",
+            "CALL some_proc()",
+            "CREATE TEMPORARY TABLE tmp (id int)",
+        ] {
+            assert!(
+                mysql_statement_causes_implicit_commit(sql),
+                "应判定为隐式提交：{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_implicit_commit_detection_ignores_comments_and_literals() {
+        // 注释里出现 DDL 关键字不应误判
+        for sql in [
+            "-- DROP TABLE users\nINSERT INTO t VALUES (1)",
+            "/* CREATE TABLE x */ INSERT INTO t VALUES (1)",
+            "# ALTER TABLE t",
+            "INSERT INTO audit (note) VALUES ('DROP TABLE users')",
+            "UPDATE t SET note = 'CREATE INDEX CONCURRENTLY x' WHERE id = 1",
+        ] {
+            assert!(
+                !mysql_statement_causes_implicit_commit(sql),
+                "不应判定为隐式提交：{sql}"
+            );
+        }
+        // 纯 DML 脚本可以包事务
+        let script: Vec<String> = ["INSERT INTO t VALUES (1)", "UPDATE t SET a = 1", "DELETE FROM t WHERE id = 2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(mysql_script_implicit_commit_statement(&script).is_none());
+    }
+
+    #[test]
+    fn mysql_script_reports_first_implicit_commit_statement() {
+        let script: Vec<String> = [
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a = 2",
+            "CREATE TABLE x (id int)",
+            "DROP TABLE y",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (index, preview) = mysql_script_implicit_commit_statement(&script).unwrap();
+        assert_eq!(index, 3);
+        assert!(preview.starts_with("CREATE TABLE x"));
+    }
+
+    #[test]
+    fn pg_non_transactional_statements_are_detected() {
+        for (sql, kind) in [
+            ("CREATE INDEX CONCURRENTLY idx ON t (c)", "CREATE INDEX CONCURRENTLY"),
+            ("CREATE UNIQUE INDEX CONCURRENTLY idx ON t (c)", "CREATE INDEX CONCURRENTLY"),
+            ("DROP INDEX CONCURRENTLY idx", "DROP INDEX CONCURRENTLY"),
+            ("REINDEX INDEX CONCURRENTLY idx", "REINDEX CONCURRENTLY"),
+            ("REINDEX TABLE CONCURRENTLY t", "REINDEX CONCURRENTLY"),
+            ("VACUUM t", "VACUUM"),
+            ("VACUUM (FULL) t", "VACUUM"),
+            ("CREATE DATABASE d", "CREATE DATABASE"),
+            ("DROP DATABASE d", "DROP DATABASE"),
+            ("CREATE TABLESPACE ts LOCATION '/x'", "CREATE TABLESPACE"),
+            ("ALTER SYSTEM SET work_mem = '1GB'", "ALTER SYSTEM"),
+        ] {
+            assert_eq!(
+                pg_non_transactional_statement_kind(sql),
+                Some(kind),
+                "未识别：{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn pg_non_transactional_detection_ignores_comments_and_literals() {
+        for sql in [
+            "INSERT INTO t VALUES ('CREATE INDEX CONCURRENTLY idx ON t')",
+            "SELECT 'VACUUM'",
+            "-- CREATE INDEX CONCURRENTLY idx ON t\nSELECT 1",
+            "/* ALTER SYSTEM SET x = 1 */ SELECT 1",
+            "CREATE INDEX idx ON t (c)",
+            "CREATE TABLE t (id int)",
+            "REINDEX INDEX idx",
+        ] {
+            assert_eq!(
+                pg_non_transactional_statement_kind(sql),
+                None,
+                "误判：{sql}"
+            );
+        }
     }
 
     #[test]
