@@ -66,6 +66,13 @@ async fn scalar_i64(pool: &MySqlPool, sql: &str) -> i64 {
         .unwrap_or_else(|err| panic!("查询失败: {err}\nSQL: {sql}"))
 }
 
+async fn current_database(pool: &MySqlPool) -> String {
+    sqlx::query_scalar::<_, String>("SELECT DATABASE()")
+        .fetch_one(pool)
+        .await
+        .expect("读取当前库名失败")
+}
+
 async fn table_exists(pool: &MySqlPool, table: &str) -> bool {
     scalar_i64(
         pool,
@@ -87,6 +94,16 @@ async fn ids_of(pool: &MySqlPool, table: &str) -> Vec<i64> {
         .fetch_all(pool)
         .await
         .unwrap_or_else(|err| panic!("读取主键失败: {err}\n表: {table}"))
+}
+
+/// 换掉 URL 里的账号密码，用于构造受限账号连接。
+fn url_with_credentials(url: &str, user: &str, password: &str) -> String {
+    match url.split_once("://").and_then(|(scheme, rest)| {
+        rest.split_once('@').map(|(_, host)| (scheme, host))
+    }) {
+        Some((scheme, host)) => format!("{scheme}://{user}:{password}@{host}"),
+        None => url.to_string(),
+    }
 }
 
 async fn run_script(client: &DbClient, sql: &str, skip_errors: bool) -> Result<Value, AppError> {
@@ -606,8 +623,10 @@ async fn mysql_myisam_script_downgrades_full_rollback_claim() {
         .as_array()
         .expect("non_transactional_tables 应为数组");
     assert_eq!(listed.len(), 1, "{result}");
+    assert_eq!(listed[0]["schema"], current_database(&pool).await);
     assert_eq!(listed[0]["table"], "it_myisam");
     assert_eq!(listed[0]["engine"], "MyISAM");
+    assert_eq!(result["verification_status"], "downgraded_non_transactional");
     assert!(
         result["engine_note"]
             .as_str()
@@ -617,7 +636,7 @@ async fn mysql_myisam_script_downgrades_full_rollback_claim() {
         result["engine_note"]
     );
     assert!(
-        message(&result).contains("无法回滚"),
+        message(&result).contains("不参与事务回滚"),
         "{}",
         message(&result)
     );
@@ -672,8 +691,10 @@ async fn mysql_mixed_engine_dml_lists_only_non_transactional_targets() {
         .as_array()
         .expect("non_transactional_tables 应为数组");
     assert_eq!(listed.len(), 1, "{result}");
+    assert_eq!(listed[0]["schema"], current_database(&pool).await);
     assert_eq!(listed[0]["table"], "it_mix_myisam");
     assert_eq!(listed[0]["engine"], "MyISAM");
+    assert_eq!(result["verification_status"], "downgraded_non_transactional");
     assert_eq!(
         statuses(&result),
         vec!["1:executed", "2:executed", "3:executed", "4:failed"]
@@ -714,11 +735,242 @@ async fn mysql_memory_engine_script_downgrades_rollback_claim() {
         .as_array()
         .expect("non_transactional_tables 应为数组");
     assert_eq!(listed.len(), 1, "{result}");
+    assert_eq!(listed[0]["schema"], current_database(&pool).await);
     assert_eq!(listed[0]["table"], "it_memory");
     assert_eq!(listed[0]["engine"], "MEMORY");
+    assert_eq!(result["verification_status"], "downgraded_non_transactional");
     assert_eq!(row_count(&pool, "it_memory").await, 2);
 
     drop_tables(&pool, &["it_memory"]).await;
+}
+
+// ------------------------- 跨库 DML 引擎核查 -------------------------
+
+/// 跨库 MyISAM 表：必须降级，并且返回里要能看出是哪个库的表、什么引擎。
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_cross_database_myisam_table_downgrades_with_schema() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    exec(&pool, "CREATE DATABASE IF NOT EXISTS it_cross_mydb").await;
+    drop_tables(
+        &pool,
+        &["it_xdb_local", "it_cross_mydb.it_xdb_myisam"],
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE it_xdb_local (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE it_cross_mydb.it_xdb_myisam (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=MyISAM",
+    )
+    .await;
+
+    let result = run_script(
+        &client,
+        "INSERT INTO it_xdb_local VALUES (1, 'a');
+         INSERT INTO it_cross_mydb.it_xdb_myisam VALUES (1, 'm');
+         INSERT INTO it_xdb_local VALUES (2, 'b');
+         INSERT INTO it_cross_mydb.it_xdb_myisam VALUES (1, 'dup');",
+        false,
+    )
+    .await
+    .expect("应返回结构化结果");
+
+    assert_eq!(result["atomic"], Value::Bool(false), "{result}");
+    assert_eq!(result["rolled_back"], Value::Bool(false), "{result}");
+    assert_eq!(result["rollback_scope"], "transactional_engines_only");
+    assert_eq!(result["verification_status"], "downgraded_non_transactional");
+
+    let listed = result["non_transactional_tables"]
+        .as_array()
+        .expect("non_transactional_tables 应为数组");
+    assert_eq!(listed.len(), 1, "{result}");
+    // 跨库表必须能区分库名。
+    assert_eq!(listed[0]["schema"], "it_cross_mydb");
+    assert_eq!(listed[0]["table"], "it_xdb_myisam");
+    assert_eq!(listed[0]["engine"], "MyISAM");
+
+    let cross = result["cross_database_tables"]
+        .as_array()
+        .expect("cross_database_tables 应为数组");
+    assert_eq!(cross.len(), 1, "{result}");
+    assert_eq!(cross[0]["schema"], "it_cross_mydb");
+    assert_eq!(cross[0]["table"], "it_xdb_myisam");
+    assert_eq!(cross[0]["engine"], "MyISAM");
+    assert_eq!(cross[0]["transactional"], Value::Bool(false));
+
+    assert!(
+        result["engine_note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("it_cross_mydb.it_xdb_myisam(MyISAM)"),
+        "engine_note 必须点名跨库非事务表：{}",
+        result["engine_note"]
+    );
+    assert_eq!(
+        statuses(&result),
+        vec!["1:executed", "2:executed", "3:executed", "4:failed"]
+    );
+
+    // 回查真实状态：当前库 InnoDB 回滚，跨库 MyISAM 残留。
+    assert_eq!(row_count(&pool, "it_xdb_local").await, 0);
+    assert_eq!(row_count(&pool, "it_cross_mydb.it_xdb_myisam").await, 1);
+
+    drop_tables(&pool, &["it_xdb_local", "it_cross_mydb.it_xdb_myisam"]).await;
+}
+
+/// 跨库 InnoDB 表：同实例内能查到真实引擎 → 维持 atomic=true。
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_cross_database_innodb_table_keeps_atomic_promise() {
+    let Some(url) = mysql_url() else { return };
+    let (client, pool) = connect(&url).await;
+    exec(&pool, "CREATE DATABASE IF NOT EXISTS it_cross_mydb").await;
+    drop_tables(&pool, &["it_cross_mydb.it_xdb_innodb"]).await;
+    exec(
+        &pool,
+        "CREATE TABLE it_cross_mydb.it_xdb_innodb (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB",
+    )
+    .await;
+
+    let result = run_script(
+        &client,
+        "INSERT INTO it_cross_mydb.it_xdb_innodb VALUES (1, 'a');
+         INSERT INTO it_cross_mydb.it_xdb_innodb VALUES (2, 'b');
+         INSERT INTO it_cross_mydb.it_xdb_innodb VALUES (1, 'dup');",
+        false,
+    )
+    .await
+    .expect("应返回结构化结果");
+
+    // 查得到引擎且全部支持事务 → 不允许一律降级。
+    assert_eq!(result["atomic"], Value::Bool(true), "{result}");
+    assert_eq!(result["rolled_back"], Value::Bool(true), "{result}");
+    assert_eq!(result["rollback_scope"], Value::Null);
+    assert_eq!(result["verification_status"], "verified");
+    assert_eq!(
+        result["non_transactional_tables"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    let cross = result["cross_database_tables"]
+        .as_array()
+        .expect("cross_database_tables 应为数组");
+    assert_eq!(cross.len(), 1, "{result}");
+    assert_eq!(cross[0]["schema"], "it_cross_mydb");
+    assert_eq!(cross[0]["table"], "it_xdb_innodb");
+    assert_eq!(cross[0]["engine"], "InnoDB");
+    assert_eq!(cross[0]["transactional"], Value::Bool(true));
+    let note = result["engine_note"].as_str().unwrap_or_default();
+    assert!(note.contains("跨库表引擎已核实"), "{note}");
+    assert!(note.contains("it_cross_mydb.it_xdb_innodb=InnoDB"), "{note}");
+
+    assert_eq!(
+        statuses(&result),
+        vec!["1:rolled_back", "2:rolled_back", "3:failed"]
+    );
+    assert_eq!(row_count(&pool, "it_cross_mydb.it_xdb_innodb").await, 0);
+
+    drop_tables(&pool, &["it_cross_mydb.it_xdb_innodb"]).await;
+}
+
+/// 受限账号读不到目标库元数据：无法验证 → 降级，并说明是哪条语句、哪个库表、为什么。
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_cross_database_unverified_metadata_downgrades() {
+    let Some(url) = mysql_url() else { return };
+    let (_root_client, root_pool) = connect(&url).await;
+    let limit_user = "it_xdb_limited";
+    let limit_pw = "limited_pw";
+    exec(&root_pool, "CREATE DATABASE IF NOT EXISTS it_cross_mydb").await;
+    drop_tables(
+        &root_pool,
+        &["it_xdb_local", "it_cross_mydb.it_xdb_hidden"],
+    )
+    .await;
+    exec(
+        &root_pool,
+        "CREATE TABLE it_xdb_local (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB",
+    )
+    .await;
+    exec(
+        &root_pool,
+        "CREATE TABLE it_cross_mydb.it_xdb_hidden (id INT PRIMARY KEY, note VARCHAR(32)) ENGINE=InnoDB",
+    )
+    .await;
+    // 只授权当前库；目标库的表存在但该账号看不到其元数据。
+    exec(
+        &root_pool,
+        &format!("DROP USER IF EXISTS '{limit_user}'@'%'"),
+    )
+    .await;
+    exec(
+        &root_pool,
+        &format!("CREATE USER '{limit_user}'@'%' IDENTIFIED BY '{limit_pw}'"),
+    )
+    .await;
+    exec(
+        &root_pool,
+        &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON `{}`.* TO '{limit_user}'@'%'", current_database(&root_pool).await),
+    )
+    .await;
+
+    let limited_url = url_with_credentials(&url, limit_user, limit_pw);
+    let (limited_client, _limited_pool) = connect(&limited_url).await;
+
+    let result = run_script(
+        &limited_client,
+        "INSERT INTO it_xdb_local VALUES (1, 'a');
+         INSERT INTO it_cross_mydb.it_xdb_hidden VALUES (1, 'h');",
+        false,
+    )
+    .await
+    .expect("应返回结构化结果");
+
+    assert_eq!(result["atomic"], Value::Bool(false), "{result}");
+    assert_eq!(result["rolled_back"], Value::Bool(false), "{result}");
+    assert_eq!(result["rollback_scope"], "transactional_engines_only");
+    assert_eq!(result["verification_status"], "downgraded_unverified");
+    assert_eq!(
+        result["non_transactional_tables"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "查不到引擎不等于非事务引擎，不能混报：{result}"
+    );
+
+    let unverified = result["unverified_tables"]
+        .as_array()
+        .expect("unverified_tables 应为数组");
+    assert_eq!(unverified.len(), 1, "{result}");
+    assert_eq!(unverified[0]["statement"], 2);
+    assert_eq!(unverified[0]["schema"], "it_cross_mydb");
+    assert_eq!(unverified[0]["table"], "it_xdb_hidden");
+    let reason = unverified[0]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("information_schema.TABLES") && reason.contains("无权"),
+        "原因必须说明为什么无法验证：{reason}"
+    );
+    let note = result["engine_note"].as_str().unwrap_or_default();
+    assert!(note.contains("无法核实引擎"), "{note}");
+    assert!(note.contains("第 2 条语句"), "{note}");
+    assert!(note.contains("it_cross_mydb.it_xdb_hidden"), "{note}");
+
+    // 降级时不能出现 rolled_back=true；语句状态也不允许标 rolled_back。
+    assert_eq!(statuses(&result), vec!["1:executed", "2:failed"]);
+
+    exec(
+        &root_pool,
+        &format!("DROP USER IF EXISTS '{limit_user}'@'%'"),
+    )
+    .await;
+    drop_tables(
+        &root_pool,
+        &["it_xdb_local", "it_cross_mydb.it_xdb_hidden"],
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -746,11 +998,19 @@ async fn mysql_all_innodb_script_keeps_full_rollback_promise() {
     assert_eq!(result["atomic"], Value::Bool(true));
     assert_eq!(result["rolled_back"], Value::Bool(true));
     assert_eq!(result["rollback_scope"], Value::Null);
+    assert_eq!(result["verification_status"], "verified");
     assert_eq!(
         result["non_transactional_tables"]
             .as_array()
             .map(Vec::len),
         Some(0)
+    );
+    assert_eq!(
+        result["cross_database_tables"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "同库脚本不应产生跨库条目：{result}"
     );
     assert!(
         result["engine_note"]

@@ -3320,34 +3320,180 @@ fn failed_positions_text(failed: &[(usize, String)]) -> String {
         .join(", ")
 }
 
-/// 查询脚本 DML 命中的非事务引擎表。
+/// 一条跨库/当前库 DML 目标的引擎核查结果。
+struct MysqlEngineAudit {
+    /// 引擎不支持事务的表：(库名, 表名, 引擎)。
+    non_transactional: Vec<(String, String, String)>,
+    /// 无法核实引擎的目标：(语句序号, 库名, 表名, 原因)。
+    unverified: Vec<(usize, String, String, String)>,
+    /// 跨库引用且已核实引擎：(库名, 表名, 引擎, 是否支持事务)。
+    cross_database: Vec<(String, String, Option<String>, bool)>,
+}
+
+fn engine_supports_transactions(engine: &str) -> bool {
+    matches!(
+        engine.to_ascii_uppercase().as_str(),
+        "INNODB" | "NDB" | "NDBCLUSTER"
+    )
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+/// 核查脚本 DML 目标的存储引擎，优先查准，查不到才降级。
 ///
-/// MyISAM / Aria / MEMORY 等引擎上的写入不参与事务回滚，必须在返回结果里
-/// 降级「可回滚」承诺，避免出现 `rolled_back=true` 但库里仍有残留的结论。
-/// sqlparser 解析不可靠或 DML 跨库引用时退回保守口径：扫描当前库全部非事务表。
-async fn mysql_non_transactional_tables(
+/// - 同库与跨库目标统一走 `information_schema.TABLES` 查询真实引擎；
+/// - 跨库表在**同一实例**内可以直接查引擎，全部为 InnoDB/NDB 时维持原子承诺；
+/// - 只有查不到引擎（表不存在、无权限、写入目标无法静态识别）时才降级，
+///   并把「哪条语句、哪个库表、为什么无法验证」写进 `unverified`。
+async fn audit_mysql_engines(
     conn: &mut core_lib::db::EngineConnection,
     statements: &[String],
-) -> Result<Vec<(String, String)>, AppError> {
-    let targets = core_lib::sql_util::mysql_dml_target_tables(statements);
-    if matches!(&targets, Some(names) if names.is_empty()) {
-        return Ok(Vec::new());
+) -> Result<MysqlEngineAudit, AppError> {
+    let current_db = fetch_current_database(conn).await?;
+    let targets = match core_lib::sql_util::mysql_dml_targets(statements) {
+        Ok(targets) => targets,
+        Err((statement_index, reason)) => {
+            // 无法静态识别写入目标：保守扫描当前库，同时明确标记为「无法验证」。
+            let scanned = scan_non_transactional_tables(conn, &current_db).await?;
+            return Ok(MysqlEngineAudit {
+                non_transactional: scanned,
+                unverified: vec![(
+                    statement_index,
+                    current_db,
+                    "(无法识别)".to_string(),
+                    reason,
+                )],
+                cross_database: Vec::new(),
+            });
+        }
+    };
+    if targets.is_empty() {
+        return Ok(MysqlEngineAudit {
+            non_transactional: Vec::new(),
+            unverified: Vec::new(),
+            cross_database: Vec::new(),
+        });
     }
-    let scope = match &targets {
-        Some(names) => {
-            let list = names
+
+    // 按库分组拼查询条件，一次查回所有目标表的引擎。
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for target in &targets {
+        let schema = target
+            .schema
+            .clone()
+            .unwrap_or_else(|| current_db.clone());
+        groups.entry(schema).or_default().push(target.table.clone());
+    }
+    let clauses = groups
+        .iter()
+        .map(|(schema, tables)| {
+            let names = tables
                 .iter()
-                .map(|name| format!("'{}'", name.replace('\'', "''")))
+                .map(|table| format!("LOWER({})", sql_string_literal(table)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("table_name IN ({list})")
-        }
-        None => "1 = 1".to_string(),
-    };
+            format!(
+                "(LOWER(table_schema) = LOWER({}) AND LOWER(table_name) IN ({names}))",
+                sql_string_literal(schema)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
     let sql = format!(
-        "SELECT table_name, COALESCE(engine, 'VIEW') FROM information_schema.tables \
-         WHERE table_schema = DATABASE() AND {scope} \
-         AND COALESCE(engine, 'VIEW') NOT IN ('InnoDB', 'NDB', 'NDBCLUSTER')"
+        "SELECT table_schema, table_name, COALESCE(engine, 'VIEW') \
+         FROM information_schema.tables WHERE {clauses}"
+    );
+    let result = conn
+        .fetch_all(&sql)
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let mut engine_map: std::collections::HashMap<(String, String), (String, String, String)> =
+        std::collections::HashMap::new();
+    for row in &result.rows {
+        let schema = row.first().and_then(|v| v.as_str()).unwrap_or_default();
+        let table = row.get(1).and_then(|v| v.as_str()).unwrap_or_default();
+        let engine = row.get(2).and_then(|v| v.as_str()).unwrap_or("unknown");
+        engine_map.insert(
+            (schema.to_ascii_lowercase(), table.to_ascii_lowercase()),
+            (
+                schema.to_string(),
+                table.to_string(),
+                engine.to_string(),
+            ),
+        );
+    }
+
+    let mut audit = MysqlEngineAudit {
+        non_transactional: Vec::new(),
+        unverified: Vec::new(),
+        cross_database: Vec::new(),
+    };
+    for target in &targets {
+        let schema = target
+            .schema
+            .clone()
+            .unwrap_or_else(|| current_db.clone());
+        let key = (schema.to_ascii_lowercase(), target.table.to_ascii_lowercase());
+        match engine_map.get(&key) {
+            Some((actual_schema, actual_table, engine)) => {
+                let transactional = engine_supports_transactions(engine);
+                if !transactional {
+                    audit.non_transactional.push((
+                        actual_schema.clone(),
+                        actual_table.clone(),
+                        engine.clone(),
+                    ));
+                }
+                if target.schema.is_some() {
+                    audit.cross_database.push((
+                        actual_schema.clone(),
+                        actual_table.clone(),
+                        Some(engine.clone()),
+                        transactional,
+                    ));
+                }
+            }
+            None => audit.unverified.push((
+                target.statement_index,
+                schema,
+                target.table.clone(),
+                "information_schema.TABLES 中查不到该表（表不存在，或当前账号无权读取该库元数据）"
+                    .to_string(),
+            )),
+        }
+    }
+    Ok(audit)
+}
+
+async fn fetch_current_database(
+    conn: &mut core_lib::db::EngineConnection,
+) -> Result<String, AppError> {
+    let result = conn
+        .fetch_all("SELECT DATABASE()")
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    Ok(result
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string())
+}
+
+async fn scan_non_transactional_tables(
+    conn: &mut core_lib::db::EngineConnection,
+    current_db: &str,
+) -> Result<Vec<(String, String, String)>, AppError> {
+    let sql = format!(
+        "SELECT table_schema, table_name, COALESCE(engine, 'VIEW') \
+         FROM information_schema.tables \
+         WHERE LOWER(table_schema) = LOWER({}) \
+         AND COALESCE(engine, 'VIEW') NOT IN ('InnoDB', 'NDB', 'NDBCLUSTER')",
+        sql_string_literal(current_db)
     );
     let result = conn
         .fetch_all(&sql)
@@ -3357,13 +3503,14 @@ async fn mysql_non_transactional_tables(
         .rows
         .iter()
         .filter_map(|row| {
-            let table = row.first()?.as_str()?.to_string();
-            let engine = row
-                .get(1)
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            Some((table, engine))
+            Some((
+                row.first()?.as_str()?.to_string(),
+                row.get(1)?.as_str()?.to_string(),
+                row.get(2)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ))
         })
         .collect())
 }
@@ -3383,22 +3530,63 @@ async fn run_import_script_atomic(
 ) -> Result<serde_json::Value, AppError> {
     let total = statements.len();
     let engine = engine_label(db_type);
-    // MySQL 的「原子」只对支持事务的存储引擎成立。执行前先查脚本 DML 命中的
-    // 非事务引擎表（MyISAM/Aria/MEMORY 等），命中则降级「可回滚」承诺，
-    // 避免报 rolled_back=true 而库里仍有残留。
-    let non_transactional_tables = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
-        mysql_non_transactional_tables(conn, statements).await?
+    // MySQL 的「原子」只对支持事务的存储引擎成立。执行前核查脚本 DML 目标的
+    // 真实引擎：同库与跨库都先查 information_schema，能查到的按引擎判定，
+    // 只有查不到（表不存在/无权限/无法静态识别）才降级。
+    let audit = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
+        audit_mysql_engines(conn, statements).await?
     } else {
-        Vec::new()
+        MysqlEngineAudit {
+            non_transactional: Vec::new(),
+            unverified: Vec::new(),
+            cross_database: Vec::new(),
+        }
     };
-    let downgraded = !non_transactional_tables.is_empty();
-    let non_transactional_json = non_transactional_tables
+    let downgraded = !audit.non_transactional.is_empty() || !audit.unverified.is_empty();
+    let verification_status = match (
+        audit.non_transactional.is_empty(),
+        audit.unverified.is_empty(),
+    ) {
+        (true, true) => "verified",
+        (false, true) => "downgraded_non_transactional",
+        (true, false) => "downgraded_unverified",
+        (false, false) => "downgraded_mixed",
+    };
+    let non_transactional_json = audit
+        .non_transactional
         .iter()
-        .map(|(table, engine)| serde_json::json!({"table": table, "engine": engine}))
+        .map(|(schema, table, engine)| {
+            serde_json::json!({"schema": schema, "table": table, "engine": engine})
+        })
         .collect::<Vec<_>>();
-    let scope_desc = non_transactional_tables
+    let unverified_json = audit
+        .unverified
         .iter()
-        .map(|(table, engine)| format!("{table}({engine})"))
+        .map(|(statement, schema, table, reason)| {
+            serde_json::json!({
+                "statement": statement,
+                "schema": schema,
+                "table": table,
+                "reason": reason
+            })
+        })
+        .collect::<Vec<_>>();
+    let cross_database_json = audit
+        .cross_database
+        .iter()
+        .map(|(schema, table, engine, transactional)| {
+            serde_json::json!({
+                "schema": schema,
+                "table": table,
+                "engine": engine,
+                "transactional": transactional
+            })
+        })
+        .collect::<Vec<_>>();
+    let scope_desc = audit
+        .non_transactional
+        .iter()
+        .map(|(schema, table, engine)| format!("{schema}.{table}({engine})"))
         .collect::<Vec<_>>()
         .join("、");
     let rollback_scope = if downgraded {
@@ -3406,10 +3594,61 @@ async fn run_import_script_atomic(
     } else {
         None
     };
+    // 降级的两个来源：非事务引擎表、无法核实引擎的目标。两条都要说清楚。
+    let downgrade_desc = {
+        let mut parts: Vec<String> = Vec::new();
+        if !audit.non_transactional.is_empty() {
+            parts.push(format!("以下非事务引擎表不参与事务回滚：{scope_desc}"));
+        }
+        if !audit.unverified.is_empty() {
+            let details = audit
+                .unverified
+                .iter()
+                .map(|(statement, schema, table, reason)| {
+                    format!("第 {statement} 条语句 → {schema}.{table}（{reason}）")
+                })
+                .collect::<Vec<_>>()
+                .join("；");
+            parts.push(format!("以下写入目标无法核实引擎，已按保守口径降级：{details}"));
+        }
+        parts.join("；")
+    };
     let engine_note = if matches!(db_type, DbType::MySQL | DbType::MariaDB) {
         if downgraded {
+            let mut notes: Vec<String> = Vec::new();
+            if !audit.non_transactional.is_empty() {
+                notes.push(format!(
+                    "事务回滚仅对支持事务的引擎（InnoDB/NDB）生效；以下表使用非事务引擎，写入无法回滚：{scope_desc}。"
+                ));
+            }
+            if !audit.unverified.is_empty() {
+                let details = audit
+                    .unverified
+                    .iter()
+                    .map(|(statement, schema, table, reason)| {
+                        format!("第 {statement} 条语句 → {schema}.{table}（{reason}）")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；");
+                notes.push(format!(
+                    "以下写入目标无法核实引擎，已按保守口径降级：{details}。"
+                ));
+            }
+            Some(notes.join(" "))
+        } else if !audit.cross_database.is_empty() {
+            let details = audit
+                .cross_database
+                .iter()
+                .map(|(schema, table, engine, _)| {
+                    format!(
+                        "{schema}.{table}={}",
+                        engine.as_deref().unwrap_or("unknown")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("、");
             Some(format!(
-                "事务回滚仅对支持事务的引擎（InnoDB/NDB）生效；脚本 DML 命中的以下表使用非事务引擎，写入无法回滚：{scope_desc}。"
+                "跨库表引擎已核实（{details}），脚本 DML 命中的表均支持事务，失败时可整体回滚。"
             ))
         } else {
             Some("脚本 DML 命中的表均支持事务，失败时可整体回滚。".to_string())
@@ -3486,8 +3725,9 @@ async fn run_import_script_atomic(
                     let remaining = total - idx - 1;
                     let message = if downgraded {
                         format!(
-                            "第 {} 条语句执行失败，仅事务引擎（InnoDB/NDB）上的写入已回滚；以下非事务引擎表上的写入无法回滚：{scope_desc}，已执行的 {} 条语句在这些表上可能仍有残留，剩余 {} 条未执行。错误：{}",
+                            "第 {} 条语句执行失败，仅事务引擎（InnoDB/NDB）上的写入已回滚；{}，已执行的 {} 条语句可能仍有残留，剩余 {} 条未执行。错误：{}",
                             idx + 1,
+                            downgrade_desc,
                             applied_before_rollback,
                             remaining,
                             err_text
@@ -3520,7 +3760,10 @@ async fn run_import_script_atomic(
                         "atomic": !downgraded,
                         "rolled_back": !downgraded,
                         "rollback_scope": rollback_scope,
+                        "verification_status": verification_status,
                         "non_transactional_tables": non_transactional_json,
+                        "unverified_tables": unverified_json,
+                        "cross_database_tables": cross_database_json,
                         "engine_note": engine_note,
                         "failure_policy": "stop",
                         "total_statements": total,
@@ -3563,9 +3806,7 @@ async fn run_import_script_atomic(
         )
     };
     if downgraded {
-        message.push_str(&format!(
-            "注意：以下非事务引擎表不参与事务回滚：{scope_desc}。"
-        ));
+        message.push_str(&format!("注意：{downgrade_desc}。"));
     }
 
     Ok(serde_json::json!({
@@ -3575,7 +3816,10 @@ async fn run_import_script_atomic(
         "atomic": !downgraded,
         "rolled_back": false,
         "rollback_scope": rollback_scope,
+        "verification_status": verification_status,
         "non_transactional_tables": non_transactional_json,
+        "unverified_tables": unverified_json,
+        "cross_database_tables": cross_database_json,
         "engine_note": engine_note,
         "failure_policy": if continue_on_error { "continue" } else { "stop" },
         "total_statements": total,
