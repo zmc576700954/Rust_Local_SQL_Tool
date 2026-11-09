@@ -234,6 +234,7 @@ interface ImportSqlJobPayload {
   sql?: string;
   db_id?: string;
   force?: boolean;
+  skip_errors?: boolean;
 }
 
 interface PerfSyncStartPayload {

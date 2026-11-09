@@ -254,6 +254,7 @@ struct ImportRequest {
     table_name: String,
     data: Vec<std::collections::HashMap<String, serde_json::Value>>,
     mapping: std::collections::HashMap<String, String>, // db_column -> source_field
+    #[serde(default)]
     skip_errors: bool,
     /// Target connection; when omitted the currently active connection is used.
     db_id: Option<String>,
@@ -261,9 +262,16 @@ struct ImportRequest {
 
 #[derive(Serialize)]
 struct ImportResponse {
+    success: bool,
+    completed: bool,
     inserted: usize,
     errors: usize,
+    total: usize,
+    failed_row: Option<usize>,
+    remaining: usize,
+    failure_policy: &'static str,
     error_details: Vec<String>,
+    message: String,
 }
 
 async fn import_data(
@@ -282,9 +290,12 @@ async fn import_data(
     };
 
     let table_name = req.table_name;
+    let total = req.data.len();
     let mut inserted = 0;
     let mut errors = 0;
     let mut error_details = Vec::new();
+    let mut failed_positions: Vec<usize> = Vec::new();
+    let mut stopped = false;
 
     // Filter mapping to only include mapped columns
     let mapped_cols: Vec<(String, String)> = req
@@ -311,7 +322,7 @@ async fn import_data(
     let mut batch_params: Vec<serde_json::Value> =
         Vec::with_capacity(batch_size * mapped_cols.len());
 
-    for (i, row) in req.data.iter().enumerate() {
+    'rows: for (i, row) in req.data.iter().enumerate() {
         let values: Vec<serde_json::Value> = mapped_cols
             .iter()
             .map(|(_, src_field)| {
@@ -352,43 +363,36 @@ async fn import_data(
                 Ok(_) => {
                     inserted += batch_values.len();
                 }
-                Err(e) => {
-                    if req.skip_errors {
-                        // Fall back to row-by-row for this batch
-                        let batch_start = i + 1 - batch_values.len();
-                        for (j, chunk) in batch_values.iter().enumerate() {
-                            let row_sql = format!(
-                                "INSERT INTO {} ({}) VALUES {}",
-                                table_ident, col_list, chunk
-                            );
-                            let row_values = if matches!(
-                                db_type,
-                                core_lib::config::DbType::MySQL | core_lib::config::DbType::MariaDB
-                            ) {
-                                let row_start = j * mapped_cols.len();
-                                batch_params[row_start..row_start + mapped_cols.len()].to_vec()
-                            } else {
-                                Vec::new()
-                            };
-                            match execute_import_sql(&db_client, &row_sql, &row_values, &db_type)
-                                .await
-                            {
-                                Ok(_) => inserted += 1,
-                                Err(row_err) => {
-                                    errors += 1;
-                                    error_details.push(format!(
-                                        "Row {}: {}",
-                                        batch_start + j + 1,
-                                        row_err
-                                    ));
+                Err(_batch_err) => {
+                    // 批语句失败无法定位具体行：回退为逐行执行，找到失败行后按策略处理。
+                    let batch_start = i + 1 - batch_values.len();
+                    for (j, chunk) in batch_values.iter().enumerate() {
+                        let row_sql = format!(
+                            "INSERT INTO {} ({}) VALUES {}",
+                            table_ident, col_list, chunk
+                        );
+                        let row_values = if matches!(
+                            db_type,
+                            core_lib::config::DbType::MySQL | core_lib::config::DbType::MariaDB
+                        ) {
+                            let row_start = j * mapped_cols.len();
+                            batch_params[row_start..row_start + mapped_cols.len()].to_vec()
+                        } else {
+                            Vec::new()
+                        };
+                        match execute_import_sql(&db_client, &row_sql, &row_values, &db_type).await {
+                            Ok(_) => inserted += 1,
+                            Err(row_err) => {
+                                errors += 1;
+                                let row_no = batch_start + j + 1;
+                                failed_positions.push(row_no);
+                                error_details.push(format!("Row {}: {}", row_no, row_err));
+                                if !req.skip_errors {
+                                    stopped = true;
+                                    break 'rows;
                                 }
                             }
                         }
-                    } else {
-                        return Err(AppError::BadRequest(format!(
-                            "Batch insert failed at row {}: {}",
-                            i + 1, e
-                        )));
                     }
                 }
             }
@@ -398,10 +402,48 @@ async fn import_data(
         }
     }
 
+    let processed = inserted + errors;
+    let success = errors == 0;
+    let failed_row = failed_positions.first().copied();
+    let remaining = if stopped {
+        total.saturating_sub(processed)
+    } else {
+        0
+    };
+    let message = if success {
+        format!("已成功写入 {} 行。", inserted)
+    } else if req.skip_errors {
+        format!(
+            "已写入 {} 行，失败 {} 行（行号：{}），已跳过失败行继续执行。",
+            inserted,
+            errors,
+            failed_positions
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        format!(
+            "已成功写入 {} 行，第 {} 行失败，剩余 {} 行未写入（遇错即停）。错误：{}",
+            inserted,
+            failed_row.unwrap_or(0),
+            remaining,
+            error_details.first().cloned().unwrap_or_default()
+        )
+    };
+
     Ok(Json(ImportResponse {
+        success,
+        completed: !stopped,
         inserted,
         errors,
+        total,
+        failed_row,
+        remaining,
+        failure_policy: if req.skip_errors { "continue" } else { "stop" },
         error_details,
+        message,
     }))
 }
 
@@ -2817,6 +2859,8 @@ pub(crate) struct ImportJobStartRequest {
     table_name: String,
     data: Vec<std::collections::HashMap<String, serde_json::Value>>,
     mapping: std::collections::HashMap<String, String>,
+    /// 失败策略：默认遇错即停；true 表示跳过失败行继续。
+    #[serde(default)]
     skip_errors: bool,
     /// Target connection; when omitted the currently active connection is used.
     db_id: Option<String>,
@@ -2827,6 +2871,9 @@ pub(crate) struct ImportSqlJobStartRequest {
     sql: String,
     force: Option<bool>,
     db_id: Option<String>,
+    /// 失败策略：默认遇错即停；true 表示跳过失败语句继续。
+    #[serde(default)]
+    skip_errors: bool,
 }
 
 #[derive(Serialize)]
@@ -4599,6 +4646,22 @@ mod tests {
         )
         .unwrap();
         assert!(req.db_id.is_none());
+    }
+
+    #[test]
+    fn import_requests_default_to_stop_on_error() {
+        // 缺省 skip_errors 时应为遇错即停
+        let req: ImportJobStartRequest =
+            serde_json::from_str(r#"{"table_name":"t","data":[],"mapping":{}}"#).unwrap();
+        assert!(!req.skip_errors);
+
+        let req: ImportSqlJobStartRequest =
+            serde_json::from_str(r#"{"sql":"SELECT 1"}"#).unwrap();
+        assert!(!req.skip_errors);
+
+        let req: ImportSqlJobStartRequest =
+            serde_json::from_str(r#"{"sql":"SELECT 1","skip_errors":true}"#).unwrap();
+        assert!(req.skip_errors);
     }
 
     #[test]

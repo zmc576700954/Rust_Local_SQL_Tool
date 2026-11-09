@@ -101,6 +101,283 @@ pub fn quote_table_ref_checked(
     }
 }
 
+/// 去掉 SQL 文本里的注释，保留字符串字面量内容。
+///
+/// 只处理 `--` 行注释、`#` 行注释与 `/* ... */` 块注释；字符串内的注释标记
+/// 不会被移除（脚本拆分与关键字判断依赖这一点）。
+pub fn strip_sql_comments(sql: &str) -> String {
+    let mut stripped = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    while let Some(ch) = chars.next() {
+        if in_single {
+            stripped.push(ch);
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    stripped.push(chars.next().unwrap());
+                } else {
+                    in_single = false;
+                }
+            }
+            continue;
+        }
+        if in_double {
+            stripped.push(ch);
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    stripped.push(chars.next().unwrap());
+                } else {
+                    in_double = false;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                stripped.push(ch);
+            }
+            '"' => {
+                in_double = true;
+                stripped.push(ch);
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                chars.next();
+                chars.by_ref().take_while(|c| *c != '\n').for_each(drop);
+                stripped.push(' ');
+            }
+            '#' => {
+                chars.by_ref().take_while(|c| *c != '\n').for_each(drop);
+                stripped.push(' ');
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for c in chars.by_ref() {
+                    if prev == '*' && c == '/' {
+                        break;
+                    }
+                    prev = c;
+                }
+                stripped.push(' ');
+            }
+            _ => stripped.push(ch),
+        }
+    }
+    stripped
+}
+
+/// 语句是否以事务控制关键字开头（BEGIN / START TRANSACTION / COMMIT / ROLLBACK / SAVEPOINT / RELEASE）。
+///
+/// 脚本导入在 PG/SQLite 上会自带一层事务；脚本里出现显式事务控制会提前提交，
+/// 使「失败整体回滚」的承诺失效，所以必须提前识别并拒绝。
+pub fn is_transaction_control_statement(sql: &str) -> bool {
+    let stripped = strip_sql_comments(sql);
+    let first = stripped
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| c == '(' || c == ';')
+        .to_ascii_uppercase();
+    matches!(
+        first.as_str(),
+        "BEGIN" | "START" | "COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "END"
+    )
+}
+
+/// 把 SQL 脚本拆成独立语句。
+///
+/// 按顶层分号拆分，字符串（单引号/双引号/反引号）、行注释、块注释与
+/// PostgreSQL 美元引号（`$$...$$`、`$tag$...$tag$`）里的分号不参与拆分。
+/// 纯空白或纯注释片段会被丢弃。
+pub fn split_sql_statements(sql: &str) -> Vec<String> {
+    #[derive(Clone, PartialEq)]
+    enum State {
+        Normal,
+        LineComment,
+        BlockComment,
+        SingleQuote,
+        DoubleQuote,
+        Backtick,
+        DollarQuote(String),
+    }
+
+    // 尝试识别 `$tag$` 形式的美元引号开头，返回 (tag, 开标记长度)。
+    fn dollar_open(chars: &[char], start: usize) -> Option<(String, usize)> {
+        let mut j = start + 1;
+        while j < chars.len() {
+            let ch = chars[j];
+            if ch == '$' {
+                return Some((chars[start + 1..j].iter().collect(), j - start + 1));
+            }
+            if !(ch.is_ascii_alphanumeric() || ch == '_') {
+                return None;
+            }
+            j += 1;
+        }
+        None
+    }
+
+    let chars: Vec<char> = sql.chars().collect();
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut has_code = false;
+    let mut state = State::Normal;
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let c = chars[i];
+        match state.clone() {
+            State::Normal => match c {
+                '-' if chars.get(i + 1) == Some(&'-') => {
+                    current.push('-');
+                    current.push('-');
+                    i += 2;
+                    state = State::LineComment;
+                }
+                '#' => {
+                    current.push(c);
+                    i += 1;
+                    state = State::LineComment;
+                }
+                '/' if chars.get(i + 1) == Some(&'*') => {
+                    current.push('/');
+                    current.push('*');
+                    i += 2;
+                    state = State::BlockComment;
+                }
+                '\'' => {
+                    current.push(c);
+                    has_code = true;
+                    i += 1;
+                    state = State::SingleQuote;
+                }
+                '"' => {
+                    current.push(c);
+                    has_code = true;
+                    i += 1;
+                    state = State::DoubleQuote;
+                }
+                '`' => {
+                    current.push(c);
+                    has_code = true;
+                    i += 1;
+                    state = State::Backtick;
+                }
+                '$' => match dollar_open(&chars, i) {
+                    Some((tag, len)) => {
+                        current.extend(&chars[i..i + len]);
+                        has_code = true;
+                        i += len;
+                        state = State::DollarQuote(tag);
+                    }
+                    None => {
+                        current.push(c);
+                        has_code = true;
+                        i += 1;
+                    }
+                },
+                ';' => {
+                    if has_code {
+                        let stmt = current.trim();
+                        if !stmt.is_empty() {
+                            statements.push(stmt.to_string());
+                        }
+                    }
+                    current.clear();
+                    has_code = false;
+                    i += 1;
+                }
+                _ => {
+                    if !c.is_whitespace() {
+                        has_code = true;
+                    }
+                    current.push(c);
+                    i += 1;
+                }
+            },
+            State::LineComment => {
+                current.push(c);
+                i += 1;
+                if c == '\n' {
+                    state = State::Normal;
+                }
+            }
+            State::BlockComment => {
+                current.push(c);
+                i += 1;
+                if c == '*' && chars.get(i) == Some(&'/') {
+                    current.push('/');
+                    i += 1;
+                    state = State::Normal;
+                }
+            }
+            State::SingleQuote => {
+                current.push(c);
+                i += 1;
+                if c == '\'' {
+                    if chars.get(i) == Some(&'\'') {
+                        current.push('\'');
+                        i += 1;
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::DoubleQuote => {
+                current.push(c);
+                i += 1;
+                if c == '"' {
+                    if chars.get(i) == Some(&'"') {
+                        current.push('"');
+                        i += 1;
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::Backtick => {
+                current.push(c);
+                i += 1;
+                if c == '`' {
+                    if chars.get(i) == Some(&'`') {
+                        current.push('`');
+                        i += 1;
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::DollarQuote(tag) => {
+                if c == '$' {
+                    let tag_len = tag.chars().count();
+                    let closes = tag.chars().enumerate().all(|(k, tc)| {
+                        chars.get(i + 1 + k) == Some(&tc)
+                    }) && chars.get(i + 1 + tag_len) == Some(&'$');
+                    if closes {
+                        let len = tag_len + 2;
+                        current.extend(&chars[i..i + len]);
+                        i += len;
+                        state = State::Normal;
+                        continue;
+                    }
+                }
+                current.push(c);
+                i += 1;
+            }
+        }
+    }
+
+    if has_code {
+        let stmt = current.trim();
+        if !stmt.is_empty() {
+            statements.push(stmt.to_string());
+        }
+    }
+    statements
+}
+
 /// MySQL 表名引用：支持 `db.table` 两级，分别加反引号。
 pub fn quote_table_ref_mysql(name: &str) -> String {
     match name.split_once('.') {
@@ -1045,6 +1322,75 @@ mod tests {
         let precise = "1234567890123456789.123456789012345678";
         let f = precise.parse::<f64>().unwrap();
         assert!(!decimal_text_matches_f64(precise, f));
+    }
+
+    #[test]
+    fn split_sql_statements_ignores_semicolons_in_strings_and_comments() {
+        let script = "SELECT 1; SELECT ';' AS s; -- comment ;\n/* block ; */ SELECT 2;";
+        let stmts = split_sql_statements(script);
+        assert_eq!(stmts.len(), 3, "实际拆分：{stmts:?}");
+        assert!(stmts[1].contains("';'"));
+        assert!(stmts[2].contains("SELECT 2"));
+    }
+
+    #[test]
+    fn split_sql_statements_handles_dollar_quotes_and_escaped_quotes() {
+        let script = "CREATE FUNCTION f() RETURNS void AS $$ BEGIN PERFORM 1; END $$ LANGUAGE plpgsql;\
+                      SELECT 'it''s;ok'; SELECT `a;b` FROM t;";
+        let stmts = split_sql_statements(script);
+        assert_eq!(stmts.len(), 3, "实际拆分：{stmts:?}");
+        assert!(stmts[0].contains("PERFORM 1; END"));
+        assert!(stmts[1].contains("it''s;ok"));
+        assert!(stmts[2].contains("a;b"));
+    }
+
+    #[test]
+    fn split_sql_statements_drops_empty_and_comment_only_fragments() {
+        let stmts = split_sql_statements(" ; -- only comment\n /* another */ ;  ");
+        assert!(stmts.is_empty(), "实际拆分：{stmts:?}");
+
+        let stmts = split_sql_statements("SELECT 1; ; ; SELECT 2");
+        assert_eq!(stmts, vec!["SELECT 1".to_string(), "SELECT 2".to_string()]);
+    }
+
+    #[test]
+    fn transaction_control_statements_are_detected() {
+        for sql in [
+            "BEGIN",
+            "START TRANSACTION",
+            "COMMIT",
+            "ROLLBACK",
+            "SAVEPOINT sp1",
+            "RELEASE SAVEPOINT sp1",
+            "-- leading comment\nCOMMIT;",
+            "/* x */ END",
+        ] {
+            assert!(
+                is_transaction_control_statement(sql),
+                "应识别为事务控制：{sql}"
+            );
+        }
+        for sql in [
+            "SELECT 'BEGIN'",
+            "CREATE TABLE t (id int)",
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a = 'COMMIT'",
+        ] {
+            assert!(
+                !is_transaction_control_statement(sql),
+                "不应识别为事务控制：{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_sql_comments_keeps_string_literals() {
+        let stripped = strip_sql_comments("SELECT '--not-comment', '#not-comment' -- tail\n/* block */");
+        assert!(stripped.contains("'--not-comment'"));
+        assert!(stripped.contains("'#not-comment'"));
+        assert!(!stripped.contains("tail"));
+        assert!(!stripped.contains("block"));
+        assert!(stripped.contains("SELECT"));
     }
 
     #[test]

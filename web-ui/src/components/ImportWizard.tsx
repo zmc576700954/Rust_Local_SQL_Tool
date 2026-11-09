@@ -192,7 +192,7 @@ export function ImportWizard({ tableName, columns, dbId, onComplete }: ImportWiz
     setPollInterrupted(null);
     try {
       const res = isSqlFile
-        ? await api.importSqlJobStart({ sql: sqlText, force: true, db_id: dbId })
+        ? await api.importSqlJobStart({ sql: sqlText, force: true, skip_errors: skipErrors, db_id: dbId })
         : await api.importJobStart({ table_name: tableName, data: parsedData, mapping, skip_errors: skipErrors, db_id: dbId });
       setJobId(res.job_id);
       setResumeJobId(res.job_id);

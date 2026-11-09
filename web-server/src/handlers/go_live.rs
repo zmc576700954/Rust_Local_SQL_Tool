@@ -482,11 +482,33 @@ pub async fn import_job_start(
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert("elapsed_ms".to_string(), serde_json::json!(elapsed_ms));
                 }
+                // 部分成功/失败的结果仍返回结构化明细，但任务状态置为 Error，
+                // 让调用方既能看到失败原因，也能看到已写入行数与失败行号。
+                let success = result
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let message = result
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        if success {
+                            "import completed".to_string()
+                        } else {
+                            "import failed".to_string()
+                        }
+                    });
                 update_tool_job(&state_clone, &job_id_clone, |j| {
-                    j.status = ToolJobStatus::Completed;
-                    j.progress.message = Some("import completed".to_string());
+                    j.status = if success {
+                        ToolJobStatus::Completed
+                    } else {
+                        ToolJobStatus::Error
+                    };
+                    j.progress.message = Some(message.clone());
                     j.elapsed_ms = Some(elapsed_ms);
                     j.result = Some(result);
+                    j.error = if success { None } else { Some(message) };
                 })
                 .await;
             }
@@ -581,11 +603,31 @@ pub async fn import_sql_job_start(
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert("elapsed_ms".to_string(), serde_json::json!(elapsed_ms));
                 }
+                let success = result
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let message = result
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        if success {
+                            "import sql completed".to_string()
+                        } else {
+                            "import sql failed".to_string()
+                        }
+                    });
                 update_tool_job(&state_clone, &job_id_clone, |j| {
-                    j.status = ToolJobStatus::Completed;
-                    j.progress.message = Some("import sql completed".to_string());
+                    j.status = if success {
+                        ToolJobStatus::Completed
+                    } else {
+                        ToolJobStatus::Error
+                    };
+                    j.progress.message = Some(message.clone());
                     j.elapsed_ms = Some(elapsed_ms);
                     j.result = Some(result);
+                    j.error = if success { None } else { Some(message) };
                 })
                 .await;
             }
@@ -1551,6 +1593,16 @@ pub async fn run_go_live_job(
                             };
 
                             let import_res = run_import_job(client, &nop_state, &dummy_job_id, import_req).await?;
+                            if import_res.get("success").and_then(|v| v.as_bool()) != Some(true) {
+                                let msg = import_res
+                                    .get("message")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("import failed");
+                                return Err(AppError::InternalError(format!(
+                                    "import failed: {}",
+                                    msg
+                                )));
+                            }
                             let inserted = import_res.get("inserted").and_then(|v| v.as_u64()).unwrap_or(0);
 
                             let (c,): (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {}", safe_dst))
@@ -2791,6 +2843,8 @@ async fn run_import_job_text_protocol(
     let mut inserted: u64 = 0;
     let mut errors: u64 = 0;
     let mut details: Vec<String> = Vec::new();
+    let mut failed_positions: Vec<u64> = Vec::new();
+    let mut stopped = false;
     let mut batch_values: Vec<String> = Vec::new();
     // 数组列需要把 JSON 数组转成 PG 数组字面量；jsonb 列里的数组保持 JSON 文本。
     let array_cols = if matches!(db_type, DbType::PostgreSQL) {
@@ -2799,7 +2853,7 @@ async fn run_import_job_text_protocol(
         std::collections::HashMap::new()
     };
 
-    for (idx, row) in req.data.iter().enumerate() {
+    'rows: for (idx, row) in req.data.iter().enumerate() {
         let values: Vec<String> = mapped_cols
             .iter()
             .map(|(db, src)| match row.get(src) {
@@ -2827,7 +2881,7 @@ async fn run_import_job_text_protocol(
             );
             match db_client.pool.execute_affected(&sql).await {
                 Ok(_) => inserted += batch_values.len() as u64,
-                Err(_err) if req.skip_errors => {
+                Err(_batch_err) if req.skip_errors => {
                     // 逐行重试，只跳过真正失败的行
                     for (offset, chunk) in batch_values.iter().enumerate() {
                         let row_sql = format!(
@@ -2838,21 +2892,32 @@ async fn run_import_job_text_protocol(
                             Ok(_) => inserted += 1,
                             Err(row_err) => {
                                 errors += 1;
-                                details.push(format!(
-                                    "Row {}: {}",
-                                    batch_start + offset + 1,
-                                    row_err
-                                ));
+                                let row_no = (batch_start + offset + 1) as u64;
+                                failed_positions.push(row_no);
+                                details.push(format!("Row {}: {}", row_no, row_err));
                             }
                         }
                     }
                 }
-                Err(err) => {
-                    return Err(AppError::BadRequest(format!(
-                        "Batch insert failed at row {}: {}",
-                        batch_start + 1,
-                        err
-                    )));
+                Err(_batch_err) => {
+                    // 批语句失败无法定位到具体行：回退为逐行插入，找到第一处失败后停止。
+                    for (offset, chunk) in batch_values.iter().enumerate() {
+                        let row_sql = format!(
+                            "INSERT INTO {} ({}) VALUES {}",
+                            table_ident, col_list, chunk
+                        );
+                        match db_client.pool.execute_affected(&row_sql).await {
+                            Ok(_) => inserted += 1,
+                            Err(row_err) => {
+                                errors += 1;
+                                let row_no = (batch_start + offset + 1) as u64;
+                                failed_positions.push(row_no);
+                                details.push(format!("Row {}: {}", row_no, row_err));
+                                stopped = true;
+                                break 'rows;
+                            }
+                        }
+                    }
                 }
             }
             batch_values.clear();
@@ -2866,18 +2931,59 @@ async fn run_import_job_text_protocol(
         }
     }
 
+    let processed = inserted + errors;
     update_tool_job(state, job_id, |j| {
-        j.progress.current = total;
+        j.progress.current = processed.min(total);
     })
     .await;
 
+    let success = errors == 0;
+    let failed_row = failed_positions.first().copied();
+    let remaining = if stopped {
+        total.saturating_sub(processed)
+    } else {
+        0
+    };
+    let message = if success {
+        format!("已成功写入 {} 行。", inserted)
+    } else if req.skip_errors {
+        format!(
+            "已写入 {} 行，失败 {} 行（行号：{}），已跳过失败行继续执行。",
+            inserted,
+            errors,
+            failed_positions_text_u64(&failed_positions)
+        )
+    } else {
+        format!(
+            "已成功写入 {} 行，第 {} 行失败，剩余 {} 行未写入（遇错即停）。错误：{}",
+            inserted,
+            failed_row.unwrap_or(0),
+            remaining,
+            details.first().cloned().unwrap_or_default()
+        )
+    };
+
     Ok(serde_json::json!({
-        "success": true,
+        "success": success,
+        "completed": !stopped,
         "inserted": inserted,
         "errors": errors,
         "total": total,
+        "failed_row": failed_row,
+        "failed_rows": failed_positions,
+        "remaining": remaining,
+        "failure_policy": if req.skip_errors { "continue" } else { "stop" },
         "error_details": details,
+        "message": message,
     }))
+}
+
+fn failed_positions_text_u64(positions: &[u64]) -> String {
+    positions
+        .iter()
+        .map(|idx| idx.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub async fn run_import_job(
@@ -2914,9 +3020,12 @@ pub async fn run_import_job(
         table_ident, col_list, placeholders
     );
 
+    let total = req.data.len() as u64;
     let mut inserted: u64 = 0;
     let mut errors: u64 = 0;
     let mut error_details = Vec::new();
+    let mut failed_positions: Vec<u64> = Vec::new();
+    let mut stopped = false;
 
     for (i, row) in req.data.iter().enumerate() {
         let mut query = sqlx::query(&sql);
@@ -2946,8 +3055,11 @@ pub async fn run_import_job(
             Ok(_) => inserted += 1,
             Err(e) => {
                 errors += 1;
-                error_details.push(format!("Row {}: {}", i + 1, e));
+                let row_no = (i + 1) as u64;
+                failed_positions.push(row_no);
+                error_details.push(format!("Row {}: {}", row_no, e));
                 if !req.skip_errors {
+                    stopped = true;
                     break;
                 }
             }
@@ -2961,15 +3073,50 @@ pub async fn run_import_job(
         }
     }
 
+    let processed = inserted + errors;
     update_tool_job(state, job_id, |j| {
-        j.progress.current = req.data.len() as u64;
+        j.progress.current = processed.min(total);
     })
     .await;
 
+    let success = errors == 0;
+    let failed_row = failed_positions.first().copied();
+    let remaining = if stopped {
+        total.saturating_sub(processed)
+    } else {
+        0
+    };
+    let message = if success {
+        format!("已成功写入 {} 行。", inserted)
+    } else if req.skip_errors {
+        format!(
+            "已写入 {} 行，失败 {} 行（行号：{}），已跳过失败行继续执行。",
+            inserted,
+            errors,
+            failed_positions_text_u64(&failed_positions)
+        )
+    } else {
+        format!(
+            "已成功写入 {} 行，第 {} 行失败，剩余 {} 行未写入（遇错即停）。错误：{}",
+            inserted,
+            failed_row.unwrap_or(0),
+            remaining,
+            error_details.first().cloned().unwrap_or_default()
+        )
+    };
+
     Ok(serde_json::json!({
+        "success": success,
+        "completed": !stopped,
         "inserted": inserted,
         "errors": errors,
+        "total": total,
+        "failed_row": failed_row,
+        "failed_rows": failed_positions,
+        "remaining": remaining,
+        "failure_policy": if req.skip_errors { "continue" } else { "stop" },
         "error_details": error_details,
+        "message": message,
     }))
 }
 
@@ -2994,6 +3141,20 @@ pub async fn run_import_sql_job(
         }
     };
 
+    let statements = core_lib::sql_util::split_sql_statements(&req.sql);
+    if statements.is_empty() {
+        return Err(AppError::BadRequest(
+            "SQL 脚本为空，未包含任何可执行语句".to_string(),
+        ));
+    }
+
+    // 只读连接：脚本中任意一条写语句都必须拒绝（逐语句判断，避免首条 SELECT 掩护后续 DML）。
+    if is_read_only && statements.iter().any(|s| core_lib::sql_util::is_mutation_sql(s)) {
+        return Err(AppError::Forbidden(
+            "当前连接为只读模式，禁止执行非查询操作！".to_string(),
+        ));
+    }
+
     let mut clean_sql = req.sql.trim().to_string();
     loop {
         if clean_sql.starts_with("--") {
@@ -3014,17 +3175,6 @@ pub async fn run_import_sql_job(
     }
 
     let upper_sql = clean_sql.to_uppercase();
-    let is_select = upper_sql.starts_with("SELECT")
-        || upper_sql.starts_with("SHOW")
-        || upper_sql.starts_with("DESCRIBE")
-        || upper_sql.starts_with("EXPLAIN");
-
-    if is_read_only && !is_select {
-        return Err(AppError::Forbidden(
-            "当前连接为只读模式，禁止执行非查询操作！".to_string(),
-        ));
-    }
-
     let is_dangerous = upper_sql.contains("UPDATE ")
         || upper_sql.contains("DELETE ")
         || upper_sql.contains("DROP ")
@@ -3040,21 +3190,343 @@ pub async fn run_import_sql_job(
         return Err(AppError::BadRequest(body));
     }
 
+    let atomic = !matches!(db_client.db_type, DbType::MySQL | DbType::MariaDB);
+    if atomic && statements.iter().any(|s| core_lib::sql_util::is_transaction_control_statement(s)) {
+        return Err(AppError::BadRequest(
+            "脚本包含显式事务控制语句（BEGIN/COMMIT/ROLLBACK/SAVEPOINT），与脚本级原子导入冲突；请移除后重试".to_string(),
+        ));
+    }
+
     update_tool_job(state, job_id, |j| {
         j.progress.message = Some("executing".to_string());
+        j.progress.total = Some(statements.len() as u64);
     })
     .await;
 
-    let affected = db_client
+    let mut conn = db_client
         .pool
-        .execute_affected(&req.sql)
+        .acquire_engine()
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
+    if atomic {
+        run_import_script_atomic(&mut conn, &statements, req.skip_errors, state, job_id, &db_client.db_type).await
+    } else {
+        run_import_script_non_atomic(&mut conn, &statements, req.skip_errors, state, job_id, &db_client.db_type).await
+    }
+}
+
+fn engine_label(db_type: &DbType) -> &'static str {
+    match db_type {
+        DbType::MySQL => "mysql",
+        DbType::MariaDB => "mariadb",
+        DbType::PostgreSQL => "postgresql",
+        DbType::SQLite => "sqlite",
+        _ => "unknown",
+    }
+}
+
+fn statement_preview(sql: &str) -> String {
+    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = normalized.chars().take(160).collect();
+    if normalized.chars().count() > 160 {
+        out.push('…');
+    }
+    out
+}
+
+fn script_statement_entry(
+    index: usize,
+    statement: &str,
+    status: &str,
+    affected_rows: u64,
+    error: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "index": index,
+        "preview": statement_preview(statement),
+        "status": status,
+        "affected_rows": affected_rows,
+        "error": error,
+    })
+}
+
+fn failed_positions_text(failed: &[(usize, String)]) -> String {
+    failed
+        .iter()
+        .map(|(idx, _)| idx.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// PostgreSQL / SQLite：整段脚本包在一个事务内。
+///
+/// 遇错即停时任一语句失败立即 `ROLLBACK`（DDL 与 DML 一起回滚）；跳过模式用
+/// 保存点逐条隔离，失败语句回滚到保存点后继续，最后统一 `COMMIT`。
+async fn run_import_script_atomic(
+    conn: &mut core_lib::db::EngineConnection,
+    statements: &[String],
+    continue_on_error: bool,
+    state: &AppState,
+    job_id: &str,
+    db_type: &DbType,
+) -> Result<serde_json::Value, AppError> {
+    let total = statements.len();
+    let engine = engine_label(db_type);
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(total);
+    let mut executed = 0u64;
+    let mut affected_total = 0u64;
+    let mut failed: Vec<(usize, String)> = Vec::new();
+
+    conn.execute_command(conn.begin_statement())
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+
+    for (idx, statement) in statements.iter().enumerate() {
+        if continue_on_error {
+            let savepoint = format!("local_import_sp_{}", idx + 1);
+            conn.execute_command(&format!("SAVEPOINT {}", savepoint))
+                .await
+                .map_err(|e| AppError::InternalError(e.to_string()))?;
+            match conn.execute_command(statement).await {
+                Ok(n) => {
+                    conn.execute_command(&format!("RELEASE SAVEPOINT {}", savepoint))
+                        .await
+                        .map_err(|e| AppError::InternalError(e.to_string()))?;
+                    executed += 1;
+                    affected_total += n;
+                    entries.push(script_statement_entry(idx + 1, statement, "executed", n, None));
+                }
+                Err(e) => {
+                    let err_text = e.to_string();
+                    let _ = conn
+                        .execute_command(&format!("ROLLBACK TO SAVEPOINT {}", savepoint))
+                        .await;
+                    let _ = conn
+                        .execute_command(&format!("RELEASE SAVEPOINT {}", savepoint))
+                        .await;
+                    failed.push((idx + 1, err_text.clone()));
+                    entries.push(script_statement_entry(idx + 1, statement, "failed", 0, Some(&err_text)));
+                }
+            }
+        } else {
+            match conn.execute_command(statement).await {
+                Ok(n) => {
+                    executed += 1;
+                    affected_total += n;
+                    entries.push(script_statement_entry(idx + 1, statement, "executed", n, None));
+                }
+                Err(e) => {
+                    let err_text = e.to_string();
+                    entries.push(script_statement_entry(idx + 1, statement, "failed", 0, Some(&err_text)));
+                    let applied_before_rollback = executed;
+                    // 已执行语句在回滚后全部不生效，状态改为 rolled_back。
+                    for entry in entries.iter_mut().take(idx) {
+                        if let Some(obj) = entry.as_object_mut() {
+                            obj.insert("status".to_string(), serde_json::json!("rolled_back"));
+                        }
+                    }
+                    for skipped_idx in (idx + 1)..total {
+                        entries.push(script_statement_entry(
+                            skipped_idx + 1,
+                            &statements[skipped_idx],
+                            "skipped",
+                            0,
+                            None,
+                        ));
+                    }
+                    let _ = conn.execute_command("ROLLBACK").await;
+                    let remaining = total - idx - 1;
+                    let message = format!(
+                        "第 {} 条语句执行失败，事务已回滚：此前已执行的 {} 条语句（含 DDL 与 DML）均未生效，剩余 {} 条未执行。错误：{}",
+                        idx + 1,
+                        applied_before_rollback,
+                        remaining,
+                        err_text
+                    );
+                    update_tool_job(state, job_id, |j| {
+                        j.progress.current = (idx + 1) as u64;
+                    })
+                    .await;
+                    return Ok(serde_json::json!({
+                        "success": false,
+                        "completed": false,
+                        "engine": engine,
+                        "atomic": true,
+                        "rolled_back": true,
+                        "failure_policy": "stop",
+                        "total_statements": total,
+                        "executed_statements": 0,
+                        "applied_before_rollback": applied_before_rollback,
+                        "failed_statement": idx + 1,
+                        "failed_statements": 1,
+                        "remaining_statements": remaining,
+                        "affected_rows": 0,
+                        "failure_details": [{"index": idx + 1, "error": err_text}],
+                        "statements": entries,
+                        "message": message,
+                    }));
+                }
+            }
+        }
+
+        if (idx + 1) % 50 == 0 || idx + 1 == total {
+            let processed = (idx + 1) as u64;
+            update_tool_job(state, job_id, |j| {
+                j.progress.current = processed;
+            })
+            .await;
+        }
+    }
+
+    conn.execute_command("COMMIT")
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+
+    let success = failed.is_empty();
+    let message = if success {
+        format!("脚本执行成功：共 {} 条语句，全部提交。", total)
+    } else {
+        format!(
+            "脚本执行完成：成功 {} 条，失败 {} 条（位置：{}）；失败语句已用保存点回滚，成功语句已提交。",
+            executed,
+            failed.len(),
+            failed_positions_text(&failed)
+        )
+    };
+
     Ok(serde_json::json!({
-        "affected_rows": affected
+        "success": success,
+        "completed": true,
+        "engine": engine,
+        "atomic": true,
+        "rolled_back": false,
+        "failure_policy": if continue_on_error { "continue" } else { "stop" },
+        "total_statements": total,
+        "executed_statements": executed,
+        "applied_before_rollback": 0,
+        "failed_statement": failed.first().map(|(idx, _)| *idx),
+        "failed_statements": failed.len(),
+        "remaining_statements": 0,
+        "affected_rows": affected_total,
+        "failure_details": failed.iter().map(|(idx, err)| serde_json::json!({"index": idx, "error": err})).collect::<Vec<_>>(),
+        "statements": entries,
+        "message": message,
     }))
 }
+
+/// MySQL / MariaDB：DDL 隐式提交，无法整段回滚。
+///
+/// 逐条执行并记录状态；遇错即停时明确报告「已成功执行到第 N 条、剩余 M 条未执行、
+/// 已生效部分无法自动回滚」，跳过模式汇总失败条数与位置。
+async fn run_import_script_non_atomic(
+    conn: &mut core_lib::db::EngineConnection,
+    statements: &[String],
+    continue_on_error: bool,
+    state: &AppState,
+    job_id: &str,
+    db_type: &DbType,
+) -> Result<serde_json::Value, AppError> {
+    let total = statements.len();
+    let engine = engine_label(db_type);
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(total);
+    let mut executed = 0u64;
+    let mut affected_total = 0u64;
+    let mut failed: Vec<(usize, String)> = Vec::new();
+
+    for (idx, statement) in statements.iter().enumerate() {
+        match conn.execute_command(statement).await {
+            Ok(n) => {
+                executed += 1;
+                affected_total += n;
+                entries.push(script_statement_entry(idx + 1, statement, "executed", n, None));
+            }
+            Err(e) => {
+                let err_text = e.to_string();
+                failed.push((idx + 1, err_text.clone()));
+                entries.push(script_statement_entry(idx + 1, statement, "failed", 0, Some(&err_text)));
+                if !continue_on_error {
+                    let remaining = total - idx - 1;
+                    for skipped_idx in (idx + 1)..total {
+                        entries.push(script_statement_entry(
+                            skipped_idx + 1,
+                            &statements[skipped_idx],
+                            "skipped",
+                            0,
+                            None,
+                        ));
+                    }
+                    let message = format!(
+                        "已成功执行到第 {} 条语句，共 {} 条，剩余 {} 条未执行；MySQL/MariaDB 的 DDL 会隐式提交，已生效的部分无法自动回滚。失败语句（第 {} 条）：{}",
+                        executed, total, remaining, idx + 1, err_text
+                    );
+                    update_tool_job(state, job_id, |j| {
+                        j.progress.current = (idx + 1) as u64;
+                    })
+                    .await;
+                    return Ok(serde_json::json!({
+                        "success": false,
+                        "completed": false,
+                        "engine": engine,
+                        "atomic": false,
+                        "rolled_back": false,
+                        "failure_policy": "stop",
+                        "total_statements": total,
+                        "executed_statements": executed,
+                        "applied_before_rollback": 0,
+                        "failed_statement": idx + 1,
+                        "failed_statements": 1,
+                        "remaining_statements": remaining,
+                        "affected_rows": affected_total,
+                        "failure_details": [{"index": idx + 1, "error": err_text}],
+                        "statements": entries,
+                        "message": message,
+                    }));
+                }
+            }
+        }
+
+        if (idx + 1) % 50 == 0 || idx + 1 == total {
+            let processed = (idx + 1) as u64;
+            update_tool_job(state, job_id, |j| {
+                j.progress.current = processed;
+            })
+            .await;
+        }
+    }
+
+    let success = failed.is_empty();
+    let message = if success {
+        format!("脚本执行成功：共 {} 条语句。", total)
+    } else {
+        format!(
+            "脚本执行完成：成功 {} 条，失败 {} 条（位置：{}）；MySQL/MariaDB 的 DDL 会隐式提交，已生效的部分无法自动回滚。",
+            executed,
+            failed.len(),
+            failed_positions_text(&failed)
+        )
+    };
+
+    Ok(serde_json::json!({
+        "success": success,
+        "completed": true,
+        "engine": engine,
+        "atomic": false,
+        "rolled_back": false,
+        "failure_policy": if continue_on_error { "continue" } else { "stop" },
+        "total_statements": total,
+        "executed_statements": executed,
+        "applied_before_rollback": 0,
+        "failed_statement": failed.first().map(|(idx, _)| *idx),
+        "failed_statements": failed.len(),
+        "remaining_statements": 0,
+        "affected_rows": affected_total,
+        "failure_details": failed.iter().map(|(idx, err)| serde_json::json!({"index": idx, "error": err})).collect::<Vec<_>>(),
+        "statements": entries,
+        "message": message,
+    }))
+}
+
 
 pub async fn get_temp_db_client(state: &AppState, db_id: &str) -> Result<(DbClient, String), AppError> {
     let config = state.config.read().await.clone();
@@ -3094,5 +3566,37 @@ pub async fn get_temp_db_client(state: &AppState, db_id: &str) -> Result<(DbClie
         .await
         .insert(db_id.to_string(), entry);
     Ok((client, db_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statement_preview_collapses_whitespace_and_truncates() {
+        let preview = statement_preview("INSERT   INTO\n  t   VALUES (1)");
+        assert_eq!(preview, "INSERT INTO t VALUES (1)");
+
+        let long = format!("SELECT '{}'", "x".repeat(300));
+        let preview = statement_preview(&long);
+        assert!(preview.ends_with('…'));
+        assert!(preview.chars().count() <= 161);
+    }
+
+    #[test]
+    fn failed_positions_text_joins_one_based_indices() {
+        let failed = vec![(2usize, "boom".to_string()), (5usize, "again".to_string())];
+        assert_eq!(failed_positions_text(&failed), "2, 5");
+        assert_eq!(failed_positions_text(&[]), "");
+        assert_eq!(failed_positions_text_u64(&[3, 7]), "3, 7");
+    }
+
+    #[test]
+    fn engine_labels_match_db_types() {
+        assert_eq!(engine_label(&DbType::PostgreSQL), "postgresql");
+        assert_eq!(engine_label(&DbType::MySQL), "mysql");
+        assert_eq!(engine_label(&DbType::MariaDB), "mariadb");
+        assert_eq!(engine_label(&DbType::SQLite), "sqlite");
+    }
 }
 
