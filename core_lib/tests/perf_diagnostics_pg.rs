@@ -17,6 +17,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sqlx::postgres::PgPool;
+use sqlx::Row;
 
 use core_lib::db::client::DbClient;
 use core_lib::ops::index_advisor::{self, IndexAdvisorInput};
@@ -57,6 +58,16 @@ fn with_search_path(url: &str, schema: &str) -> String {
     let separator = if url.contains('?') { '&' } else { '?' };
     // 保留 public：pg_stat_statements 扩展默认安装在 public，正常连接也依赖它。
     format!("{url}{separator}options=-csearch_path%3D{schema}%2Cpublic")
+}
+
+fn with_database(url: &str, db: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((base, tail)) => {
+            let query = tail.find('?').map(|i| &tail[i..]).unwrap_or("");
+            format!("{base}/{db}{query}")
+        }
+        None => format!("{url}/{db}"),
+    }
 }
 
 struct Fixture {
@@ -344,6 +355,147 @@ async fn perf_pg_explain_and_readonly_plan() {
         .code_advice
         .iter()
         .any(|advice| advice.contains("不代执行")));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn perf_pg_degrades_when_pg_stat_statements_not_preloaded() {
+    let Ok(url) = std::env::var("PERF_PG_PLAIN_URL") else {
+        eprintln!("PERF_PG_PLAIN_URL 未设置，跳过未预加载降级验证");
+        return;
+    };
+    let client = DbClient::new_default(&url)
+        .await
+        .expect("创建 PG 连接池失败");
+    let ctx = OpsContext::new(client, "perf-pg-plain".into(), database_name(&url), false);
+
+    let scan = perf_diagnostics::list_slow_queries(&ctx, "total_latency", 10)
+        .await
+        .expect("读取慢查询不应报错，只应降级");
+    println!("\n=== 未预加载 pg_stat_statements ===\n{:?}", scan.degraded_reasons);
+    assert!(!scan.available, "未预加载时必须降级");
+    assert!(
+        scan.degraded_reasons
+            .iter()
+            .any(|r| r.starts_with("pg_stat_statements_not_preloaded")),
+        "降级原因必须点名未预加载: {:?}",
+        scan.degraded_reasons
+    );
+    assert!(
+        scan.candidates.is_empty(),
+        "降级时不得返回候选冒充可用数据"
+    );
+    assert!(
+        scan.notes.iter().any(|n| n.contains("不代表没有慢查询")),
+        "必须说明空结果不代表没有慢查询: {:?}",
+        scan.notes
+    );
+}
+
+#[tokio::test]
+async fn perf_pg_degrades_when_extension_missing() {
+    let Some(url) = base_url() else {
+        eprintln!("PERF_PG_URL 未设置，跳过扩展缺失降级验证");
+        return;
+    };
+    // 已预加载，但 postgres 库未 CREATE EXTENSION。
+    let url = with_database(&url, "postgres");
+    let client = DbClient::new_default(&url)
+        .await
+        .expect("创建 PG 连接池失败");
+    let ctx = OpsContext::new(client, "perf-pg-noext".into(), "postgres".into(), false);
+
+    let scan = perf_diagnostics::list_slow_queries(&ctx, "total_latency", 10)
+        .await
+        .expect("读取慢查询不应报错，只应降级");
+    println!("\n=== 扩展缺失 ===\n{:?}", scan.degraded_reasons);
+    assert!(!scan.available, "扩展缺失时必须降级");
+    assert!(
+        scan.degraded_reasons
+            .iter()
+            .any(|r| r.starts_with("pg_stat_statements_extension_missing")),
+        "降级原因必须点名扩展缺失: {:?}",
+        scan.degraded_reasons
+    );
+    assert!(scan.candidates.is_empty());
+    assert!(scan.notes.iter().any(|n| n.contains("CREATE EXTENSION")));
+}
+
+#[tokio::test]
+async fn index_advisor_pg_notes_track_counts_off() {
+    let Some(url) = base_url() else {
+        eprintln!("PERF_PG_URL 未设置，跳过 PG track_counts 降级验证");
+        return;
+    };
+    let fixture = Fixture::setup(&url).await;
+    let mut conn = fixture.admin.acquire().await.expect("获取管理连接失败");
+    let original: String = sqlx::query("SHOW track_counts")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("读取 track_counts 失败")
+        .get(0);
+    sqlx::query("ALTER SYSTEM SET track_counts = off")
+        .execute(&mut *conn)
+        .await
+        .expect("关闭 track_counts 失败");
+    sqlx::query("SELECT pg_reload_conf()")
+        .execute(&mut *conn)
+        .await
+        .expect("重载配置失败");
+    let mut toggled = false;
+    for _ in 0..30 {
+        let value: String = sqlx::query("SHOW track_counts")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("读取 track_counts 失败")
+            .get(0);
+        if value.eq_ignore_ascii_case("off") {
+            toggled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let ctx = context(&fixture).await;
+    let evidence = index_advisor::collect_evidence(
+        &ctx,
+        IndexAdvisorInput {
+            table: TABLE.into(),
+            workload_sql: vec![TARGET_SQL.into()],
+            notes: None,
+            use_llm: false,
+        },
+    )
+    .await
+    .expect("采集证据失败");
+    println!("\n=== track_counts=off 索引优化 notes ===\n{:?}", evidence.notes);
+
+    sqlx::query(&format!("ALTER SYSTEM SET track_counts = {original}"))
+        .execute(&mut *conn)
+        .await
+        .expect("还原 track_counts 失败");
+    sqlx::query("SELECT pg_reload_conf()")
+        .execute(&mut *conn)
+        .await
+        .expect("重载配置失败");
+    for _ in 0..30 {
+        let value: String = sqlx::query("SHOW track_counts")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("读取 track_counts 失败")
+            .get(0);
+        if value.eq_ignore_ascii_case(&original) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    assert!(toggled, "track_counts 未成功切换为 off");
+    assert!(
+        evidence.notes.iter().any(|note| note.contains("track_counts=off")),
+        "索引优化必须显式说明 track_counts 降级: {:?}",
+        evidence.notes
+    );
     fixture.cleanup().await;
 }
 

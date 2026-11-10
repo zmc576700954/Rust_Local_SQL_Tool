@@ -1229,7 +1229,19 @@ async fn check_passwordless_accounts(
 ) -> CheckResult {
     let roles = match load_passwordless_roles(ctx).await {
         Ok(roles) => roles,
-        Err(err) => return skipped(descriptor, err, started),
+        Err(err) => {
+            // 即使账号明细不可读，也要把 hba 的降级原因一并写清楚，
+            // 避免只报一半依赖权限的子项。
+            let mut reason = err;
+            match load_hba_rules(ctx).await {
+                Ok(_) => reason.push_str(
+                    "；pg_hba.conf trust 规则可读，但缺少账号明细时本项整体跳过，\
+                     不输出不完整的“无密码账号”结论",
+                ),
+                Err(hba_err) => reason.push_str(&format!("；{hba_err}")),
+            }
+            return skipped(descriptor, reason, started);
+        }
     };
     let mut evidence = detect_pg_passwordless(&roles);
     let mut checked = roles.len();

@@ -57,6 +57,28 @@ fn admin_url(url: &str) -> String {
     url.to_string()
 }
 
+/// 换掉 URL 里的库名，保留账号、主机、端口与查询参数。
+fn with_database(url: &str, db: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((base, tail)) => {
+            let query = tail.find('?').map(|i| &tail[i..]).unwrap_or("");
+            format!("{base}/{db}{query}")
+        }
+        None => format!("{url}/{db}"),
+    }
+}
+
+/// 替换连接串里的账号密码，用于验证低权限角色的降级路径。
+fn with_user(url: &str, user: &str, password: &str) -> String {
+    if let Some(idx) = url.find("://") {
+        let (scheme, rest) = url.split_at(idx + 3);
+        if let Some(at) = rest.find('@') {
+            return format!("{scheme}{user}:{password}@{}", &rest[at + 1..]);
+        }
+    }
+    url.to_string()
+}
+
 struct Fixture {
     schema: String,
     role_createdb: String,
@@ -167,20 +189,29 @@ fn check<'a>(checks: &'a [CheckResult], id: &str) -> &'a CheckResult {
 }
 
 async fn run_fixture(fixture: &Fixture, check_ids: &[String]) -> core_lib::ops::inspection::types::InspectionSnapshot {
-    let client = DbClient::new_default(&fixture.client_url)
-        .await
-        .expect("创建 PG 连接池失败");
-    let ctx = OpsContext::new(
-        client,
-        "inspection-pg-e2e".into(),
-        fixture.db_name.clone(),
-        true,
-    );
     let thresholds = InspectionThresholds {
         unused_index_min_uptime_hours: 0,
         unused_index_min_snapshots: 1,
         ..InspectionThresholds::default()
     };
+    run_with(&fixture.client_url, &fixture.db_name, check_ids, thresholds).await
+}
+
+async fn run_with(
+    url: &str,
+    db_name: &str,
+    check_ids: &[String],
+    thresholds: InspectionThresholds,
+) -> core_lib::ops::inspection::types::InspectionSnapshot {
+    let client = DbClient::new_default(url)
+        .await
+        .expect("创建 PG 连接池失败");
+    let ctx = OpsContext::new(
+        client,
+        "inspection-pg-e2e".into(),
+        db_name.to_string(),
+        true,
+    );
     run_inspection(&ctx, check_ids, &thresholds, "manual", &[], &[])
         .await
         .expect("PG 巡检执行失败")
@@ -368,5 +399,230 @@ async fn inspection_pg_skips_unsupported_accounts_without_false_negative() {
             item.check_id
         );
     }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn inspection_pg_unused_index_degrades_when_track_counts_off() {
+    let Some(url) = base_url() else {
+        eprintln!("INSPECTION_PG_URL 未设置，跳过 PG track_counts 降级验证");
+        return;
+    };
+    let fixture = Fixture::setup(&url).await;
+    let mut conn = fixture.admin.acquire().await.expect("获取管理连接失败");
+    let original: String = sqlx::query("SHOW track_counts")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("读取 track_counts 失败")
+        .get(0);
+    sqlx::query("ALTER SYSTEM SET track_counts = off")
+        .execute(&mut *conn)
+        .await
+        .expect("关闭 track_counts 失败");
+    sqlx::query("SELECT pg_reload_conf()")
+        .execute(&mut *conn)
+        .await
+        .expect("重载配置失败");
+
+    let mut toggled = false;
+    for _ in 0..30 {
+        let value: String = sqlx::query("SHOW track_counts")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("读取 track_counts 失败")
+            .get(0);
+        if value.eq_ignore_ascii_case("off") {
+            toggled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let snapshot = run_with(
+        &fixture.client_url,
+        &fixture.db_name,
+        &[CHECK_UNUSED_INDEX.to_string()],
+        InspectionThresholds::default(),
+    )
+    .await;
+
+    // 无论断言是否通过都要还原实例配置，避免污染后续用例。
+    sqlx::query(&format!("ALTER SYSTEM SET track_counts = {original}"))
+        .execute(&mut *conn)
+        .await
+        .expect("还原 track_counts 失败");
+    sqlx::query("SELECT pg_reload_conf()")
+        .execute(&mut *conn)
+        .await
+        .expect("重载配置失败");
+    for _ in 0..30 {
+        let value: String = sqlx::query("SHOW track_counts")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("读取 track_counts 失败")
+            .get(0);
+        if value.eq_ignore_ascii_case(&original) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    assert!(toggled, "track_counts 未成功切换为 off");
+    let unused = check(&snapshot.checks, CHECK_UNUSED_INDEX);
+    assert_eq!(unused.status, CheckStatus::Skipped);
+    let reason = unused.skipped_reason.as_deref().unwrap_or("");
+    println!("\n=== track_counts=off 降级 ===\n{reason}");
+    assert!(
+        reason.contains("track_counts=off"),
+        "降级原因必须点名 track_counts: {reason}"
+    );
+    assert!(
+        reason.contains("0 条") || reason.contains("冒充"),
+        "降级原因必须说明不能返回空结果冒充: {reason}"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn inspection_pg_unused_index_degrades_after_stats_reset() {
+    let Some(url) = base_url() else {
+        eprintln!("INSPECTION_PG_URL 未设置，跳过 PG 统计重置降级验证");
+        return;
+    };
+    let fixture = Fixture::setup(&url).await;
+    let db = format!("insp_reset_{}", unique_suffix());
+    {
+        let mut conn = fixture.admin.acquire().await.expect("获取管理连接失败");
+        // 统计窗口判定要求 uptime 明显大于 stats_reset，全新实例可能不足 60 秒。
+        let uptime: i64 = sqlx::query(
+            "SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint AS uptime",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("读取实例运行时长失败")
+        .get(0);
+        if uptime <= 61 {
+            tokio::time::sleep(std::time::Duration::from_secs((62 - uptime) as u64)).await;
+        }
+        sqlx::query(&format!("CREATE DATABASE {db}"))
+            .execute(&mut *conn)
+            .await
+            .unwrap_or_else(|err| panic!("创建独立库失败: {err}"));
+    }
+
+    // 独立库 + 独立表：pg_stat_reset() 只影响该库，不污染其它用例。
+    let db_url = with_database(&url, &db);
+    let db_pool = PgPool::connect(&db_url).await.expect("连接独立库失败");
+    for sql in [
+        "CREATE TABLE reset_demo(id int PRIMARY KEY, a int)".to_string(),
+        "CREATE INDEX idx_reset_demo_a ON reset_demo(a)".to_string(),
+        "ANALYZE reset_demo".to_string(),
+        "SELECT pg_stat_reset()".to_string(),
+    ] {
+        if let Err(err) = sqlx::query(&sql).execute(&db_pool).await {
+            panic!("准备独立库失败: {err}\nSQL: {sql}");
+        }
+    }
+    drop(db_pool);
+
+    let snapshot = run_with(
+        &db_url,
+        &db,
+        &[CHECK_UNUSED_INDEX.to_string()],
+        InspectionThresholds {
+            unused_index_min_uptime_hours: 24,
+            unused_index_min_snapshots: 1,
+            ..InspectionThresholds::default()
+        },
+    )
+    .await;
+
+    let mut conn = fixture.admin.acquire().await.expect("获取管理连接失败");
+    sqlx::query(&format!("DROP DATABASE {db} WITH (FORCE)"))
+        .execute(&mut *conn)
+        .await
+        .expect("清理独立库失败");
+
+    let unused = check(&snapshot.checks, CHECK_UNUSED_INDEX);
+    assert_eq!(
+        unused.status,
+        CheckStatus::Skipped,
+        "统计刚重置且窗口不足阈值时必须 skipped: {:?}",
+        unused.skipped_reason
+    );
+    let reason = unused.skipped_reason.as_deref().unwrap_or("");
+    println!("\n=== 统计重置降级 ===\n{reason}");
+    assert!(
+        reason.contains("已被重置"),
+        "降级原因必须说明统计已重置: {reason}"
+    );
+    assert!(
+        reason.contains("24 小时"),
+        "降级原因必须给出阈值: {reason}"
+    );
+    assert!(
+        !reason.contains("窗口不足") || reason.contains("避免误报"),
+        "不得误报为普通窗口不足: {reason}"
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn inspection_pg_passwordless_degrades_for_low_privilege_role() {
+    let Some(url) = base_url() else {
+        eprintln!("INSPECTION_PG_URL 未设置，跳过 PG 权限降级验证");
+        return;
+    };
+    let fixture = Fixture::setup(&url).await;
+    let role = format!("insp_limited_{}", unique_suffix());
+    {
+        let mut conn = fixture.admin.acquire().await.expect("获取管理连接失败");
+        for sql in [
+            format!("DROP ROLE IF EXISTS {role}"),
+            format!("CREATE ROLE {role} LOGIN PASSWORD 'insp_limited_pw'"),
+        ] {
+            if let Err(err) = sqlx::query(&sql).execute(&mut *conn).await {
+                panic!("准备低权限角色失败: {err}\nSQL: {sql}");
+            }
+        }
+    }
+
+    let limited_url = with_search_path(
+        &with_user(&url, &role, "insp_limited_pw"),
+        &fixture.schema,
+    );
+    let snapshot = run_with(
+        &limited_url,
+        &fixture.db_name,
+        &[CHECK_PASSWORDLESS_ACCOUNT.to_string()],
+        InspectionThresholds::default(),
+    )
+    .await;
+
+    {
+        let mut conn = fixture.admin.acquire().await.expect("获取管理连接失败");
+        let sql = format!("DROP ROLE IF EXISTS {role}");
+        sqlx::query(&sql)
+            .execute(&mut *conn)
+            .await
+            .expect("清理低权限角色失败");
+    }
+
+    let passwordless = check(&snapshot.checks, CHECK_PASSWORDLESS_ACCOUNT);
+    assert_eq!(passwordless.status, CheckStatus::Skipped);
+    let reason = passwordless.skipped_reason.as_deref().unwrap_or("");
+    println!("\n=== 低权限账号检查降级 ===\n{reason}");
+    assert!(
+        reason.contains("pg_authid"),
+        "降级原因必须点名 pg_authid: {reason}"
+    );
+    assert!(
+        reason.contains("假阴性"),
+        "降级原因必须说明不返回假阴性: {reason}"
+    );
+    assert!(
+        reason.contains("pg_hba_file_rules") && reason.contains("超级用户"),
+        "pg_hba_file_rules 的权限要求也要显式说明: {reason}"
+    );
     fixture.cleanup().await;
 }
