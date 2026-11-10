@@ -714,6 +714,17 @@ fn checksum_rows(primary_key: &str, rows: &[Value]) -> u32 {
     hasher.finalize()
 }
 
+/// 解析同步主键定义。单列主键返回单元素；复合主键按逗号拆分为多列，
+/// 供 SQLite 的 ON CONFLICT(...) 冲突目标使用。
+fn split_primary_key(primary_key: &str) -> Vec<String> {
+    primary_key
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn generate_statements(diff: &RowDiff, db_type: &DbType) -> Vec<String> {
     let qi = |s: &str| sql_util::quote_ident(s, db_type.clone());
     let mut stmts = Vec::new();
@@ -816,13 +827,39 @@ fn generate_statements(diff: &RowDiff, db_type: &DbType) -> Vec<String> {
                     }
                 }
                 _ => {
-                    // SQLite and others: INSERT OR REPLACE
-                    stmts.push(format!(
-                        "INSERT OR REPLACE INTO {} ({}) VALUES ({});",
-                        qi(&diff.table_name),
-                        cols.join(", "),
-                        vals.join(", ")
-                    ));
+                    // SQLite：不能用 INSERT OR REPLACE。SQLite 的 REPLACE 语义是
+                    // 先 DELETE 冲突行再 INSERT，会触发外键 ON DELETE CASCADE 和
+                    // delete 触发器，父表更新一行可能连带删掉子表数据。
+                    // 改用 ON CONFLICT(pk) DO UPDATE，与 MySQL / PG 的 upsert 对齐。
+                    let pk_cols = split_primary_key(&diff.primary_key);
+                    let updates: Vec<String> = non_pk_updates
+                        .iter()
+                        .filter(|c| !pk_cols.iter().any(|pk| pk.eq_ignore_ascii_case(c)))
+                        .map(|c| format!("{} = excluded.{}", qi(c), qi(c)))
+                        .collect();
+                    let conflict_target = pk_cols
+                        .iter()
+                        .map(|c| qi(c))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if updates.is_empty() {
+                        stmts.push(format!(
+                            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING;",
+                            qi(&diff.table_name),
+                            cols.join(", "),
+                            vals.join(", "),
+                            conflict_target
+                        ));
+                    } else {
+                        stmts.push(format!(
+                            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {};",
+                            qi(&diff.table_name),
+                            cols.join(", "),
+                            vals.join(", "),
+                            conflict_target,
+                            updates.join(", ")
+                        ));
+                    }
                 }
             }
         }
@@ -1129,7 +1166,204 @@ mod tests {
             deletes: vec![],
         };
         let stmts = generate_statements(&diff, &DbType::SQLite);
-        assert!(stmts[0].contains("INSERT OR REPLACE"));
+        // 断言变更为 ON CONFLICT：INSERT OR REPLACE 在 SQLite 上是先 DELETE 再
+        // INSERT，会级联删除子表并触发 delete 触发器，不能用于行级同步。
+        assert!(
+            stmts[0].starts_with("INSERT INTO"),
+            "SQLite 不得再生成 INSERT OR REPLACE: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("ON CONFLICT (\"id\") DO UPDATE SET"),
+            "SQLite 冲突目标应为主键: {}",
+            stmts[0]
+        );
+        assert!(stmts[0].contains("\"name\" = excluded.\"name\""), "{}", stmts[0]);
+        assert!(!stmts[0].contains("OR REPLACE"), "{}", stmts[0]);
+    }
+
+    #[test]
+    fn generate_statements_sqlite_composite_pk_conflict_target() {
+        let diff = RowDiff {
+            table_name: "members".to_string(),
+            primary_key: "tenant_id, id".to_string(),
+            mode: SyncMode::UpsertOnly,
+            insert_count: 1,
+            update_count: 0,
+            delete_count: 0,
+            inserts: vec![serde_json::json!({"tenant_id": 7, "id": 1, "name": "alice"})],
+            updates: vec![],
+            deletes: vec![],
+        };
+        let stmts = generate_statements(&diff, &DbType::SQLite);
+        assert!(
+            stmts[0].contains("ON CONFLICT (\"tenant_id\", \"id\") DO UPDATE SET"),
+            "复合主键冲突目标生成错误: {}",
+            stmts[0]
+        );
+        // 冲突目标里的两列都不能出现在 UPDATE SET 中。
+        assert!(
+            !stmts[0].contains("\"tenant_id\" = excluded"),
+            "主键列不应被更新: {}",
+            stmts[0]
+        );
+        assert!(
+            !stmts[0].contains("\"id\" = excluded"),
+            "主键列不应被更新: {}",
+            stmts[0]
+        );
+        assert!(stmts[0].contains("\"name\" = excluded.\"name\""), "{}", stmts[0]);
+    }
+
+    /// 真库用例：SQLite 父表 upsert 已存在行后，子表数据必须原样存在，
+    /// 且父表的 delete 触发器不得被触发。
+    #[tokio::test]
+    async fn sqlite_upsert_keeps_children_and_skips_delete_trigger() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mysql_engine_sqlite_upsert_{}_{}.db",
+            std::process::id(),
+            stamp
+        ));
+        let url = format!("sqlite://{}?mode=rwc", path.to_string_lossy());
+        // 单连接：PRAGMA 是连接级的，必须保证外键与递归触发器在所有语句上生效。
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // REPLACE 冲突删除行时，SQLite 只在开启递归触发器时才触发 delete 触发器，
+        // 这里显式打开，才能钉死“修复前会触发”的行为。
+        sqlx::query("PRAGMA recursive_triggers = ON")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE parent (
+                 id INTEGER PRIMARY KEY,
+                 name TEXT NOT NULL
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE child (
+                 id INTEGER PRIMARY KEY,
+                 parent_id INTEGER NOT NULL REFERENCES parent(id) ON DELETE CASCADE,
+                 note TEXT NOT NULL
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE parent_delete_log (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 parent_id INTEGER NOT NULL
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER parent_after_delete AFTER DELETE ON parent BEGIN
+                 INSERT INTO parent_delete_log(parent_id) VALUES (OLD.id);
+             END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO parent (id, name) VALUES (1, 'old')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO child (id, parent_id, note) VALUES (10, 1, 'keep')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let diff = RowDiff {
+            table_name: "parent".to_string(),
+            primary_key: "id".to_string(),
+            mode: SyncMode::UpsertOnly,
+            insert_count: 0,
+            update_count: 1,
+            delete_count: 0,
+            inserts: vec![],
+            updates: vec![
+                (
+                    serde_json::json!({"id": 1, "name": "old"}),
+                    serde_json::json!({"id": 1, "name": "new"}),
+                ),
+            ],
+            deletes: vec![],
+        };
+        let statements = generate_statements(&diff, &DbType::SQLite);
+        assert_eq!(statements.len(), 1);
+        for stmt in &statements {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+
+        let name: String = sqlx::query_scalar("SELECT name FROM parent WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "new", "父表应被更新为新值");
+        let child_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM child WHERE parent_id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(child_count, 1, "upsert 不得级联删除子表数据");
+        let child_note: String = sqlx::query_scalar("SELECT note FROM child WHERE id = 10")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(child_note, "keep", "子表数据必须原样存在");
+        let delete_log: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parent_delete_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(delete_log, 0, "upsert 不得触发父表 delete 触发器");
+
+        // 说明修复前的行为：同样的行如果走 INSERT OR REPLACE，会先 DELETE，
+        // 外键 ON DELETE CASCADE 删掉子表，并且 delete 触发器被触发。
+        // 这段只用于固化“旧语义有害”的事实，不作为生产路径。
+        sqlx::query("INSERT OR REPLACE INTO parent (id, name) VALUES (1, 'legacy')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let child_after_replace: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM child WHERE parent_id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            child_after_replace, 0,
+            "INSERT OR REPLACE 应级联删除子表（修复前的坏行为）"
+        );
+        let delete_log_after_replace: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM parent_delete_log")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            delete_log_after_replace, 1,
+            "INSERT OR REPLACE 应触发 delete 触发器（修复前的坏行为）"
+        );
+
+        drop(pool);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -6,7 +6,10 @@
 //! docker run -d --rm --name perf-pg-stats \
 //!   -p 127.0.0.1:55433:5432 \
 //!   -e POSTGRES_PASSWORD=password -e POSTGRES_DB=perf_pg \
-//!   postgres:16 -c shared_preload_libraries=pg_stat_statements -c track_counts=on
+//!   postgres:16 -c shared_preload_libraries=pg_stat_statements
+//!
+//! 注意：不要在启动参数里加 `-c track_counts=on`。命令行参数的优先级高于
+//! ALTER SYSTEM，会导致 track_counts 降级用例无法切换而失败。
 //!
 //! PERF_PG_URL='postgres://postgres:password@127.0.0.1:55433/perf_pg' \
 //!   cargo test -p core_lib --test perf_diagnostics_pg -- --nocapture --test-threads=1
