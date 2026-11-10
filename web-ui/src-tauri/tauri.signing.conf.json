@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "macOS": {
+      "signingIdentity": "Developer ID Application: <YOUR NAME> (<TEAMID>)",
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist",
+      "providerShortName": "<TEAMID>"
+    }
+  }
+}
