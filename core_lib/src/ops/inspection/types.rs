@@ -97,6 +97,11 @@ pub struct CheckResult {
     pub checked_objects: usize,
     pub duration_ms: u64,
     pub skipped_reason: Option<String>,
+    /// 同一检查项内引擎不具备的能力（例如 PG 没有 DATA_FREE、没有表级 collation）。
+    /// 检查项整体仍然执行，但必须把这些子规则明确标注为不适用，
+    /// 不能用近似指标替代，也不能静默缺失。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_applicable: Vec<String>,
 }
 
 impl CheckResult {
@@ -111,6 +116,7 @@ impl CheckResult {
             checked_objects: 0,
             duration_ms: 0,
             skipped_reason: Some(reason.into()),
+            not_applicable: Vec::new(),
         }
     }
 }
@@ -568,6 +574,7 @@ mod tests {
                     checked_objects: 3,
                     duration_ms: 5,
                     skipped_reason: None,
+                    not_applicable: Vec::new(),
                 },
                 CheckResult::skipped("unused_index", "未使用索引", "r", "权限不足"),
             ],

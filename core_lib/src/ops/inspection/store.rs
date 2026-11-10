@@ -622,6 +622,7 @@ mod tests {
                 checked_objects: 1,
                 duration_ms: 1,
                 skipped_reason: None,
+                not_applicable: Vec::new(),
             }],
         }
     }
@@ -883,6 +884,7 @@ mod tests {
                 duration_ms: 1,
                 skipped_reason: (status == CheckStatus::Skipped)
                     .then(|| "performance_schema 不可用".to_string()),
+                not_applicable: Vec::new(),
             }],
         }
     }

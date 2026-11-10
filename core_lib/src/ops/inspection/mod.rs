@@ -4,6 +4,7 @@ pub mod alert;
 pub mod checks;
 pub mod diff;
 pub mod notify;
+pub mod pg_checks;
 pub mod presets;
 pub mod redact;
 pub mod runner;

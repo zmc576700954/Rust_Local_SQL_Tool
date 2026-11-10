@@ -1137,7 +1137,7 @@ fn schema_literal(ctx: &OpsContext) -> String {
     format!("'{}'", escape_sql_string(&ctx.db_name))
 }
 
-fn skipped(
+pub(crate) fn skipped(
     descriptor: &CheckDescriptor,
     reason: impl Into<String>,
     started: Instant,
@@ -1147,7 +1147,7 @@ fn skipped(
     result
 }
 
-fn finish(
+pub(crate) fn finish(
     descriptor: &CheckDescriptor,
     evidence: Vec<EvidenceItem>,
     checked_objects: usize,
@@ -1173,6 +1173,7 @@ fn finish(
         checked_objects,
         duration_ms: started.elapsed().as_millis() as u64,
         skipped_reason: None,
+        not_applicable: Vec::new(),
     }
 }
 
@@ -1670,6 +1671,21 @@ pub async fn collect_check(
             format!("未知检查项: {check_id}"),
         );
     };
+    // PostgreSQL 的目录/统计视图与 MySQL 完全不同，逐项走独立采集，
+    // 不支持的子规则在结果里显式标注，不用近似指标顶替。
+    if ctx.is_postgres() {
+        return crate::ops::inspection::pg_checks::collect_check(
+            ctx,
+            check_id,
+            thresholds,
+            history,
+            current_at,
+            active_unused_alert_keys,
+            descriptor,
+            started,
+        )
+        .await;
+    }
     match check_id {
         CHECK_REDUNDANT_INDEX => {
             check_redundant_indexes(ctx, thresholds, descriptor, started).await
@@ -1834,6 +1850,7 @@ mod tests {
                 checked_objects: 1,
                 duration_ms: 1,
                 skipped_reason: None,
+                not_applicable: Vec::new(),
             }],
         }
     }

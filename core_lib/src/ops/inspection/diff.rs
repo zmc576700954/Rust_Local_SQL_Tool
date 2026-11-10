@@ -138,6 +138,7 @@ mod tests {
             checked_objects: 1,
             duration_ms: 1,
             skipped_reason: None,
+            not_applicable: Vec::new(),
         }
     }
 

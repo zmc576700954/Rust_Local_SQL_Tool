@@ -85,6 +85,10 @@ impl OpsContext {
         )
     }
 
+    pub fn is_postgres(&self) -> bool {
+        matches!(self.db_client.db_type(), crate::config::DbType::PostgreSQL)
+    }
+
     pub fn identity(&self) -> PlanIdentity {
         PlanIdentity {
             db_id: self.db_id.clone(),

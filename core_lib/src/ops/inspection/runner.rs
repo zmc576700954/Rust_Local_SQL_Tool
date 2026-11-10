@@ -19,9 +19,9 @@ pub async fn run_inspection(
     history: &[InspectionSnapshot],
     active_unused_alert_keys: &[String],
 ) -> Result<InspectionSnapshot, OpsError> {
-    if !ctx.is_mysql_family() {
+    if !ctx.is_mysql_family() && !ctx.is_postgres() {
         return Err(OpsError::Validation(
-            "首期巡检只支持 MySQL/MariaDB；PostgreSQL/SQLite 仍为实验性".into(),
+            "首期巡检只支持 MySQL/MariaDB/PostgreSQL；SQLite 仍为实验性".into(),
         ));
     }
     if ctx.db_name.trim().is_empty() {
@@ -107,6 +107,7 @@ mod tests {
             checked_objects: 0,
             duration_ms: 1,
             skipped_reason: None,
+            not_applicable: Vec::new(),
         }
     }
 

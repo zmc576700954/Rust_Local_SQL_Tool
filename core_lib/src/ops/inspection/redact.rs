@@ -757,6 +757,7 @@ mod tests {
             checked_objects: 1,
             duration_ms: 1,
             skipped_reason: Some("mysql://root:pass@127.0.0.1:3306/app".into()),
+            not_applicable: Vec::new(),
         };
         let mut snapshot = InspectionSnapshot {
             snapshot_id: "s1".into(),
