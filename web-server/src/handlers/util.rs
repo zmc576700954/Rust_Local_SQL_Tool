@@ -46,6 +46,29 @@ pub fn require_mysql_connection(conn: &DbConnection, feature: &str) -> Result<()
     }
 }
 
+/// 连接配置层面的能力守卫：按连接实际引擎查询能力位。
+///
+/// 与 `require_mysql_connection` 的区别：这里不再写死 MySQL，
+/// 而是以 `DbCapabilities` 为准（例如 data_sync 在 PG 接通后为 true）。
+pub fn require_connection_capability(
+    conn: &DbConnection,
+    capability: &str,
+    feature: &str,
+) -> Result<(), AppError> {
+    let db_type = conn
+        .db_type
+        .clone()
+        .or_else(|| DbType::from_url(&conn.url))
+        .unwrap_or(DbType::MySQL);
+    let caps = core_lib::db::capability::DbCapabilities::runtime_capabilities(&db_type);
+    caps.check_capability(capability).map_err(|e| {
+        AppError::BadRequest(format!(
+            "{}：{}（当前连接为 {:?}），请切换到已支持该能力的连接后再使用",
+            feature, e, db_type
+        ))
+    })
+}
+
 /// 导出前按目录统计估算行数与平均行宽（best effort）。
 ///
 /// 只做轻量目录查询；统计信息缺失时才回退到一次有 3 秒上限的采样，

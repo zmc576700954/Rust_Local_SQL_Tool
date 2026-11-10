@@ -5,16 +5,19 @@ use axum::{
     Json,
 };
 use core_lib::{
-    db::{capability::DbCapabilities, DbClient},
+    db::DbClient,
     error::AppError,
     mysql_sync::{CompareResult, MySqlDataSyncEngine, PreviewResult, SyncMode},
+    sync::{PgDataSyncEngine, PgDataSyncOptions, PgDataSyncProgress, PgDataSyncReport},
     timeout_policy::TimeoutPolicy,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::quote_mysql_ident;
-use crate::handlers::util::{require_mysql_client, require_mysql_connection};
+use crate::handlers::util::{
+    require_connection_capability, require_mysql_client, require_mysql_connection,
+};
 
 use crate::state::*;
 use crate::{get_temp_db_client, GAP_TOO_LARGE_MSG};
@@ -91,17 +94,10 @@ pub async fn mysql_sync_compare(
             .iter()
             .find(|c| c.id == req.target_db_id);
         if let Some(conn) = source_conn {
-            require_mysql_connection(conn, "MySQL 数据同步（源库）")?;
+            require_mysql_connection(conn, "数据同步（源库）")?;
         }
         if let Some(conn) = target_conn {
-            require_mysql_connection(conn, "MySQL 数据同步（目标库）")?;
-        }
-        let db_type = source_conn
-            .and_then(|c| c.db_type.clone())
-            .unwrap_or(core_lib::config::DbType::MySQL);
-        let caps = DbCapabilities::runtime_capabilities(&db_type);
-        if let Err(e) = caps.check_capability("data_sync") {
-            return Err(AppError::BadRequest(e));
+            require_mysql_connection(conn, "数据同步（目标库）")?;
         }
     }
 
@@ -251,16 +247,15 @@ pub async fn mysql_sync_preview(
 
     {
         let config = state.config.read().await;
-        let source_conn = config
-            .db_connections
-            .iter()
-            .find(|c| c.id == job.source_db_id);
-        let db_type = source_conn
-            .and_then(|c| c.db_type.clone())
-            .unwrap_or(core_lib::config::DbType::MySQL);
-        let caps = DbCapabilities::runtime_capabilities(&db_type);
-        if let Err(e) = caps.check_capability("data_sync") {
-            return Err(AppError::BadRequest(e));
+        for (db_id, role) in [(&job.source_db_id, "源库"), (&job.target_db_id, "目标库")] {
+            let conn = config
+                .db_connections
+                .iter()
+                .find(|c| &c.id == db_id)
+                .ok_or_else(|| {
+                    AppError::BadRequest(format!("Database connection {db_id} not found"))
+                })?;
+            require_mysql_connection(conn, &format!("数据同步（{role}）"))?;
         }
     }
 
@@ -366,16 +361,15 @@ pub async fn mysql_sync_deploy(
 
     {
         let config = state.config.read().await;
-        let source_conn = config
-            .db_connections
-            .iter()
-            .find(|c| c.id == job.source_db_id);
-        let db_type = source_conn
-            .and_then(|c| c.db_type.clone())
-            .unwrap_or(core_lib::config::DbType::MySQL);
-        let caps = DbCapabilities::runtime_capabilities(&db_type);
-        if let Err(e) = caps.check_capability("data_sync") {
-            return Err(AppError::BadRequest(e));
+        for (db_id, role) in [(&job.source_db_id, "源库"), (&job.target_db_id, "目标库")] {
+            let conn = config
+                .db_connections
+                .iter()
+                .find(|c| &c.id == db_id)
+                .ok_or_else(|| {
+                    AppError::BadRequest(format!("Database connection {db_id} not found"))
+                })?;
+            require_mysql_connection(conn, &format!("数据同步（{role}）"))?;
         }
     }
 
@@ -489,6 +483,280 @@ pub async fn update_mysql_sync_job(state: &AppState, job_id: &str, f: impl FnOnc
     if let Some(job) = jobs.get_mut(job_id) {
         f(job);
     }
+}
+
+// ── PostgreSQL 分阶段数据同步 ──────────────────────────────
+
+#[derive(Deserialize)]
+pub(crate) struct PgDataSyncRunRequest {
+    source_db_id: String,
+    target_db_id: String,
+    /// None 表示同步默认 schema 下全部普通表。
+    tables: Option<Vec<String>>,
+    mode: Option<SyncMode>,
+    batch_size: Option<usize>,
+    create_missing_tables: Option<bool>,
+    /// mirror 会删除目标库数据，必须显式确认。
+    mirror_confirmed: Option<bool>,
+    single_transaction: Option<bool>,
+    defer_constraints: Option<bool>,
+    allow_no_pk: Option<bool>,
+    resume: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PgDataSyncRunResponse {
+    job_id: String,
+}
+
+pub async fn pg_data_sync_run(
+    State(state): State<AppState>,
+    Json(req): Json<PgDataSyncRunRequest>,
+) -> Result<Json<PgDataSyncRunResponse>, AppError> {
+    let permit = state
+        .job_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            AppError::TooManyRequests(format!(
+                "job concurrency limit exceeded: max={}",
+                state.limits.max_job_concurrency
+            ))
+        })?;
+
+    let mode = req.mode.clone().unwrap_or(SyncMode::UpsertOnly);
+    let mirror_confirmed = req.mirror_confirmed.unwrap_or(false);
+    let single_transaction = req.single_transaction.unwrap_or(false);
+    let defer_constraints = req.defer_constraints.unwrap_or(false);
+    let allow_no_pk = req.allow_no_pk.unwrap_or(false);
+    let resume = req.resume.unwrap_or(false);
+    let create_missing_tables = req.create_missing_tables.unwrap_or(true);
+    let batch_size = req.batch_size.unwrap_or(1000).clamp(1, 10_000);
+
+    if mode == SyncMode::Mirror && !mirror_confirmed {
+        return Err(AppError::BadRequest(
+            "mirror 模式会删除目标库中源库不存在的数据，必须显式确认 mirror_confirmed=true"
+                .to_string(),
+        ));
+    }
+    if single_transaction && resume {
+        return Err(AppError::BadRequest(
+            "single_transaction 与 resume 互斥：单事务作业不可续跑".to_string(),
+        ));
+    }
+
+    {
+        let config = state.config.read().await;
+        for (db_id, role) in [(&req.source_db_id, "源库"), (&req.target_db_id, "目标库")] {
+            let conn = config
+                .db_connections
+                .iter()
+                .find(|c| &c.id == db_id)
+                .ok_or_else(|| {
+                    AppError::BadRequest(format!("Database connection {db_id} not found"))
+                })?;
+            require_connection_capability(conn, "data_sync", &format!("数据同步（{role}）"))?;
+        }
+        let target_read_only = config
+            .db_connections
+            .iter()
+            .find(|c| c.id == req.target_db_id)
+            .map(|c| c.is_read_only)
+            .unwrap_or(false);
+        if target_read_only {
+            return Err(AppError::Forbidden(
+                "当前目标连接为只读模式，禁止执行数据同步".to_string(),
+            ));
+        }
+    }
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+    let initial_tables = req
+        .tables
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| DataSyncTableState {
+            table_name: t,
+            status: "pending".to_string(),
+            rows_copied: 0,
+            total_rows: None,
+            verification: "unverified".to_string(),
+        })
+        .collect();
+    state.data_sync_jobs.write().await.insert(
+        job_id.clone(),
+        DataSyncJob {
+            job_id: job_id.clone(),
+            status: "pending".to_string(),
+            stage: "plan".to_string(),
+            source_db_id: req.source_db_id.clone(),
+            target_db_id: req.target_db_id.clone(),
+            mode: mode.clone(),
+            progress: MySqlSyncProgress::default(),
+            tables: initial_tables,
+            report: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        },
+    );
+
+    let checkpoint_dir = std::env::var("DATA_SYNC_CHECKPOINT_DIR")
+        .unwrap_or_else(|_| "data-sync".to_string());
+    let state_clone = state.clone();
+    let job_id_clone = job_id.clone();
+    let source_db_id = req.source_db_id.clone();
+    let target_db_id = req.target_db_id.clone();
+    let tables = req.tables.clone();
+    tokio::spawn(async move {
+        let _permit = permit;
+        update_data_sync_job(&state_clone, &job_id_clone, |j| {
+            j.status = "running".to_string();
+            j.stage = "plan".to_string();
+            j.progress = MySqlSyncProgress {
+                current: 0,
+                total: 0,
+                message: Some("正在做同步前检查与 Plan".to_string()),
+            };
+            j.updated_at = chrono::Utc::now().timestamp();
+        })
+        .await;
+
+        let state_for_progress = state_clone.clone();
+        let job_for_progress = job_id_clone.clone();
+        let result: Result<PgDataSyncReport, AppError> = async {
+            let (source_client, _) = get_temp_db_client(&state_clone, &source_db_id).await?;
+            let (target_client, _) = get_temp_db_client(&state_clone, &target_db_id).await?;
+            let options = PgDataSyncOptions {
+                tables,
+                mode: mode.clone(),
+                batch_size,
+                create_missing_tables,
+                mirror_confirmed,
+                single_transaction,
+                defer_constraints,
+                allow_no_pk,
+                resume,
+                checkpoint_dir: std::path::PathBuf::from(checkpoint_dir),
+                job_label: format!("{source_db_id}->{target_db_id}"),
+            };
+            PgDataSyncEngine::run(&source_client, &target_client, options, move |p| {
+                let state = state_for_progress.clone();
+                let job_id = job_for_progress.clone();
+                tokio::spawn(async move {
+                    apply_data_sync_progress(&state, &job_id, p).await;
+                });
+            })
+            .await
+        }
+        .await;
+
+        match result {
+            Ok(report) => {
+                let failed =
+                    report.error.is_some() || report.verification_status == "failed";
+                let table_states = report
+                    .tables
+                    .iter()
+                    .map(|t| DataSyncTableState {
+                        table_name: t.table_name.clone(),
+                        status: t.status.clone(),
+                        rows_copied: t.rows_copied,
+                        total_rows: t.source_rows,
+                        verification: t.verification.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                update_data_sync_job(&state_clone, &job_id_clone, |j| {
+                    j.status = if failed { "error" } else { "completed" }.to_string();
+                    j.stage = "done".to_string();
+                    j.tables = table_states;
+                    j.error = report.error.clone();
+                    j.progress = MySqlSyncProgress {
+                        current: report.total_rows,
+                        total: report
+                            .tables
+                            .iter()
+                            .filter_map(|t| t.source_rows)
+                            .sum(),
+                        message: Some(format!(
+                            "同步{}：写入 {} 行，校验状态 {}",
+                            if failed { "失败" } else { "完成" },
+                            report.total_rows,
+                            report.verification_status
+                        )),
+                    };
+                    j.report = Some(report);
+                    j.updated_at = chrono::Utc::now().timestamp();
+                })
+                .await;
+            }
+            Err(e) => {
+                update_data_sync_job(&state_clone, &job_id_clone, |j| {
+                    j.status = "error".to_string();
+                    j.stage = "done".to_string();
+                    j.error = Some(e.to_string());
+                    j.progress = MySqlSyncProgress {
+                        current: 0,
+                        total: 0,
+                        message: Some("同步失败".to_string()),
+                    };
+                    j.updated_at = chrono::Utc::now().timestamp();
+                })
+                .await;
+            }
+        }
+    });
+
+    Ok(Json(PgDataSyncRunResponse { job_id }))
+}
+
+pub async fn pg_data_sync_job_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<DataSyncJob>, AppError> {
+    let job = { state.data_sync_jobs.read().await.get(&job_id).cloned() };
+    job.map(Json)
+        .ok_or_else(|| AppError::NotFound("data sync job not found".to_string()))
+}
+
+async fn update_data_sync_job(state: &AppState, job_id: &str, f: impl FnOnce(&mut DataSyncJob)) {
+    let mut jobs = state.data_sync_jobs.write().await;
+    if let Some(job) = jobs.get_mut(job_id) {
+        f(job);
+    }
+}
+
+async fn apply_data_sync_progress(state: &AppState, job_id: &str, p: PgDataSyncProgress) {
+    let mut jobs = state.data_sync_jobs.write().await;
+    let Some(job) = jobs.get_mut(job_id) else {
+        return;
+    };
+    job.stage = p.stage.clone();
+    job.progress = MySqlSyncProgress {
+        current: p.rows_copied,
+        total: p.total_rows.unwrap_or(0),
+        message: Some(p.message.clone()),
+    };
+    if let Some(table_name) = p.table {
+        if let Some(table) = job.tables.iter_mut().find(|t| t.table_name == table_name) {
+            if p.stage == "load" && table.status == "pending" {
+                table.status = "running".to_string();
+            }
+            table.rows_copied = p.rows_copied;
+            table.total_rows = p.total_rows;
+        } else {
+            job.tables.push(DataSyncTableState {
+                table_name,
+                status: "running".to_string(),
+                rows_copied: p.rows_copied,
+                total_rows: p.total_rows,
+                verification: "unverified".to_string(),
+            });
+        }
+    }
+    job.updated_at = chrono::Utc::now().timestamp();
 }
 
 #[derive(Serialize)]

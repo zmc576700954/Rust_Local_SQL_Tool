@@ -130,6 +130,35 @@ pub struct MySqlSyncJob {
     pub error: Option<String>,
 }
 
+// ----------------- PostgreSQL Data Sync Job Types -----------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataSyncTableState {
+    pub table_name: String,
+    pub status: String,
+    pub rows_copied: u64,
+    pub total_rows: Option<u64>,
+    pub verification: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataSyncJob {
+    pub job_id: String,
+    /// pending / running / completed / error
+    pub status: String,
+    /// plan / structure / load / indexes / sequences / verify / done
+    pub stage: String,
+    pub source_db_id: String,
+    pub target_db_id: String,
+    pub mode: SyncMode,
+    pub progress: MySqlSyncProgress,
+    pub tables: Vec<DataSyncTableState>,
+    pub report: Option<core_lib::sync::PgDataSyncReport>,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 // ----------------- Perf Sync Job Types -----------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +345,7 @@ pub struct AppState {
     pub sql_history: Arc<RwLock<SqlHistoryStore>>,
     pub knowledge_base: Arc<RwLock<KnowledgeBase>>,
     pub sync_jobs: Arc<RwLock<HashMap<String, MySqlSyncJob>>>,
+    pub data_sync_jobs: Arc<RwLock<HashMap<String, DataSyncJob>>>,
     pub perf_sync_jobs: Arc<RwLock<HashMap<String, PerfSyncJob>>>,
     pub active_queries: Arc<RwLock<HashMap<String, ActiveQueryHandle>>>,
     pub transaction_sessions: Arc<RwLock<HashMap<String, SharedTransactionSession>>>,
@@ -387,6 +417,7 @@ pub fn test_state_with_config(config: AppConfig) -> AppState {
         sql_history: Arc::new(RwLock::new(SqlHistoryStore::default())),
         knowledge_base: Arc::new(RwLock::new(KnowledgeBase::default())),
         sync_jobs: Arc::new(RwLock::new(HashMap::new())),
+        data_sync_jobs: Arc::new(RwLock::new(HashMap::new())),
         perf_sync_jobs: Arc::new(RwLock::new(HashMap::new())),
         active_queries: Arc::new(RwLock::new(HashMap::new())),
         transaction_sessions: Arc::new(RwLock::new(HashMap::new())),

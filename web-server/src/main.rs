@@ -4,6 +4,8 @@ mod ai_handlers;
 mod bridge;
 mod handlers;
 #[cfg(test)]
+mod data_sync_integration_pg;
+#[cfg(test)]
 mod import_sql_integration_mysql;
 #[cfg(test)]
 mod import_sql_integration_pg;
@@ -1284,6 +1286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sql_history: Arc::new(RwLock::new(sql_history)),
         knowledge_base: Arc::new(RwLock::new(knowledge_base)),
         sync_jobs: Arc::new(RwLock::new(HashMap::new())),
+        data_sync_jobs: Arc::new(RwLock::new(HashMap::new())),
         perf_sync_jobs: Arc::new(RwLock::new(HashMap::new())),
         active_queries: Arc::new(RwLock::new(HashMap::new())),
         transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -1461,6 +1464,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/tools/data-sync/preview", post(mysql_sync_preview))
         .route("/tools/data-sync/deploy", post(mysql_sync_deploy))
         .route("/tools/data-sync/jobs/:job_id", get(mysql_sync_job_status))
+        .route("/tools/data-sync/run", post(pg_data_sync_run))
+        .route("/tools/data-sync/runs/:job_id", get(pg_data_sync_job_status))
         .route("/tools/perf-sync/start", post(perf_sync_start))
         .route("/tools/perf-sync/check", post(perf_sync_check))
         .route("/tools/perf-sync/jobs/:job_id", get(perf_sync_job_status))
@@ -3587,6 +3592,7 @@ mod tests {
             sql_history: Arc::new(RwLock::new(SqlHistoryStore::default())),
             knowledge_base: Arc::new(RwLock::new(KnowledgeBase::default())),
             sync_jobs: Arc::new(RwLock::new(HashMap::new())),
+            data_sync_jobs: Arc::new(RwLock::new(HashMap::new())),
             perf_sync_jobs: Arc::new(RwLock::new(HashMap::new())),
             active_queries: Arc::new(RwLock::new(HashMap::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -3643,6 +3649,8 @@ mod tests {
             .route("/tools/data-sync/preview", post(mysql_sync_preview))
             .route("/tools/data-sync/deploy", post(mysql_sync_deploy))
             .route("/tools/data-sync/jobs/:job_id", get(mysql_sync_job_status))
+            .route("/tools/data-sync/run", post(pg_data_sync_run))
+            .route("/tools/data-sync/runs/:job_id", get(pg_data_sync_job_status))
             .route("/tools/perf-sync/start", post(perf_sync_start))
             .route("/tools/perf-sync/check", post(perf_sync_check))
             .route("/tools/perf-sync/jobs/:job_id", get(perf_sync_job_status))
