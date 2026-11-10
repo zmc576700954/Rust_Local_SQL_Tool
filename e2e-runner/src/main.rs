@@ -1,4 +1,3 @@
-use axum::{routing::post, Json, Router};
 use chrono::{DateTime, Utc};
 use core_lib::ai::provider_utils;
 use core_lib::config::{AiConnectionMode, AiProvider, AppConfig};
@@ -12,11 +11,9 @@ use sha2::Digest;
 use sqlx::Row;
 use sqlx::{mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -214,91 +211,59 @@ async fn import_job_poll(store: &JobStore, job_id: &str) -> Result<u64, String> 
     Err("import job timeout".to_string())
 }
 
-async fn start_mock_ai_server() -> Result<(SocketAddr, tokio::task::JoinHandle<()>), String> {
-    async fn handler() -> Json<Value> {
-        Json(serde_json::json!({
-            "choices": [
-                { "message": { "content": "pong" } }
-            ]
-        }))
-    }
-
-    let app = Router::new().route("/v1/chat/completions", post(handler));
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| e.to_string())?;
-    let addr = listener.local_addr().map_err(|e| e.to_string())?;
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    Ok((addr, handle))
-}
-
-async fn start_bad_http_proxy() -> Result<(SocketAddr, tokio::task::JoinHandle<()>), String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| e.to_string())?;
-    let addr = listener.local_addr().map_err(|e| e.to_string())?;
-    let handle = tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                break;
-            };
-            tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
-                let resp = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
-                let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, resp).await;
-            });
-        }
-    });
-    Ok((addr, handle))
-}
-
 async fn ai_proxy_failure_split_e2e() -> Result<(), String> {
-    // 注意：mock 服务只能监听 127.0.0.1，而 release/独立二进制里的 health_check 会
-    // 启用 SSRF 校验（只有 cfg!(test) 才跳过），因此“本地 mock 健康检查成功”这一半
-    // 只能在测试模式下成立。这里保留用例以暴露真实行为，不要为此放宽
-    // validate_ai_url 的拦截规则。
-    let (mock_addr, mock_handle) = start_mock_ai_server().await?;
-    let (proxy_addr, proxy_handle) = start_bad_http_proxy().await?;
-
-    let prev_http_proxy = std::env::var("HTTP_PROXY").ok();
-    let prev_https_proxy = std::env::var("HTTPS_PROXY").ok();
-
+    // 本用例原名“代理分裂”，原本在这里起一个 127.0.0.1 的 mock AI 服务和一个返回 502
+    // 的坏代理，验证“无代理时直连成功、有代理时请求走代理并失败”。
+    //
+    // 这两条无法在独立进程里验：health_check 的 SSRF 校验由
+    // `resolve_endpoint(&profile, !cfg!(test))` 控制，e2e-runner 依赖 core_lib 时是
+    // 非 test 构建，校验恒开；而 mock AI 服务只能监听回环地址，请求在发出前就会被拦掉。
+    // 覆盖已等价迁移到 core_lib/src/ai/provider_utils.rs 的单测
+    // `health_check_succeeds_directly_without_proxy` /
+    // `health_check_uses_proxy_when_http_proxy_set`（同一条
+    // health_check -> resolve_endpoint -> chat_completion_raw 路径，并断言请求确实
+    // 打到 mock / 确实经过代理）。
+    //
+    // 这里只保留不依赖内网监听的部分：本构建（非 test）下 SSRF 判定必须仍然生效。
     let mut config = AppConfig::default();
     if let Some(p) = config.ai_profiles.first_mut() {
         p.provider = AiProvider::Openai;
         p.mode = AiConnectionMode::Relay;
         p.api_key = Some("test".to_string());
-        p.relay_url = Some(format!("http://{}/v1/chat/completions", mock_addr));
+        p.relay_url = Some("http://127.0.0.1:1/v1".to_string());
     }
 
-    std::env::remove_var("HTTP_PROXY");
-    std::env::remove_var("HTTPS_PROXY");
-    let ok = provider_utils::health_check(&config.clone()).await;
-    ensure(
-        ok.is_ok(),
-        format!("ai health should succeed: {:?}", ok.err()),
-    )?;
-
-    std::env::set_var("HTTP_PROXY", format!("http://{}", proxy_addr));
-    let fail = provider_utils::health_check(&config).await;
-    ensure(fail.is_err(), "ai health should fail when proxy enabled")?;
-
-    if let Some(v) = prev_http_proxy {
-        std::env::set_var("HTTP_PROXY", v);
-    } else {
-        std::env::remove_var("HTTP_PROXY");
-    }
-    if let Some(v) = prev_https_proxy {
-        std::env::set_var("HTTPS_PROXY", v);
-    } else {
-        std::env::remove_var("HTTPS_PROXY");
+    match provider_utils::health_check(&config).await {
+        Err(e) => ensure(
+            e.to_string().contains("SSRF protection"),
+            format!(
+                "health check on a loopback relay must be blocked by the SSRF guard, got: {}",
+                e
+            ),
+        )?,
+        Ok(_) => {
+            return Err(
+                "loopback relay must be rejected by the SSRF guard, but health check succeeded"
+                    .to_string(),
+            )
+        }
     }
 
-    proxy_handle.abort();
-    mock_handle.abort();
+    for url in [
+        "http://127.0.0.1/v1/responses",
+        "http://localhost/v1/responses",
+        "http://10.0.0.1/v1/responses",
+        "http://192.168.1.1/v1/responses",
+        "http://172.16.0.1/v1/responses",
+        "http://169.254.169.254/latest/meta-data",
+        "ftp://example.com/v1",
+    ] {
+        ensure(
+            provider_utils::validate_ai_url(url).is_err(),
+            format!("private/internal address must stay blocked: {}", url),
+        )?;
+    }
+
     Ok(())
 }
 
