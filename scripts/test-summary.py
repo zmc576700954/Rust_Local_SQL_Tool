@@ -45,6 +45,10 @@ HASH_SUFFIX = re.compile(r"-[0-9a-f]{16}$")
 # 依赖环境变量的空跑分组：(分组名, 匹配规则, 依赖的环境变量, 说明)
 # web-server 的集成测试是 bin 内的 cfg(test) 模块，用测试名模块前缀识别。
 WEB_SERVER_MODULES = {
+    "data_sync_integration_pg::": (
+        "web-server/data_sync_integration_pg",
+        ["DATA_SYNC_PG_URL"],
+    ),
     "import_sql_integration_mysql::": (
         "web-server/import_sql_integration_mysql",
         ["IMPORT_SQL_MYSQL_URL"],
