@@ -14,6 +14,7 @@ use sqlx::{mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolO
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -255,6 +256,10 @@ async fn start_bad_http_proxy() -> Result<(SocketAddr, tokio::task::JoinHandle<(
 }
 
 async fn ai_proxy_failure_split_e2e() -> Result<(), String> {
+    // 注意：mock 服务只能监听 127.0.0.1，而 release/独立二进制里的 health_check 会
+    // 启用 SSRF 校验（只有 cfg!(test) 才跳过），因此“本地 mock 健康检查成功”这一半
+    // 只能在测试模式下成立。这里保留用例以暴露真实行为，不要为此放宽
+    // validate_ai_url 的拦截规则。
     let (mock_addr, mock_handle) = start_mock_ai_server().await?;
     let (proxy_addr, proxy_handle) = start_bad_http_proxy().await?;
 
@@ -726,9 +731,14 @@ async fn sqlite_flow(
     spec: ExportSpec,
     cases: &mut Vec<PerformanceCase>,
 ) -> Result<(), String> {
+    // sqlx 的 SqliteConnectOptions 默认 create_if_missing=false，首次运行文件不存在时
+    // 直接返回 SQLITE_CANTOPEN(14)。e2e 用例自己负责准备数据库文件，必须显式开启创建。
+    let sqlite_options = sqlx::sqlite::SqliteConnectOptions::from_str(url)
+        .map_err(|e| e.to_string())?
+        .create_if_missing(true);
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
-        .connect(url)
+        .connect_with(sqlite_options)
         .await
         .map_err(|e| e.to_string())?;
 
