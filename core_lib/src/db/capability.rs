@@ -22,8 +22,10 @@ pub fn capability_level(db_type: &DbType) -> DbCapabilityLevel {
         // DDL execution, import/export, structure sync and the staged data-sync
         // pipeline are wired. Ops-center scenarios still depend on MySQL
         // metadata and stay unsupported.
-        // SQLite: connection + SQL execution only; schema browsing and DDL are
-        // deliberately not exposed yet.
+        // SQLite: connection, SQL execution, schema introspection, DDL execution
+        // (table rebuild), import/export and structure sync are wired. The staged
+        // data-sync pipeline is not implemented for SQLite (single-writer, no
+        // checkpoint/resume), so it stays level B instead of A.
         DbType::PostgreSQL | DbType::SQLite => DbCapabilityLevel::B,
         DbType::MongoDB => DbCapabilityLevel::C,
         DbType::SQLServer | DbType::Oracle | DbType::Redis => DbCapabilityLevel::D,
@@ -56,14 +58,16 @@ impl DbCapabilities {
                 supports_struct_sync: true,
                 supports_data_sync: true,
             },
-            // SQLite: connect + SQL execution only. Schema browsing, DDL,
-            // import/export and sync are explicitly not advertised.
+            // SQLite: schema introspection, DDL (in-transaction table rebuild),
+            // import/export and structure sync are wired. Data sync is not:
+            // there is no staged checkpoint/resume pipeline for SQLite and it is
+            // a single-writer engine, so advertising it would be false.
             DbType::SQLite => DbCapabilities {
                 level,
                 supports_sql: true,
-                supports_schema_introspection: false,
-                supports_import_export: false,
-                supports_struct_sync: false,
+                supports_schema_introspection: true,
+                supports_import_export: true,
+                supports_struct_sync: true,
                 supports_data_sync: false,
             },
             // SQL Server / Oracle / MongoDB / Redis have no working connection
@@ -130,13 +134,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_capabilities_sqlite_only_query_execution() {
+    fn runtime_capabilities_sqlite_wires_schema_transfer_and_structure_sync() {
         let caps = DbCapabilities::runtime_capabilities(&DbType::SQLite);
         assert_eq!(caps.level, DbCapabilityLevel::B);
         assert!(caps.supports_sql);
-        assert!(!caps.supports_schema_introspection);
-        assert!(!caps.supports_import_export);
-        assert!(!caps.supports_struct_sync);
+        assert!(caps.supports_schema_introspection);
+        assert!(caps.supports_import_export);
+        assert!(caps.supports_struct_sync);
+        // Data sync stays false: no staged checkpoint/resume pipeline exists for
+        // SQLite, and its single-writer model cannot be claimed as equivalent.
         assert!(!caps.supports_data_sync);
     }
 
@@ -183,11 +189,13 @@ mod tests {
         assert!(pg_caps.check_capability("struct_sync").is_ok());
         assert!(pg_caps.check_capability("data_sync").is_ok());
 
-        // SQLite 仅接通连接与查询执行
+        // SQLite 已接通查询、结构内省、导入导出与结构同步；数据同步仍不支持
         let sqlite_caps = DbCapabilities::runtime_capabilities(&DbType::SQLite);
         assert!(sqlite_caps.check_capability("sql").is_ok());
-        assert!(sqlite_caps.check_capability("schema_introspection").is_err());
-        assert!(sqlite_caps.check_capability("import_export").is_err());
+        assert!(sqlite_caps.check_capability("schema_introspection").is_ok());
+        assert!(sqlite_caps.check_capability("import_export").is_ok());
+        assert!(sqlite_caps.check_capability("struct_sync").is_ok());
+        assert!(sqlite_caps.check_capability("data_sync").is_err());
 
         let mssql_caps = DbCapabilities::runtime_capabilities(&DbType::SQLServer);
         assert!(mssql_caps.check_capability("sql").is_err());

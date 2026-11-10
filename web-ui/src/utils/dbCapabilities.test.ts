@@ -38,18 +38,20 @@ describe('dbCapabilities', () => {
     expect(dbCapabilityShortTag('postgresql')).toMatch(/部分支持|Partial/)
   })
 
-  it('marks SQLite as query-execution only', () => {
+  it('marks SQLite as partial: schema, transfer and structure sync wired, data sync not', () => {
     expect(dbCapabilityLevel('sqlite')).toBe('b')
     expect(dbCapabilities('sqlite')).toEqual({
       level: 'b',
       supports_sql: true,
-      supports_schema_introspection: false,
-      supports_import_export: false,
-      supports_struct_sync: false,
+      supports_schema_introspection: true,
+      supports_import_export: true,
+      supports_struct_sync: true,
+      // Data sync stays false: no staged checkpoint/resume pipeline exists and
+      // SQLite is single-writer.
       supports_data_sync: false,
     })
     expect(dbCapabilityNotice('sqlite')).not.toBeNull()
-    expect(dbCapabilityShortTag('sqlite')).toMatch(/仅查询|Query only/)
+    expect(dbCapabilityShortTag('sqlite')).toMatch(/部分支持|Partial/)
   })
 
   it('marks SQL Server and Oracle as not connectable', () => {

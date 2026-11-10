@@ -78,13 +78,15 @@ export function dbCapabilities(dbType?: DbType | null): DbCapabilities {
     }
   }
   if (dbType === 'sqlite') {
-    // SQLite: connection + SQL execution only; schema browsing and DDL are not exposed.
+    // SQLite: schema introspection, DDL (in-transaction table rebuild),
+    // import/export and structure sync are wired. Data sync is not: there is no
+    // staged checkpoint/resume pipeline and SQLite is single-writer.
     return {
       level,
       supports_sql: true,
-      supports_schema_introspection: false,
-      supports_import_export: false,
-      supports_struct_sync: false,
+      supports_schema_introspection: true,
+      supports_import_export: true,
+      supports_struct_sync: true,
       supports_data_sync: false,
     }
   }
@@ -103,7 +105,7 @@ export function dbCapabilities(dbType?: DbType | null): DbCapabilities {
 export function dbCapabilityShortTag(dbType?: DbType | null): string | null {
   if (dbType === 'mysql' || dbType === 'mariadb') return null
   if (dbType === 'postgresql') return tr('部分支持', 'Partial')
-  if (dbType === 'sqlite') return tr('仅查询', 'Query only')
+  if (dbType === 'sqlite') return tr('部分支持', 'Partial')
   return tr('未实现', 'Not implemented')
 }
 
@@ -121,8 +123,8 @@ export function dbCapabilityNotice(dbType?: DbType | null): string | null {
   }
   if (dbType === 'sqlite') {
     return tr(
-      'SQLite：当前仅支持连接与 SQL 查询执行；结构浏览、DDL、导入导出与同步尚未支持。',
-      'SQLite: connection and SQL query execution only; schema browsing, DDL, import/export and sync are not supported yet.'
+      'SQLite：已支持连接、SQL 执行、结构浏览、DDL（事务内表重建）、导入导出与结构同步（破坏性变更需二次确认）。数据同步尚未支持：没有分阶段 checkpoint/续跑流水线，且 SQLite 为单写者引擎。',
+      'SQLite: connection, SQL execution, schema browsing, DDL (in-transaction table rebuild), import/export and structure sync (destructive changes require a second confirmation) are supported. Data sync is not supported: there is no staged checkpoint/resume pipeline and SQLite is single-writer.'
     )
   }
   if (dbType === 'sqlserver' || dbType === 'oracle') {
