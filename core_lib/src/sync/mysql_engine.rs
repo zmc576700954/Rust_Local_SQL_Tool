@@ -759,17 +759,37 @@ fn generate_statements(diff: &RowDiff, db_type: &DbType) -> Vec<String> {
                             vals.join(", ")
                         ));
                     } else {
+                        // MariaDB 不支持 MySQL 8.0.19+ 的行别名语法（AS new），
+                        // 统一退回 VALUES(col)；目标引擎类型由连接时的 VERSION()
+                        // 纠偏结果决定，避免把 mysql:// 指向的 MariaDB 误判为 MySQL。
+                        let is_mariadb = matches!(db_type, DbType::MariaDB);
                         let updates: Vec<String> = non_pk_updates
                             .iter()
-                            .map(|c| format!("{} = new.{}", qi(c), qi(c)))
+                            .map(|c| {
+                                if is_mariadb {
+                                    format!("{} = VALUES({})", qi(c), qi(c))
+                                } else {
+                                    format!("{} = new.{}", qi(c), qi(c))
+                                }
+                            })
                             .collect();
-                        stmts.push(format!(
-                            "INSERT INTO {} ({}) VALUES ({}) AS new ON DUPLICATE KEY UPDATE {};",
-                            qi(&diff.table_name),
-                            cols.join(", "),
-                            vals.join(", "),
-                            updates.join(", ")
-                        ));
+                        if is_mariadb {
+                            stmts.push(format!(
+                                "INSERT INTO {} ({}) VALUES ({}) ON DUPLICATE KEY UPDATE {};",
+                                qi(&diff.table_name),
+                                cols.join(", "),
+                                vals.join(", "),
+                                updates.join(", ")
+                            ));
+                        } else {
+                            stmts.push(format!(
+                                "INSERT INTO {} ({}) VALUES ({}) AS new ON DUPLICATE KEY UPDATE {};",
+                                qi(&diff.table_name),
+                                cols.join(", "),
+                                vals.join(", "),
+                                updates.join(", ")
+                            ));
+                        }
                     }
                 }
                 DbType::PostgreSQL => {
@@ -1052,6 +1072,29 @@ mod tests {
         let stmts = generate_statements(&diff, &DbType::MySQL);
         assert!(stmts[0].contains("ON DUPLICATE KEY UPDATE"));
         assert!(stmts[0].contains("`name` = new.`name`"));
+    }
+
+    #[test]
+    fn generate_statements_mariadb_upsert_uses_values_function() {
+        let diff = RowDiff {
+            table_name: "users".to_string(),
+            primary_key: "id".to_string(),
+            mode: SyncMode::UpsertOnly,
+            insert_count: 1,
+            update_count: 0,
+            delete_count: 0,
+            inserts: vec![serde_json::json!({"id": 1, "name": "alice"})],
+            updates: vec![],
+            deletes: vec![],
+        };
+        let stmts = generate_statements(&diff, &DbType::MariaDB);
+        assert!(stmts[0].contains("ON DUPLICATE KEY UPDATE"));
+        assert!(stmts[0].contains("`name` = VALUES(`name`)"));
+        assert!(
+            !stmts[0].contains(" AS new "),
+            "MariaDB 不支持行别名语法: {}",
+            stmts[0]
+        );
     }
 
     #[test]
