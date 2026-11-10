@@ -1870,6 +1870,182 @@ pub async fn write_stats_chunk(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn emit_export_row(
+    writer: &mut tokio::io::BufWriter<tokio::fs::File>,
+    bytes: &mut u64,
+    line_count: &mut u64,
+    hasher: &mut sha2::Sha256,
+    max_bytes: u64,
+    budget: &mut core_lib::tools::MemoryBudget,
+    rows_written: &mut u64,
+    export_type: &str,
+    headers: &[String],
+    map: serde_json::Map<String, serde_json::Value>,
+    previous_row: &mut Option<serde_json::Map<String, serde_json::Value>>,
+    is_first_json: &mut bool,
+) -> Result<(), AppError> {
+    let chunk = if export_type == "csv" {
+        DataExporter::csv_row(headers, &map)
+    } else if export_type == "txt" {
+        let mut vals = Vec::new();
+        for h in headers {
+            let v = match map.get(h) {
+                Some(serde_json::Value::Null) | None => String::new(),
+                Some(serde_json::Value::String(s)) => s.replace(['\t', '\n'], " "),
+                Some(v) => v.to_string(),
+            };
+            vals.push(v);
+        }
+        format!("{}\n", vals.join("\t"))
+    } else if export_type == "sql" {
+        if let Some(prev) = previous_row.take() {
+            let s = DataExporter::sql_row_literal(headers, &prev, false);
+            write_stats_chunk(
+                writer,
+                bytes,
+                line_count,
+                hasher,
+                max_bytes,
+                budget,
+                *rows_written,
+                s.as_bytes(),
+            )
+            .await?;
+            *rows_written += 1;
+        }
+        *previous_row = Some(map);
+        return Ok(());
+    } else if export_type == "json" {
+        if let Some(prev) = previous_row.take() {
+            let s = DataExporter::json_row(&prev, *is_first_json, false);
+            write_stats_chunk(
+                writer,
+                bytes,
+                line_count,
+                hasher,
+                max_bytes,
+                budget,
+                *rows_written,
+                s.as_bytes(),
+            )
+            .await?;
+            *rows_written += 1;
+            *is_first_json = false;
+        }
+        *previous_row = Some(map);
+        return Ok(());
+    } else if export_type == "xml" {
+        let mut s = String::new();
+        s.push_str("  <row>\n");
+        for h in headers {
+            let val_s = match map.get(h) {
+                Some(serde_json::Value::Null) | None => String::new(),
+                Some(serde_json::Value::String(v)) => v.clone(),
+                Some(v) => v.to_string(),
+            };
+            s.push_str(&format!(
+                "    <col name=\"{}\">{}</col>\n",
+                escape_xml(h),
+                escape_xml(&val_s)
+            ));
+        }
+        s.push_str("  </row>\n");
+        s
+    } else {
+        return Ok(());
+    };
+
+    // csv/txt/xml 的构造器都已自带行尾换行，直接写出即可。
+    write_stats_chunk(
+        writer,
+        bytes,
+        line_count,
+        hasher,
+        max_bytes,
+        budget,
+        *rows_written,
+        chunk.as_bytes(),
+    )
+    .await?;
+    *rows_written += 1;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_export_rows(
+    writer: &mut tokio::io::BufWriter<tokio::fs::File>,
+    bytes: &mut u64,
+    line_count: &mut u64,
+    hasher: &mut sha2::Sha256,
+    max_bytes: u64,
+    budget: &mut core_lib::tools::MemoryBudget,
+    rows_written: &mut u64,
+    export_type: &str,
+    headers: &[String],
+    previous_row: Option<serde_json::Map<String, serde_json::Value>>,
+    is_first_json: bool,
+) -> Result<(), AppError> {
+    if export_type == "sql" {
+        if let Some(prev) = previous_row {
+            let s = DataExporter::sql_row_literal(headers, &prev, true);
+            write_stats_chunk(
+                writer,
+                bytes,
+                line_count,
+                hasher,
+                max_bytes,
+                budget,
+                *rows_written,
+                s.as_bytes(),
+            )
+            .await?;
+            *rows_written += 1;
+        }
+    } else if export_type == "json" {
+        if let Some(prev) = previous_row {
+            let s = DataExporter::json_row(&prev, is_first_json, true);
+            write_stats_chunk(
+                writer,
+                bytes,
+                line_count,
+                hasher,
+                max_bytes,
+                budget,
+                *rows_written,
+                s.as_bytes(),
+            )
+            .await?;
+            *rows_written += 1;
+        } else {
+            write_stats_chunk(
+                writer,
+                bytes,
+                line_count,
+                hasher,
+                max_bytes,
+                budget,
+                *rows_written,
+                b"[]\n",
+            )
+            .await?;
+        }
+    } else if export_type == "xml" {
+        write_stats_chunk(
+            writer,
+            bytes,
+            line_count,
+            hasher,
+            max_bytes,
+            budget,
+            *rows_written,
+            b"</rows>\n</export>\n",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn fetch_table_columns(
     pool: &sqlx::MySqlPool,
     table_name: &str,
@@ -1974,6 +2150,23 @@ async fn run_export_job_text_protocol(
         "SELECT * FROM {}{}{}{}",
         table_ident, where_sql, order_sql, limit_sql
     );
+
+    if matches!(db_type, DbType::SQLite) {
+        return run_export_job_sqlite(
+            db_client,
+            state,
+            job_id,
+            req,
+            data_path,
+            max_bytes,
+            memory_limit,
+            export_type,
+            is_excel_compat,
+            &data_sql,
+        )
+        .await;
+    }
+
     // 表头与自定义类型目录一次读出：空表也能输出正确的列名，且流式循环
     // 不再需要额外的池连接（SSH 隧道下连接池上限为 1，二次取连接会卡死）。
     let pool = db_client
@@ -2128,107 +2321,21 @@ async fn run_export_job_text_protocol(
         };
         let map = pg_row_to_json_with_catalog(&row, &headers, &catalog);
 
-        if export_type == "csv" {
-            let s = DataExporter::csv_row(&headers, &map);
-            write_stats_chunk(
-                &mut writer,
-                &mut bytes,
-                &mut line_count,
-                &mut hasher,
-                max_bytes,
-                &mut budget,
-                rows_written,
-                s.as_bytes(),
-            )
-            .await?;
-            rows_written += 1;
-        } else if export_type == "txt" {
-            let mut vals = Vec::new();
-            for h in &headers {
-                let v = match map.get(h) {
-                    Some(serde_json::Value::Null) | None => String::new(),
-                    Some(serde_json::Value::String(s)) => s.replace(['\t', '\n'], " "),
-                    Some(v) => v.to_string(),
-                };
-                vals.push(v);
-            }
-            let line = format!("{}\n", vals.join("\t"));
-            write_stats_chunk(
-                &mut writer,
-                &mut bytes,
-                &mut line_count,
-                &mut hasher,
-                max_bytes,
-                &mut budget,
-                rows_written,
-                line.as_bytes(),
-            )
-            .await?;
-            rows_written += 1;
-        } else if export_type == "sql" {
-            if let Some(prev) = previous_row.take() {
-                let s = DataExporter::sql_row_literal(&headers, &prev, false);
-                write_stats_chunk(
-                    &mut writer,
-                    &mut bytes,
-                    &mut line_count,
-                    &mut hasher,
-                    max_bytes,
-                    &mut budget,
-                    rows_written,
-                    s.as_bytes(),
-                )
-                .await?;
-                rows_written += 1;
-            }
-            previous_row = Some(map);
-        } else if export_type == "json" {
-            if let Some(prev) = previous_row.take() {
-                let s = DataExporter::json_row(&prev, is_first_json, false);
-                write_stats_chunk(
-                    &mut writer,
-                    &mut bytes,
-                    &mut line_count,
-                    &mut hasher,
-                    max_bytes,
-                    &mut budget,
-                    rows_written,
-                    s.as_bytes(),
-                )
-                .await?;
-                rows_written += 1;
-                is_first_json = false;
-            }
-            previous_row = Some(map);
-        } else if export_type == "xml" {
-            let mut s = String::new();
-            s.push_str("  <row>\n");
-            for h in &headers {
-                let val_s = match map.get(h) {
-                    Some(serde_json::Value::Null) | None => String::new(),
-                    Some(serde_json::Value::String(v)) => v.clone(),
-                    Some(v) => v.to_string(),
-                };
-                s.push_str(&format!(
-                    "    <col name=\"{}\">{}</col>\n",
-                    escape_xml(h),
-                    escape_xml(&val_s)
-                ));
-            }
-            s.push_str("  </row>\n");
-            write_stats_chunk(
-                &mut writer,
-                &mut bytes,
-                &mut line_count,
-                &mut hasher,
-                max_bytes,
-                &mut budget,
-                rows_written,
-                s.as_bytes(),
-            )
-            .await?;
-            rows_written += 1;
-        }
+        emit_export_row(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            &mut budget,
+            &mut rows_written,
+            &export_type,
+            &headers,
+            map,
+            &mut previous_row,
+            &mut is_first_json,
+        )
+        .await?;
 
         if rows_written > 0 && rows_written % 2000 == 0 {
             let written = rows_written;
@@ -2241,51 +2348,75 @@ async fn run_export_job_text_protocol(
         }
     }
 
-    if export_type == "sql" {
-        if let Some(prev) = previous_row {
-            let s = DataExporter::sql_row_literal(&headers, &prev, true);
-            write_stats_chunk(
-                &mut writer,
-                &mut bytes,
-                &mut line_count,
-                &mut hasher,
-                max_bytes,
-                &mut budget,
-                rows_written,
-                s.as_bytes(),
-            )
-            .await?;
-            rows_written += 1;
-        }
-    } else if export_type == "json" {
-        if let Some(prev) = previous_row {
-            let s = DataExporter::json_row(&prev, is_first_json, true);
-            write_stats_chunk(
-                &mut writer,
-                &mut bytes,
-                &mut line_count,
-                &mut hasher,
-                max_bytes,
-                &mut budget,
-                rows_written,
-                s.as_bytes(),
-            )
-            .await?;
-            rows_written += 1;
-        } else {
-            write_stats_chunk(
-                &mut writer,
-                &mut bytes,
-                &mut line_count,
-                &mut hasher,
-                max_bytes,
-                &mut budget,
-                rows_written,
-                b"[]\n",
-            )
-            .await?;
-        }
-    } else if export_type == "xml" {
+    finish_export_rows(
+        &mut writer,
+        &mut bytes,
+        &mut line_count,
+        &mut hasher,
+        max_bytes,
+        &mut budget,
+        &mut rows_written,
+        &export_type,
+        &headers,
+        previous_row,
+        is_first_json,
+    )
+    .await?;
+
+    writer
+        .flush()
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+
+    Ok(ExportStats {
+        sha256: format!("{:x}", hasher.finalize()),
+        line_count,
+        bytes,
+        row_count: rows_written,
+    })
+}
+
+/// SQLite 导出：与 PG 路径一致，逐行流式读取并复用 `MemoryBudget`，
+/// 不把结果集整体 fetch_all 到内存。列顺序来自 `PRAGMA table_xinfo`，
+/// 生成列也在 `SELECT *` 中，保证表头与数据列一一对应。
+#[allow(clippy::too_many_arguments)]
+async fn run_export_job_sqlite(
+    db_client: &DbClient,
+    state: &AppState,
+    job_id: &str,
+    req: &ExportJobStartRequest,
+    data_path: &str,
+    max_bytes: u64,
+    memory_limit: u64,
+    export_type: &str,
+    is_excel_compat: bool,
+    data_sql: &str,
+) -> Result<ExportStats, AppError> {
+    use futures::TryStreamExt;
+    use sha2::Digest;
+    use tokio::io::AsyncWriteExt;
+
+    let pool = db_client
+        .pool
+        .sqlite()
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let headers = core_lib::schema::sqlite::export_columns(pool, &req.table_name)
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let table_ident = core_lib::sql_util::quote_table_ref_checked(&req.table_name, &db_client.db_type)
+        .map_err(AppError::BadRequest)?;
+
+    let file = tokio::fs::File::create(data_path)
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let mut writer = tokio::io::BufWriter::new(file);
+    let mut bytes: u64 = 0;
+    let mut line_count: u64 = 0;
+    let mut hasher = sha2::Sha256::new();
+    let mut budget = core_lib::tools::MemoryBudget::new(memory_limit);
+    let mut rows_written: u64 = 0;
+
+    if is_excel_compat {
         write_stats_chunk(
             &mut writer,
             &mut bytes,
@@ -2294,10 +2425,139 @@ async fn run_export_job_text_protocol(
             max_bytes,
             &mut budget,
             rows_written,
-            b"</rows>\n</export>\n",
+            b"\xEF\xBB\xBF",
         )
         .await?;
     }
+
+    if export_type == "csv" && !headers.is_empty() {
+        let header = DataExporter::csv_header(&headers);
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            &mut budget,
+            rows_written,
+            header.as_bytes(),
+        )
+        .await?;
+    } else if export_type == "txt" && !headers.is_empty() {
+        let mut s = String::new();
+        s.push_str(&headers.join("\t"));
+        s.push('\n');
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            &mut budget,
+            rows_written,
+            s.as_bytes(),
+        )
+        .await?;
+    } else if export_type == "sql" && !headers.is_empty() {
+        let quoted_headers: Vec<String> = headers
+            .iter()
+            .map(|h| {
+                core_lib::sql_util::quote_ident_pg_checked(h)
+                    .unwrap_or_else(|_| core_lib::sql_util::quote_ident_pg(h))
+            })
+            .collect();
+        let header = DataExporter::sql_header_quoted(&table_ident, &quoted_headers);
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            &mut budget,
+            rows_written,
+            header.as_bytes(),
+        )
+        .await?;
+    } else if export_type == "xml" {
+        let mut s = String::new();
+        s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        s.push_str(&format!(
+            "<export schema_version=\"1\" table=\"{}\">\n",
+            escape_xml(&req.table_name)
+        ));
+        s.push_str("<columns>\n");
+        for h in &headers {
+            s.push_str(&format!("  <column name=\"{}\" />\n", escape_xml(h)));
+        }
+        s.push_str("</columns>\n<rows>\n");
+        write_stats_chunk(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            &mut budget,
+            rows_written,
+            s.as_bytes(),
+        )
+        .await?;
+    }
+
+    let mut is_first_json = true;
+    let mut previous_row: Option<serde_json::Map<String, serde_json::Value>> = None;
+    let mut stream = sqlx::query(data_sql).fetch(pool);
+    while let Some(row) = stream
+        .try_next()
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?
+    {
+        let mut map = serde_json::Map::with_capacity(headers.len());
+        for (idx, name) in headers.iter().enumerate() {
+            map.insert(
+                name.clone(),
+                core_lib::sql_util::sqlite_cell_to_value(&row, idx),
+            );
+        }
+        emit_export_row(
+            &mut writer,
+            &mut bytes,
+            &mut line_count,
+            &mut hasher,
+            max_bytes,
+            &mut budget,
+            &mut rows_written,
+            export_type,
+            &headers,
+            map,
+            &mut previous_row,
+            &mut is_first_json,
+        )
+        .await?;
+        if rows_written > 0 && rows_written % 2000 == 0 {
+            let written = rows_written;
+            update_tool_job(state, job_id, |j| {
+                j.status = ToolJobStatus::Running;
+                j.progress.current = written;
+                j.progress.message = Some(format!("exported {} rows", written));
+            })
+            .await;
+        }
+    }
+
+    finish_export_rows(
+        &mut writer,
+        &mut bytes,
+        &mut line_count,
+        &mut hasher,
+        max_bytes,
+        &mut budget,
+        &mut rows_written,
+        export_type,
+        &headers,
+        previous_row,
+        is_first_json,
+    )
+    .await?;
 
     writer
         .flush()
@@ -2831,6 +3091,9 @@ async fn run_import_job_text_protocol(
     req: ImportJobStartRequest,
 ) -> Result<serde_json::Value, AppError> {
     let db_type = db_client.db_type.clone();
+    if matches!(db_type, DbType::SQLite) {
+        return run_import_job_sqlite(db_client, state, job_id, req).await;
+    }
     let table_ident = core_lib::sql_util::quote_table_ref_checked(&req.table_name, &db_type)
         .map_err(AppError::BadRequest)?;
 
@@ -2983,6 +3246,107 @@ async fn run_import_job_text_protocol(
         "remaining": remaining,
         "failure_policy": if req.skip_errors { "continue" } else { "stop" },
         "error_details": details,
+        "message": message,
+    }))
+}
+
+/// SQLite 导入：单事务、整批回滚。
+///
+/// `skip_errors` 与整批原子性冲突，这里显式拒绝而不是静默降级；
+/// 并发写者由 `BEGIN IMMEDIATE` + busy_timeout 显式拒绝。
+async fn run_import_job_sqlite(
+    db_client: &DbClient,
+    state: &AppState,
+    job_id: &str,
+    req: ImportJobStartRequest,
+) -> Result<serde_json::Value, AppError> {
+    if req.skip_errors {
+        return Err(AppError::BadRequest(
+            "SQLite 导入使用整批原子事务，失败会回滚整个任务，不支持 skip_errors。"
+                .to_string(),
+        ));
+    }
+    let mapped_cols: Vec<(String, String)> = req
+        .mapping
+        .into_iter()
+        .filter(|(_, src)| !src.is_empty())
+        .collect();
+    if mapped_cols.is_empty() {
+        return Err(AppError::BadRequest("No columns mapped".to_string()));
+    }
+    let db_cols: Vec<String> = mapped_cols.iter().map(|(db, _)| db.clone()).collect();
+    // 缺失源列不能静默写成 NULL：显式失败，整批事务随后回滚。
+    let mut rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(req.data.len());
+    for (row_idx, row) in req.data.iter().enumerate() {
+        let mut values = Vec::with_capacity(mapped_cols.len());
+        for (_, src) in &mapped_cols {
+            match row.get(src) {
+                Some(value) => values.push(value.clone()),
+                None => {
+                    return Err(AppError::BadRequest(format!(
+                        "第 {} 行缺少映射的源列 {}：不会用 NULL 静默替代",
+                        row_idx + 1,
+                        src
+                    )));
+                }
+            }
+        }
+        rows.push(values);
+    }
+    let total = rows.len() as u64;
+
+    update_tool_job(state, job_id, |j| {
+        j.status = ToolJobStatus::Running;
+        j.progress.current = 0;
+        j.progress.message = Some("SQLite 导入事务已开始".to_string());
+    })
+    .await;
+
+    let pool = db_client
+        .pool
+        .sqlite()
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let outcome = core_lib::sqlite_transfer::import_rows_atomic(
+        pool,
+        &req.table_name,
+        &db_cols,
+        &rows,
+    )
+    .await
+    .map_err(crate::db_error_to_app)?;
+
+    update_tool_job(state, job_id, |j| {
+        j.progress.current = outcome.inserted;
+        j.progress.message = Some(format!("SQLite 已提交 {} 行", outcome.inserted));
+    })
+    .await;
+
+    let success = !outcome.rolled_back && outcome.error.is_none();
+    let failed_row = outcome.failed_row;
+    let message = if success {
+        format!("已成功写入 {} 行（SQLite 单事务提交）。", outcome.inserted)
+    } else {
+        format!(
+            "SQLite 导入为整批原子事务：第 {} 行失败，已回滚本次全部 {} 行，库中未保留任何本次导入的数据。错误：{}",
+            failed_row.unwrap_or(0),
+            total,
+            outcome.error.clone().unwrap_or_default()
+        )
+    };
+    Ok(serde_json::json!({
+        "success": success,
+        "completed": !outcome.rolled_back,
+        "inserted": outcome.inserted,
+        "errors": if success { 0 } else { 1 },
+        "total": total,
+        "failed_row": failed_row,
+        "failed_rows": failed_row.map(|r| vec![r]).unwrap_or_default(),
+        "remaining": if outcome.rolled_back { total } else { 0 },
+        "failure_policy": "rollback",
+        "atomic": true,
+        "rolled_back": outcome.rolled_back,
+        "rollback_scope": outcome.rollback_scope,
+        "error_details": outcome.error.clone().map(|e| vec![e]).unwrap_or_default(),
         "message": message,
     }))
 }
@@ -4044,6 +4408,139 @@ mod tests {
         assert_eq!(engine_label(&DbType::MySQL), "mysql");
         assert_eq!(engine_label(&DbType::MariaDB), "mariadb");
         assert_eq!(engine_label(&DbType::SQLite), "sqlite");
+    }
+
+    async fn sqlite_export_client(name: &str) -> (DbClient, std::path::PathBuf) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "go_live_export_{}_{}_{}",
+            name,
+            std::process::id(),
+            stamp
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            dir.join("test.db").to_string_lossy()
+        );
+        let client = DbClient::new_default(&url)
+            .await
+            .expect("创建 SQLite 文件库失败");
+        (client, dir)
+    }
+
+    fn sqlite_export_req(table: &str) -> ExportJobStartRequest {
+        ExportJobStartRequest {
+            table_name: table.to_string(),
+            export_type: "csv".to_string(),
+            where_clause: None,
+            primary_key: None,
+            pk_start: None,
+            pk_end: None,
+            window_limit: None,
+            window_offset: None,
+            db_id: None,
+        }
+    }
+
+    /// 500 行约 400B/行的数据，单行远小于 4KB 内存预算：
+    /// 导出必须逐行流出，而不是把整表 fetch_all 到内存。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_export_streams_rows_within_memory_budget() {
+        let (client, dir) = sqlite_export_client("stream").await;
+        let pool = client.pool.sqlite().unwrap();
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, payload TEXT)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "WITH RECURSIVE seq(n) AS (
+                 SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 500
+             )
+             INSERT INTO t (id, payload)
+             SELECT n, replace(hex(zeroblob(200)), '0', 'x') FROM seq",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let state = test_state_with_config(AppConfig::default());
+        let data_path = dir.join("out.csv");
+        let stats = run_export_job_sqlite(
+            &client,
+            &state,
+            "job",
+            &sqlite_export_req("t"),
+            data_path.to_str().unwrap(),
+            10 * 1024 * 1024,
+            4096,
+            "csv",
+            false,
+            "SELECT * FROM \"t\" ORDER BY id",
+        )
+        .await
+        .expect("流式导出应在单行内存预算内完成");
+
+        assert_eq!(stats.row_count, 500);
+        assert!(
+            stats.bytes > 4096,
+            "总输出必须大于单行预算，才能证明不是整表驻留: {}",
+            stats.bytes
+        );
+        let text = std::fs::read_to_string(&data_path).unwrap();
+        assert_eq!(text.lines().count(), 501, "表头 + 500 行");
+        drop(client);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 单行超过内存预算时必须显式失败，而不是静默写出被截断的内容。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_export_rejects_row_over_memory_budget() {
+        let (client, dir) = sqlite_export_client("oversize").await;
+        let pool = client.pool.sqlite().unwrap();
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, payload TEXT)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO t (id, payload)
+             VALUES (1, replace(hex(zeroblob(1000)), '0', 'x'))",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let state = test_state_with_config(AppConfig::default());
+        let data_path = dir.join("out.csv");
+        let err = match run_export_job_sqlite(
+            &client,
+            &state,
+            "job",
+            &sqlite_export_req("t"),
+            data_path.to_str().unwrap(),
+            10 * 1024 * 1024,
+            128,
+            "csv",
+            false,
+            "SELECT * FROM \"t\"",
+        )
+        .await
+        {
+            Ok(stats) => panic!(
+                "超预算行必须触发导出内存上限错误，实际写入了 {} 行",
+                stats.row_count
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, AppError::ExportMemoryLimit { .. }),
+            "unexpected error: {err:?}"
+        );
+        drop(client);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
