@@ -11,14 +11,15 @@
 //!   INSERT INTO "__sqlite_sync_new_x" (...) SELECT ... FROM "x";
 //!   DROP TABLE "x";
 //!   ALTER TABLE "__sqlite_sync_new_x" RENAME TO "x";
-//!   CREATE INDEX ... / CREATE TRIGGER ...
+//!   CREATE INDEX ... / CREATE TRIGGER ... / 视图
+//!   PRAGMA foreign_key_check;      -- 校验最终结构，有孤儿行则回滚
 //! COMMIT;
 //! PRAGMA legacy_alter_table = OFF;
 //! PRAGMA foreign_keys = ON;
 //! ```
 //!
-//! SQLite 的 DDL 是事务性的，任何一步失败都会回滚到重建前的旧表；
-//! 脚本末尾的 PRAGMA 恢复在失败路径由执行器兜底。
+//! SQLite 的 DDL 是事务性的，任何一步失败（含外键校验失败）都会回滚到
+//! 重建前的旧表；PRAGMA 的设置在成功/失败路径都由执行器恢复为进入前的值。
 //!
 //! 表达式索引/部分索引无法在 `IndexInfo` 里完整表达：生成计划时进入
 //! `unsupported` 并跳过该表的重建，避免生成一张结构被削弱的表。
@@ -31,12 +32,21 @@ use sqlx::{Row, SqlitePool};
 
 pub const REBUILD_MARKER: &str = "-- sqlite-rebuild-plan";
 
+/// 脚本内声明需要做外键校验的表（JSON 数组，包含被重建/新建的表）。
+const CHECK_MARKER_PREFIX: &str = "-- sqlite-rebuild-check: ";
+const BODY_BEGIN_MARKER: &str = "-- sqlite-rebuild-body-begin";
+const BODY_END_MARKER: &str = "-- sqlite-rebuild-body-end";
+/// 错误里最多展开的外键违规条数，其余只给总数。
+const FK_VIOLATION_DETAIL_LIMIT: usize = 10;
+
 #[derive(Debug, Clone, Default)]
 pub struct SqliteDdlPlan {
     /// 事务内语句（不含 PRAGMA/BEGIN/COMMIT）。
     pub statements: Vec<String>,
     pub destructive: Vec<DestructiveChange>,
     pub unsupported: Vec<String>,
+    /// COMMIT 前做外键校验的表（重建/新建的表）。
+    pub check_tables: Vec<String>,
 }
 
 impl SqliteDdlPlan {
@@ -44,13 +54,22 @@ impl SqliteDdlPlan {
         let mut out = String::new();
         out.push_str(REBUILD_MARKER);
         out.push('\n');
+        out.push_str(CHECK_MARKER_PREFIX);
+        out.push_str(
+            &serde_json::to_string(&self.check_tables).unwrap_or_else(|_| "[]".to_string()),
+        );
+        out.push('\n');
         out.push_str("PRAGMA foreign_keys = OFF;\n");
         out.push_str("PRAGMA legacy_alter_table = ON;\n");
         out.push_str("BEGIN;\n");
+        out.push_str(BODY_BEGIN_MARKER);
+        out.push('\n');
         for stmt in &self.statements {
             out.push_str(stmt.trim().trim_end_matches(';'));
             out.push_str(";\n");
         }
+        out.push_str(BODY_END_MARKER);
+        out.push('\n');
         out.push_str("COMMIT;\n");
         out.push_str("PRAGMA legacy_alter_table = OFF;\n");
         out.push_str("PRAGMA foreign_keys = ON;\n");
@@ -287,6 +306,7 @@ impl SqliteSchemaSyncEngine {
                         .push(create_table_sql(src, &src.table_name));
                     push_index_statements(&mut plan, src);
                     push_trigger_statements(&mut plan, src, &[]);
+                    plan.check_tables.push(src.table_name.clone());
                 }
                 "modified" => {
                     let reasons = unsupported_index_reasons(src);
@@ -307,6 +327,7 @@ impl SqliteSchemaSyncEngine {
                     // DROP TABLE 会一并删除触发器；重建后必须无条件恢复，
                     // 不能因为源/目标定义相同而跳过。
                     push_trigger_statements(&mut plan, src, &[]);
+                    plan.check_tables.push(src.table_name.clone());
                 }
                 _ => {
                     // 表本身没变，但触发器可能不同。
@@ -662,9 +683,12 @@ fn quote_ident(name: &str) -> String {
 
 /// 执行结构同步脚本。
 ///
-/// `PRAGMA foreign_keys` 是连接级开关，事务内设置无效：脚本在 `BEGIN`
-/// 之前关闭、`COMMIT` 之后恢复；这里额外兜底记录原值，失败时也恢复，
-/// 避免把连接留在 `foreign_keys=OFF` 的状态。
+/// `PRAGMA foreign_keys` 是连接级开关，事务内设置无效：在 `BEGIN` 之前关闭，
+/// 无论成功、校验失败还是执行出错，最后都恢复为进入连接前的值，避免把连接
+/// 留在 `foreign_keys=OFF` 导致后续写入失去约束。
+///
+/// 事务内、`COMMIT` 之前会先恢复索引/触发器/视图，再对重建后的表做
+/// `PRAGMA foreign_key_check`；发现孤儿行则整笔重建回滚并报出明细。
 pub fn execute_script<'a>(
     pool: &'a SqlitePool,
     script: &'a str,
@@ -675,6 +699,9 @@ pub fn execute_script<'a>(
                 "SQLite 结构同步脚本缺少 sqlite-rebuild-plan 标记".to_string(),
             ));
         }
+        let check_tables = parse_check_tables(script)?;
+        let body = extract_rebuild_body(script)?;
+
         // PRAGMA 是连接级状态，必须在同一条连接上读取并恢复，
         // 否则可能读到池里另一条连接的默认值。
         let mut conn = pool.acquire().await?;
@@ -682,17 +709,48 @@ pub fn execute_script<'a>(
         let original_legacy = pragma_int(&mut conn, "legacy_alter_table").await?;
 
         use sqlx::Executor;
-        let result = Executor::execute(&mut *conn, sqlx::raw_sql(script)).await;
+        // 事务外切换连接级 PRAGMA；事务内设置 foreign_keys 不会生效。
+        let setup = Executor::execute(
+            &mut *conn,
+            sqlx::raw_sql("PRAGMA foreign_keys = OFF;\nPRAGMA legacy_alter_table = ON;"),
+        )
+        .await;
+
+        let result = match setup {
+            Err(err) => Err(DbError::from(err)),
+            Ok(_) => run_rebuild_transaction(&mut conn, body, check_tables.as_deref()).await,
+        };
+
         if result.is_err() {
-            // 脚本可能停在事务中间；回滚后再恢复 PRAGMA。
+            // 事务可能停在重建中途；回滚后原表仍在。
             let _ = Executor::execute(&mut *conn, sqlx::raw_sql("ROLLBACK")).await;
         }
+        // 任何路径都恢复 PRAGMA，包括校验失败/建表失败/COMMIT 失败。
         let legacy_sql = format!("PRAGMA legacy_alter_table = {}", original_legacy);
         let _ = Executor::execute(&mut *conn, sqlx::raw_sql(&legacy_sql)).await;
         let fk_sql = format!("PRAGMA foreign_keys = {}", original_fk);
         let _ = Executor::execute(&mut *conn, sqlx::raw_sql(&fk_sql)).await;
-        result.map(|_| ()).map_err(DbError::from)
+        result
     }
+}
+
+async fn run_rebuild_transaction(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    body: &str,
+    check_tables: Option<&[String]>,
+) -> Result<(), DbError> {
+    use sqlx::Executor;
+    Executor::execute(&mut **conn, sqlx::raw_sql("BEGIN")).await?;
+    Executor::execute(&mut **conn, sqlx::raw_sql(body)).await?;
+
+    // 索引/触发器/视图已在 body 中恢复，这里校验的是最终结构。
+    let violations = collect_fk_violations(conn, check_tables).await?;
+    if !violations.is_empty() {
+        return Err(fk_violation_error(&violations));
+    }
+
+    Executor::execute(&mut **conn, sqlx::raw_sql("COMMIT")).await?;
+    Ok(())
 }
 
 pub async fn execute_plan(pool: &SqlitePool, plan: &SqliteDdlPlan) -> Result<(), DbError> {
@@ -710,6 +768,116 @@ async fn pragma_int(
         .fetch_one(&mut **conn)
         .await?;
     Ok(row.try_get::<i64, _>(0).unwrap_or(0))
+}
+
+/// 读取脚本声明的校验表清单；旧脚本没有该行时返回 `None`，
+/// 退回全库校验，避免漏检。
+fn parse_check_tables(script: &str) -> Result<Option<Vec<String>>, DbError> {
+    let line = script
+        .lines()
+        .find(|line| line.trim_start().starts_with(CHECK_MARKER_PREFIX));
+    let Some(line) = line else {
+        return Ok(None);
+    };
+    let payload = line.trim_start()[CHECK_MARKER_PREFIX.len()..].trim();
+    serde_json::from_str::<Vec<String>>(payload).map(Some).map_err(|err| {
+        DbError::Unsupported(format!(
+            "SQLite 重建脚本的校验表清单无法解析（{err}）：{payload}"
+        ))
+    })
+}
+
+/// 取出 `BEGIN` 与 `COMMIT` 之间的重建语句；PRAGMA/事务边界由执行器控制。
+fn extract_rebuild_body(script: &str) -> Result<&str, DbError> {
+    let begin = script.find(BODY_BEGIN_MARKER).ok_or_else(|| {
+        DbError::Unsupported("SQLite 重建脚本缺少 body-begin 标记".to_string())
+    })? + BODY_BEGIN_MARKER.len();
+    let end = script[begin..]
+        .find(BODY_END_MARKER)
+        .map(|offset| begin + offset)
+        .ok_or_else(|| DbError::Unsupported("SQLite 重建脚本缺少 body-end 标记".to_string()))?;
+    Ok(&script[begin..end])
+}
+
+#[derive(Debug, Clone)]
+struct FkViolation {
+    child_table: String,
+    rowid: Option<i64>,
+    parent_table: String,
+    fk_id: i64,
+}
+
+/// 在事务内执行 `PRAGMA foreign_key_check`。
+///
+/// 选择全库扫描而不是逐表 `foreign_key_check(<table>)`：重建父表主键时，
+/// 受影响的是其他子表，逐表检查只覆盖“自己作为子表”的情况。全库扫描
+/// 后再按本次重建/新建的表过滤，既能覆盖父子两侧，又不会因无关表的
+/// 历史孤儿数据阻塞同步。成本是遍历所有带外键的表，桌面单机库可接受。
+async fn collect_fk_violations(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    check_tables: Option<&[String]>,
+) -> Result<Vec<FkViolation>, DbError> {
+    if matches!(check_tables, Some(tables) if tables.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&mut **conn)
+        .await?;
+    let mut violations = Vec::new();
+    for row in rows {
+        let child_table: String = row.try_get(0).unwrap_or_default();
+        let rowid: Option<i64> = row.try_get(1).ok().flatten();
+        let parent_table: String = row.try_get(2).unwrap_or_default();
+        let fk_id: i64 = row.try_get(3).unwrap_or(0);
+        let relevant = match check_tables {
+            Some(tables) => tables.iter().any(|table| {
+                table.eq_ignore_ascii_case(&child_table)
+                    || table.eq_ignore_ascii_case(&parent_table)
+            }),
+            None => true,
+        };
+        if relevant {
+            violations.push(FkViolation {
+                child_table,
+                rowid,
+                parent_table,
+                fk_id,
+            });
+        }
+    }
+    Ok(violations)
+}
+
+fn fk_violation_error(violations: &[FkViolation]) -> DbError {
+    let mut message = format!(
+        "SQLite 外键校验失败，已回滚表重建：共 {} 条违规。",
+        violations.len()
+    );
+    for (index, violation) in violations
+        .iter()
+        .take(FK_VIOLATION_DETAIL_LIMIT)
+        .enumerate()
+    {
+        let rowid = match violation.rowid {
+            Some(rowid) => format!("rowid={rowid}"),
+            None => "rowid=NULL（WITHOUT ROWID 表无法从 foreign_key_check 定位单行）".to_string(),
+        };
+        message.push_str(&format!(
+            "\n{}. 子表 \"{}\"，父表 \"{}\"，{}，fk#={}",
+            index + 1,
+            violation.child_table,
+            violation.parent_table,
+            rowid,
+            violation.fk_id
+        ));
+    }
+    if violations.len() > FK_VIOLATION_DETAIL_LIMIT {
+        message.push_str(&format!(
+            "\n... 其余 {} 条未展开",
+            violations.len() - FK_VIOLATION_DETAIL_LIMIT
+        ));
+    }
+    DbError::Unsupported(message)
 }
 
 #[cfg(test)]
@@ -1114,6 +1282,183 @@ mod tests {
                 .len(),
             1
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 父表 p + 子表 t（t.pid -> p.id）；with_orphan 时插入 pid=99 的孤儿行。
+    async fn setup_fk_fixture(client: &DbClient, with_orphan: bool) {
+        let extra_row = if with_orphan { ", (2, 99)" } else { ", (2, 1)" };
+        let sql = format!(
+            "PRAGMA foreign_keys = OFF;
+             CREATE TABLE p (id INTEGER PRIMARY KEY, label TEXT);
+             CREATE TABLE t (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES p(id));
+             INSERT INTO p VALUES (1, 'ok');
+             INSERT INTO t VALUES (1, 1){extra_row};"
+        );
+        // 单条连接执行整段，确保 PRAGMA 与插入落在同一连接上。
+        sqlx::raw_sql(&sql)
+            .execute(client.pool.sqlite().unwrap())
+            .await
+            .expect("setup fk fixture");
+    }
+
+    /// 给源结构加一列 note，触发 t 的表重建。
+    fn add_note_column(source: &mut SchemaResponse) {
+        let t = source
+            .tables
+            .iter_mut()
+            .find(|t| t.table_name == "t")
+            .unwrap();
+        let mut note = t
+            .columns
+            .iter()
+            .find(|c| c.column_name == "pid")
+            .unwrap()
+            .clone();
+        note.column_name = "note".to_string();
+        note.data_type = "TEXT".to_string();
+        note.column_type = "TEXT".to_string();
+        note.is_nullable = "YES".to_string();
+        note.column_comment = None;
+        note.column_key = String::new();
+        note.column_default = None;
+        note.extra = String::new();
+        note.type_warning = None;
+        note.generation_expression = None;
+        note.primary_key_ordinal = None;
+        t.columns.push(note);
+    }
+
+    /// 单连接池，便于验证连接级 PRAGMA 的恢复；进入时 foreign_keys=1。
+    async fn single_conn_pool(path: &str) -> SqlitePool {
+        let url = format!("sqlite://{}?mode=rwc", path);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("open single-connection sqlite pool");
+        let mut conn = pool.acquire().await.expect("acquire sqlite connection");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut *conn)
+            .await
+            .expect("enable foreign_keys for test connection");
+        pool
+    }
+
+    #[tokio::test]
+    async fn fk_check_rejects_orphans_rolls_back_and_restores_pragmas() {
+        let (client, path) = temp_client("fk_orphan").await;
+        setup_fk_fixture(&client, true).await;
+
+        let target = schema(&client).await;
+        let mut source = target.clone();
+        add_note_column(&mut source);
+        let plan = SqliteSchemaSyncEngine::generate_ddl(&source, &target, None, true).unwrap();
+        assert!(
+            plan.check_tables.iter().any(|t| t == "t"),
+            "重建表必须进入外键校验清单: {:?}",
+            plan.check_tables
+        );
+
+        let pool = single_conn_pool(&path).await;
+        let err = execute_script(&pool, &plan.script())
+            .await
+            .expect_err("孤儿行必须让表重建失败");
+        let message = err.to_string();
+        assert!(message.contains("外键校验失败"), "{message}");
+        assert!(message.contains("子表 \"t\""), "{message}");
+        assert!(message.contains("父表 \"p\""), "{message}");
+        assert!(message.contains("rowid=2"), "{message}");
+
+        // 回滚后原表结构不变：仍是 id/pid 两列，没有 note。
+        let columns = sqlx::query("PRAGMA table_info(t)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let names: Vec<String> = columns
+            .iter()
+            .map(|row| row.try_get::<String, _>("name").unwrap())
+            .collect();
+        assert_eq!(names, vec!["id".to_string(), "pid".to_string()]);
+
+        // 原数据不变，孤儿行仍在（没有半成品新表替换原表）。
+        let rows = sqlx::query("SELECT id, pid FROM t ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].try_get::<i64, _>("pid").unwrap(), 99);
+
+        // 临时新表已随事务回滚，没有残留。
+        let leftovers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '__sqlite_sync_new_t%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(leftovers, 0);
+
+        // 同一连接上的 foreign_keys 已恢复为进入前的 1。
+        let mut conn = pool.acquire().await.unwrap();
+        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(fk, 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn fk_check_passes_when_rebuild_has_no_orphans() {
+        let (client, path) = temp_client("fk_clean").await;
+        setup_fk_fixture(&client, false).await;
+
+        let target = schema(&client).await;
+        let mut source = target.clone();
+        add_note_column(&mut source);
+        let plan = SqliteSchemaSyncEngine::generate_ddl(&source, &target, None, true).unwrap();
+
+        let pool = single_conn_pool(&path).await;
+        execute_script(&pool, &plan.script())
+            .await
+            .expect("无孤儿行时重建应成功");
+
+        // 新列已生效，数据完整。
+        let columns = sqlx::query("PRAGMA table_info(t)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let names: Vec<String> = columns
+            .iter()
+            .map(|row| row.try_get::<String, _>("name").unwrap())
+            .collect();
+        assert!(names.contains(&"note".to_string()), "{names:?}");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // 事务结束后全库外键校验为空。
+        let violations = sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(
+            violations.is_empty(),
+            "重建成功后不应有外键违规，实际 {} 条",
+            violations.len()
+        );
+
+        // PRAGMA 同样恢复为进入前的 1。
+        let mut conn = pool.acquire().await.unwrap();
+        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(fk, 1);
+
         let _ = std::fs::remove_file(path);
     }
 }
