@@ -172,49 +172,42 @@ function statusClass(status: string): string {
 
 type OpsView = 'advisor' | 'perf' | 'inspection' | 'field'
 
-function OpsViewTabs({ view, onChange }: { view: OpsView; onChange: (view: OpsView) => void }) {
+function OpsViewTabs({
+  view,
+  onChange,
+  disabledViews,
+}: {
+  view: OpsView
+  onChange: (view: OpsView) => void
+  disabledViews?: Partial<Record<OpsView, string>>
+}) {
+  const tab = (target: OpsView, activeClass: string, label: string) => {
+    const reason = disabledViews?.[target]
+    return (
+      <button
+        onClick={() => !reason && onChange(target)}
+        disabled={Boolean(reason)}
+        title={reason || ''}
+        className={`rounded border px-3 py-1.5 text-xs ${
+          view === target
+            ? activeClass
+            : 'border-dark-border text-gray-400 hover:bg-dark-panel'
+        } ${reason ? 'cursor-not-allowed opacity-40' : ''}`}
+      >
+        {label}
+      </button>
+    )
+  }
   return (
-    <div className="flex flex-wrap gap-2">
-      <button
-        onClick={() => onChange('advisor')}
-        className={`rounded border px-3 py-1.5 text-xs ${
-          view === 'advisor'
-            ? 'border-blue-500/50 bg-blue-500/10 text-blue-300'
-            : 'border-dark-border text-gray-400 hover:bg-dark-panel'
-        }`}
-      >
-        {tr('索引优化', 'Index advisor')}
-      </button>
-      <button
-        onClick={() => onChange('perf')}
-        className={`rounded border px-3 py-1.5 text-xs ${
-          view === 'perf'
-            ? 'border-purple-500/50 bg-purple-500/10 text-purple-300'
-            : 'border-dark-border text-gray-400 hover:bg-dark-panel'
-        }`}
-      >
-        {tr('性能诊断', 'Performance diagnostics')}
-      </button>
-      <button
-        onClick={() => onChange('inspection')}
-        className={`rounded border px-3 py-1.5 text-xs ${
-          view === 'inspection'
-            ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
-            : 'border-dark-border text-gray-400 hover:bg-dark-panel'
-        }`}
-      >
-        {tr('定期巡检', 'Periodic inspection')}
-      </button>
-      <button
-        onClick={() => onChange('field')}
-        className={`rounded border px-3 py-1.5 text-xs ${
-          view === 'field'
-            ? 'border-sky-500/50 bg-sky-500/10 text-sky-300'
-            : 'border-dark-border text-gray-400 hover:bg-dark-panel'
-        }`}
-      >
-        {tr('字段治理', 'Field governance')}
-      </button>
+    <div className="flex flex-wrap items-center gap-2">
+      {tab('advisor', 'border-blue-500/50 bg-blue-500/10 text-blue-300', tr('索引优化', 'Index advisor'))}
+      {tab('perf', 'border-purple-500/50 bg-purple-500/10 text-purple-300', tr('性能诊断', 'Performance diagnostics'))}
+      {tab(
+        'inspection',
+        'border-emerald-500/50 bg-emerald-500/10 text-emerald-300',
+        tr('定期巡检', 'Periodic inspection')
+      )}
+      {tab('field', 'border-sky-500/50 bg-sky-500/10 text-sky-300', tr('字段治理', 'Field governance'))}
     </div>
   )
 }
@@ -239,17 +232,33 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
 
   const plan = analysis?.plan || null
   const evidence = analysis?.evidence || null
-  // 运维中心四类场景依赖 MySQL 的 information_schema / performance_schema。
-  // dbType 缺省时不做前端阻断，由后端守卫给出权威判断。
-  const mysqlOnlyBlocked = !!dbType && dbType !== 'mysql' && dbType !== 'mariadb'
-  const mysqlOnlyBanner = mysqlOnlyBlocked ? (
+  // MySQL/MariaDB：可执行；PostgreSQL：只读分析；SQLite 等其他引擎仍不支持。
+  const pgReadOnly = dbType === 'postgresql'
+  const opsBlocked = !!dbType && dbType !== 'mysql' && dbType !== 'mariadb' && dbType !== 'postgresql'
+  const blockedBanner = opsBlocked ? (
     <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
       {tr(
-        `当前连接为 ${dbType}：索引优化、性能诊断、定期巡检、字段治理四个场景依赖 MySQL 的 information_schema / performance_schema，本轮仅支持 MySQL / MariaDB。请在连接管理中切换到 MySQL 连接后再使用。`,
-        `Current connection is ${dbType}: the four ops scenarios (index advisor, diagnostics, inspection, field governance) rely on MySQL information_schema / performance_schema and are MySQL-only in this release. Switch to a MySQL connection first.`
+        `当前连接为 ${dbType}：运维中心支持 MySQL / MariaDB（可执行）与 PostgreSQL（只读）；SQLite 仍为实验性。请在连接管理中切换连接后再使用。`,
+        `Current connection is ${dbType}: Ops Center supports MySQL/MariaDB (executable) and PostgreSQL (read-only); SQLite remains experimental. Switch connection first.`
       )}
     </div>
   ) : null
+  const pgReadOnlyBanner = pgReadOnly ? (
+    <div className="rounded-lg border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-200">
+      {tr(
+        'PostgreSQL：插件与性能诊断仅只读分析，不生成可执行 DDL、不提供一键执行；字段治理不可用（写路径仍是 MySQL 方言，level A 不含 PG 字段治理）。',
+        'PostgreSQL: index advisor and diagnostics are read-only; no executable DDL and no apply. Field governance is unavailable (its write path is MySQL-specific; level A excludes PG field governance).'
+      )}
+    </div>
+  ) : null
+  const disabledViews: Partial<Record<OpsView, string>> | undefined = pgReadOnly
+    ? {
+        field: tr(
+          'PostgreSQL 不提供字段治理：写路径仍是 MySQL 方言，尚未重写；level A 不含 PG 字段治理。',
+          'Field governance is unavailable for PostgreSQL: the write path is MySQL-specific and not yet rewritten; level A excludes PG field governance.'
+        ),
+      }
+    : undefined
 
   const workloadSamples = useMemo(
     () =>
@@ -295,11 +304,11 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
   }
 
   const handleAnalyze = async () => {
-    if (mysqlOnlyBlocked) {
+    if (opsBlocked) {
       setError(
         tr(
-          '运维中心当前仅支持 MySQL / MariaDB（依赖 information_schema 与 performance_schema）；请切换到 MySQL 连接后再使用。',
-          'Ops Center currently supports MySQL / MariaDB only (relies on information_schema and performance_schema); switch to a MySQL connection first.'
+          '运维中心支持 MySQL / MariaDB（可执行）与 PostgreSQL（只读）；请切换连接后再使用。',
+          'Ops Center supports MySQL/MariaDB (executable) and PostgreSQL (read-only); switch connection first.'
         )
       )
       return
@@ -449,17 +458,18 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
     }
   }
 
-  const canApprove = Boolean(plan && selectedActions.length > 0 && plan.status === 'pending_approval')
-  const canExecute = Boolean(plan && approval && plan.status === 'approved')
-  const canRollback = Boolean(plan && ['executed', 'failed'].includes(plan.status))
+  const canApprove = Boolean(plan && selectedActions.length > 0 && plan.status === 'pending_approval' && !pgReadOnly)
+  const canExecute = Boolean(plan && approval && plan.status === 'approved' && !pgReadOnly)
+  const canRollback = Boolean(plan && ['executed', 'failed'].includes(plan.status) && !pgReadOnly)
   const policyAllowsApply = Boolean(policy?.policy?.allow_apply)
   const policyEnv = String(policy?.policy?.environment || 'dev')
 
   if (view === 'perf') {
     return (
       <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
-        <OpsViewTabs view={view} onChange={setView} />
-        {mysqlOnlyBanner}
+        <OpsViewTabs view={view} onChange={setView} disabledViews={disabledViews} />
+        {blockedBanner}
+        {pgReadOnlyBanner}
         <PerfDiagnostics dbId={dbId} />
       </div>
     )
@@ -468,8 +478,9 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
   if (view === 'inspection') {
     return (
       <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
-        <OpsViewTabs view={view} onChange={setView} />
-        {mysqlOnlyBanner}
+        <OpsViewTabs view={view} onChange={setView} disabledViews={disabledViews} />
+        {blockedBanner}
+        {pgReadOnlyBanner}
         <InspectionCenter dbId={dbId} dbType={dbType} />
       </div>
     )
@@ -478,27 +489,38 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
   if (view === 'field') {
     return (
       <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
-        {mysqlOnlyBanner}
-        <OpsViewTabs view={view} onChange={setView} />
-        <FieldGovernance dbId={dbId} />
+        <OpsViewTabs view={view} onChange={setView} disabledViews={disabledViews} />
+        {blockedBanner}
+        {pgReadOnly ? (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+            {disabledViews?.field}
+          </div>
+        ) : (
+          <FieldGovernance dbId={dbId} />
+        )}
       </div>
     )
   }
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto bg-dark-bg p-4 text-gray-200">
-      <OpsViewTabs view={view} onChange={setView} />
+      <OpsViewTabs view={view} onChange={setView} disabledViews={disabledViews} />
       <div className="rounded-lg border border-dark-border bg-dark-panel p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold text-white">
-              {tr('运维中心 · MySQL 索引优化', 'Ops Center · MySQL Index Advisor')}
+              {tr('运维中心 · 索引优化', 'Ops Center · Index Advisor')}
             </h2>
             <p className="mt-1 text-xs text-gray-400">
-              {tr(
-                '阶段 0：采集证据 → 生成计划 → 审批 → 服务端编译 DDL → 执行 → 复测 → 回滚。Agent 不产出可执行 SQL。',
-                'Stage 0: evidence → plan → approval → server-side DDL compile → execute → verify → rollback. Agent never emits executable SQL.'
-              )}
+              {pgReadOnly
+                ? tr(
+                    'PostgreSQL 只读分析：采集 EXPLAIN / 索引使用证据并给出文本建议，不生成可执行 DDL、不提供 apply。',
+                    'PostgreSQL read-only analysis: collect EXPLAIN / index-usage evidence and text advice; no executable DDL and no apply.'
+                  )
+                : tr(
+                    '阶段 0：采集证据 → 生成计划 → 审批 → 服务端编译 DDL → 执行 → 复测 → 回滚。Agent 不产出可执行 SQL。',
+                    'Stage 0: evidence → plan → approval → server-side DDL compile → execute → verify → rollback. Agent never emits executable SQL.'
+                  )}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -508,17 +530,23 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
             <span className="rounded border border-dark-border px-2 py-1 text-gray-300">
               {dbType || 'mysql'}
             </span>
-            <span
-              className={`rounded border px-2 py-1 ${
-                policyAllowsApply
-                  ? 'border-amber-500/50 text-amber-300'
-                  : 'border-emerald-500/40 text-emerald-300'
-              }`}
-            >
-              {policyAllowsApply
-                ? tr('已开启执行', 'Apply enabled')
-                : tr('默认只读 + dry-run', 'Read-only + dry-run by default')}
-            </span>
+            {pgReadOnly ? (
+              <span className="rounded border border-sky-500/50 px-2 py-1 text-sky-300">
+                {tr('只读分析 · 不提供 apply', 'Read-only analysis · no apply')}
+              </span>
+            ) : (
+              <span
+                className={`rounded border px-2 py-1 ${
+                  policyAllowsApply
+                    ? 'border-amber-500/50 text-amber-300'
+                    : 'border-emerald-500/40 text-emerald-300'
+                }`}
+              >
+                {policyAllowsApply
+                  ? tr('已开启执行', 'Apply enabled')
+                  : tr('默认只读 + dry-run', 'Read-only + dry-run by default')}
+              </span>
+            )}
             <span className="rounded border border-dark-border px-2 py-1 text-gray-400">
               env: {policyEnv}
             </span>
@@ -526,7 +554,8 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
         </div>
       </div>
 
-      {mysqlOnlyBanner}
+      {blockedBanner}
+      {pgReadOnlyBanner}
 
       {(error || notice) && (
         <div
@@ -563,7 +592,7 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
             </label>
             <button
               onClick={() => void handleAnalyze()}
-              disabled={busy !== null || mysqlOnlyBlocked}
+              disabled={busy !== null || opsBlocked}
               className="mt-2 flex h-9 items-center justify-center gap-2 rounded bg-blue-600 px-3 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {busy === 'analyze' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -660,33 +689,35 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
                 </span>
               </div>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => void handleDryRun()}
-                disabled={busy !== null || selectedActions.length === 0}
-                className="flex h-8 items-center gap-1 rounded border border-dark-border px-2.5 text-xs text-gray-200 hover:bg-dark-surface disabled:opacity-50"
-              >
-                {busy === 'dry-run' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-                {tr('Dry-run 影响评估', 'Dry-run impact')}
-              </button>
-              <button
-                onClick={() => void handleApprove()}
-                disabled={busy !== null || !canApprove}
-                className="flex h-8 items-center gap-1 rounded bg-emerald-600 px-2.5 text-xs text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {busy === 'approve' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-                {tr('审批选中动作', 'Approve selected')}
-              </button>
-              <button
-                onClick={() => void handleExecute()}
-                disabled={busy !== null || !canExecute || !policyAllowsApply}
-                title={!policyAllowsApply ? tr('当前策略默认只读，需显式开启 allow_apply', 'Apply disabled by policy') : ''}
-                className="flex h-8 items-center gap-1 rounded bg-amber-600 px-2.5 text-xs text-white hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {busy === 'execute' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                {tr('一键执行', 'Execute')}
-              </button>
-            </div>
+            {!pgReadOnly && (
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => void handleDryRun()}
+                  disabled={busy !== null || selectedActions.length === 0}
+                  className="flex h-8 items-center gap-1 rounded border border-dark-border px-2.5 text-xs text-gray-200 hover:bg-dark-surface disabled:opacity-50"
+                >
+                  {busy === 'dry-run' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+                  {tr('Dry-run 影响评估', 'Dry-run impact')}
+                </button>
+                <button
+                  onClick={() => void handleApprove()}
+                  disabled={busy !== null || !canApprove}
+                  className="flex h-8 items-center gap-1 rounded bg-emerald-600 px-2.5 text-xs text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {busy === 'approve' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                  {tr('审批选中动作', 'Approve selected')}
+                </button>
+                <button
+                  onClick={() => void handleExecute()}
+                  disabled={busy !== null || !canExecute || !policyAllowsApply}
+                  title={!policyAllowsApply ? tr('当前策略默认只读，需显式开启 allow_apply', 'Apply disabled by policy') : ''}
+                  className="flex h-8 items-center gap-1 rounded bg-amber-600 px-2.5 text-xs text-white hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {busy === 'execute' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                  {tr('一键执行', 'Execute')}
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="mt-4 grid gap-4 lg:grid-cols-2">
@@ -698,7 +729,12 @@ export function OpsCenter({ dbId, dbType }: OpsCenterProps) {
                 <div className="space-y-2">
                   {plan.actions.length === 0 && (
                     <div className="rounded border border-dark-border bg-dark-bg p-3 text-xs text-gray-500">
-                      {tr('没有可执行的索引候选', 'No executable candidates')}
+                      {pgReadOnly
+                        ? tr(
+                            'PostgreSQL 只读分析不生成索引候选；请参考下方证据与文本建议。',
+                            'PostgreSQL read-only analysis produces no index candidates; see evidence and text advice below.'
+                          )
+                        : tr('没有可执行的索引候选', 'No executable candidates')}
                     </div>
                   )}
                   {plan.actions.map((action) => {

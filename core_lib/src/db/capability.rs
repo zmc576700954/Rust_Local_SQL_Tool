@@ -11,22 +11,26 @@ pub struct DbCapabilities {
 }
 
 /// Capability level reflects what is actually wired in the current codebase:
-/// - A: full pipeline (connect / test / SQL / schema / DDL / import-export / sync)
+/// - A: full pipeline (connect / test / SQL / schema / DDL / import-export / sync),
+///      plus the ops-center read-only scenarios for PostgreSQL
 /// - B: partial pipeline (connect / test / SQL / schema / DDL / import-export,
-///      but no struct/data sync and ops-center scenarios remain MySQL-only)
+///      but no data sync)
 /// - C/D: declared but not connectable / not implemented
 pub fn capability_level(db_type: &DbType) -> DbCapabilityLevel {
     match db_type {
         DbType::MySQL | DbType::MariaDB => DbCapabilityLevel::A,
         // PostgreSQL: connection, SQL execution, transactions, schema browsing,
         // DDL execution, import/export, structure sync and the staged data-sync
-        // pipeline are wired. Ops-center scenarios still depend on MySQL
-        // metadata and stay unsupported.
+        // pipeline are wired. Ops-center inspection, performance diagnostics and
+        // index analysis are wired read-only (no apply, no executable DDL).
+        // PG field governance is out of scope for level A: its write path is
+        // still MySQL-dialect.
+        DbType::PostgreSQL => DbCapabilityLevel::A,
         // SQLite: connection, SQL execution, schema introspection, DDL execution
         // (table rebuild), import/export and structure sync are wired. The staged
         // data-sync pipeline is not implemented for SQLite (single-writer, no
         // checkpoint/resume), so it stays level B instead of A.
-        DbType::PostgreSQL | DbType::SQLite => DbCapabilityLevel::B,
+        DbType::SQLite => DbCapabilityLevel::B,
         DbType::MongoDB => DbCapabilityLevel::C,
         DbType::SQLServer | DbType::Oracle | DbType::Redis => DbCapabilityLevel::D,
     }
@@ -123,9 +127,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_capabilities_pg_wires_structure_and_data_sync() {
+    fn runtime_capabilities_pg_is_level_a() {
         let caps = DbCapabilities::runtime_capabilities(&DbType::PostgreSQL);
-        assert_eq!(caps.level, DbCapabilityLevel::B);
+        // Level A: full pipeline plus ops-center read-only scenarios. PG field
+        // governance stays out of scope and is gated per scenario at the API.
+        assert_eq!(caps.level, DbCapabilityLevel::A);
         assert!(caps.supports_sql);
         assert!(caps.supports_schema_introspection);
         assert!(caps.supports_import_export);

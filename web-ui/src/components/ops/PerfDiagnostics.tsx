@@ -297,8 +297,8 @@ function WindowBanner({ window }: { window?: PerfWindowInfo }) {
     return (
       <div className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-300">
         {tr(
-          '统计窗口不可知：延迟与扫描数为 performance_schema 累计值。',
-          'Statistics window unknown: latency and scan counts are cumulative.'
+          '统计窗口不可知：延迟与扫描数为统计视图的累计值。',
+          'Statistics window unknown: latency and scan counts are cumulative from the statistics view.'
         )}
       </div>
     )
@@ -383,8 +383,8 @@ export function PerfDiagnostics({ dbId }: PerfDiagnosticsProps) {
       if (!resp.available) {
         setNotice(
           tr(
-            'performance_schema 不可用：这不代表没有慢查询，请查看降级原因。',
-            'performance_schema unavailable: this does NOT mean there are no slow queries.'
+            '慢查询统计源不可用：这不代表没有慢查询，请查看降级原因。',
+            'Slow-query statistics unavailable: this does NOT mean there are no slow queries; see the degradation reasons.'
           )
         )
       }
@@ -627,7 +627,10 @@ export function PerfDiagnostics({ dbId }: PerfDiagnosticsProps) {
           <div className="flex flex-col gap-2">
             <div className="flex flex-wrap items-center gap-2">
               <label className="text-xs font-medium text-gray-400">
-                {tr('performance_schema 慢查询', 'performance_schema slow queries')}
+                {tr(
+                  '慢查询统计（performance_schema / pg_stat_statements）',
+                  'Slow queries (performance_schema / pg_stat_statements)'
+                )}
               </label>
               <select
                 value={sort}

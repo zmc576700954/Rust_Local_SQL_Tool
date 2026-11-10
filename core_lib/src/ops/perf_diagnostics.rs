@@ -318,7 +318,7 @@ pub async fn list_slow_queries(
     }
     if !ctx.is_mysql_family() {
         return Err(OpsError::Validation(
-            "首期仅支持 MySQL/MariaDB 的 performance_schema".into(),
+            "性能诊断仅支持 MySQL/MariaDB（performance_schema）与 PostgreSQL（pg_stat_statements）；当前引擎尚不支持".into(),
         ));
     }
     validate_identifier(&ctx.db_name)

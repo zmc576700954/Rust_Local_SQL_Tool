@@ -509,8 +509,8 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
             </h2>
             <p className="mt-1 max-w-3xl text-xs text-gray-400">
               {tr(
-                '首期仅支持 MySQL/MariaDB；全部检查均为只读查询，不经过允许 apply 的执行通道。',
-                'MySQL/MariaDB only. Every check is a read-only query and never uses the apply channel.'
+                '支持 MySQL/MariaDB 与 PostgreSQL；全部检查均为只读查询，不经过允许 apply 的执行通道。PostgreSQL 实例配置缺失（如 track_counts=off）或不适用的检查项会显式跳过并给出原因。',
+                'MySQL/MariaDB and PostgreSQL are supported. Every check is a read-only query and never uses the apply channel. Missing instance configuration (e.g. track_counts=off) or non-applicable checks are skipped explicitly with a readable reason.'
               )}
             </p>
           </div>
@@ -1137,8 +1137,8 @@ export function InspectionCenter({ dbId }: InspectionCenterProps) {
         <div className="flex items-center gap-2 text-gray-300">
           <ShieldAlert className="h-4 w-4 text-emerald-400" />
           {tr(
-            '只读边界：巡检只执行 SELECT（information_schema / performance_schema / mysql.user），不写库、不调用 apply 执行通道。权限不足的检查会标记为“已跳过”并给出原因。',
-            'Read-only: inspections only run SELECTs and never use the apply channel. Checks lacking permissions are marked skipped with a reason.'
+            '只读边界：巡检只执行 SELECT（MySQL 的 information_schema / performance_schema / mysql.user，PostgreSQL 的目录与统计视图），不写库、不调用 apply 执行通道。权限不足、实例配置缺失或不适用的检查会标记为“已跳过”并给出原因。',
+            'Read-only: inspections only run SELECTs (MySQL information_schema / performance_schema / mysql.user, PostgreSQL catalogs and statistics views) and never use the apply channel. Checks that lack permissions, require missing instance configuration, or are not applicable are marked skipped with a reason.'
           )}
         </div>
       </div>

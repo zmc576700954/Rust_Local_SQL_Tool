@@ -24,18 +24,20 @@ describe('dbCapabilities', () => {
     }
   })
 
-  it('marks PostgreSQL as partial with both structure and data sync wired', () => {
-    expect(dbCapabilityLevel('postgresql')).toBe('b')
+  it('marks PostgreSQL as level A with read-only ops and no field governance', () => {
+    expect(dbCapabilityLevel('postgresql')).toBe('a')
     expect(dbCapabilities('postgresql')).toEqual({
-      level: 'b',
+      level: 'a',
       supports_sql: true,
       supports_schema_introspection: true,
       supports_import_export: true,
       supports_struct_sync: true,
       supports_data_sync: true,
     })
-    expect(dbCapabilityNotice('postgresql')).not.toBeNull()
-    expect(dbCapabilityShortTag('postgresql')).toMatch(/部分支持|Partial/)
+    const notice = dbCapabilityNotice('postgresql')
+    expect(notice).not.toBeNull()
+    expect(notice).toMatch(/level A 不含 PG 字段治理|level A excludes PG field governance/)
+    expect(dbCapabilityShortTag('postgresql')).toBeNull()
   })
 
   it('marks SQLite as partial: schema, transfer and structure sync wired, data sync not', () => {
