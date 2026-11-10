@@ -102,6 +102,8 @@ async fn schema_of(client: &DbClient, db_name: &str) -> SchemaResponse {
                 .cloned()
                 .unwrap_or_default(),
             table_name: table.table_name,
+            without_rowid: false,
+            triggers: vec![],
         })
         .collect();
     SchemaResponse {

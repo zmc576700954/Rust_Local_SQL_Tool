@@ -1,5 +1,5 @@
 use crate::db::{DbClient, DbError};
-use crate::schema_ext::{IndexInfo, ViewInfo};
+use crate::schema_ext::{IndexInfo, TriggerInfo, ViewInfo};
 pub struct SchemaExtractor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,6 +8,9 @@ use std::collections::HashMap;
 pub struct TableInfo {
     pub table_name: String,
     pub table_comment: Option<String>,
+    /// SQLite `WITHOUT ROWID` 表；其他引擎恒为 false。
+    #[serde(default)]
+    pub without_rowid: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +31,10 @@ pub struct ColumnInfo {
     /// 非生成列为 None；生成列没有 DEFAULT。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_expression: Option<String>,
+    /// 主键中的列序（1 开始）；非主键列为 None。SQLite 的
+    /// `PRAGMA table_xinfo.pk` 能直接给出复合主键顺序。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_ordinal: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +50,12 @@ pub struct TableWithDetails {
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
     pub foreign_keys: Vec<crate::schema_ext::ForeignKeyInfo>,
+    /// SQLite `WITHOUT ROWID` 表；表重建时必须保留。
+    #[serde(default)]
+    pub without_rowid: bool,
+    /// 表上的触发器；目前只有 SQLite 内省填充。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<TriggerInfo>,
 }
 
 impl SchemaExtractor {
@@ -69,6 +82,7 @@ impl SchemaExtractor {
                         table_name: crate::sql_util::mysql_text(&row, "table_name")
                             .unwrap_or_default(),
                         table_comment: crate::sql_util::mysql_text(&row, "table_comment"),
+                        without_rowid: false,
                     });
                 }
                 Ok(result)
@@ -94,13 +108,22 @@ impl SchemaExtractor {
                     result.push(TableInfo {
                         table_name: pg_display_name(&schema, &table),
                         table_comment: row.try_get("table_comment").unwrap_or_default(),
+                        without_rowid: false,
                     });
                 }
                 Ok(result)
             }
-            DbType::SQLite => Err(DbError::Unsupported(
-                "SQLite 结构内省当前版本未支持（仅支持连接与查询执行）".into(),
-            )),
+            DbType::SQLite => {
+                let tables = crate::schema::sqlite::list_tables(client).await?;
+                Ok(tables
+                    .into_iter()
+                    .map(|(name, _, without_rowid)| TableInfo {
+                        table_name: name,
+                        table_comment: None,
+                        without_rowid,
+                    })
+                    .collect())
+            }
             other => Err(DbError::Unsupported(other.display_name().into())),
         }
     }
@@ -158,6 +181,7 @@ impl SchemaExtractor {
                             "generation_expression",
                         )
                         .filter(|s| !s.is_empty()),
+                        primary_key_ordinal: None,
                     });
                 }
                 Ok(result)
@@ -169,9 +193,7 @@ impl SchemaExtractor {
                     .await
                     .map(|rows| rows.into_iter().map(|r| r.column).collect())
             }
-            DbType::SQLite => Err(DbError::Unsupported(
-                "SQLite 结构内省当前版本未支持（仅支持连接与查询执行）".into(),
-            )),
+            DbType::SQLite => crate::schema::sqlite::list_columns(client, table_name).await,
             other => Err(DbError::Unsupported(other.display_name().into())),
         }
     }
@@ -230,6 +252,7 @@ impl SchemaExtractor {
                             "generation_expression",
                         )
                         .filter(|s| !s.is_empty()),
+                        primary_key_ordinal: None,
                     });
                 }
                 Ok(result)
@@ -246,10 +269,44 @@ impl SchemaExtractor {
                 }
                 Ok(result)
             }
-            DbType::SQLite => Err(DbError::Unsupported(
-                "SQLite 结构内省当前版本未支持（仅支持连接与查询执行）".into(),
-            )),
+            DbType::SQLite => crate::schema::sqlite::list_columns_map(client).await,
             other => Err(DbError::Unsupported(other.display_name().into())),
+        }
+    }
+
+    /// 表上的触发器。SQLite 从 `sqlite_master` 读取；其他引擎当前返回空。
+    pub async fn get_triggers(
+        client: &DbClient,
+        _db_name: &str,
+        table_name: &str,
+    ) -> Result<Vec<TriggerInfo>, DbError> {
+        use crate::config::DbType;
+        match &client.db_type {
+            DbType::SQLite => crate::schema::sqlite::list_triggers(client, table_name).await,
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    pub async fn get_triggers_map(
+        client: &DbClient,
+        _db_name: &str,
+    ) -> Result<HashMap<String, Vec<TriggerInfo>>, DbError> {
+        use crate::config::DbType;
+        match &client.db_type {
+            DbType::SQLite => crate::schema::sqlite::list_triggers_map(client).await,
+            _ => Ok(HashMap::new()),
+        }
+    }
+
+    /// SQLite `WITHOUT ROWID` 标记；其他引擎恒为 false。
+    pub async fn is_without_rowid(
+        client: &DbClient,
+        table_name: &str,
+    ) -> Result<bool, DbError> {
+        use crate::config::DbType;
+        match &client.db_type {
+            DbType::SQLite => crate::schema::sqlite::table_without_rowid(client, table_name).await,
+            _ => Ok(false),
         }
     }
 
@@ -339,6 +396,7 @@ impl SchemaExtractor {
                     generation_expression: row
                         .try_get("generation_expression")
                         .unwrap_or_default(),
+                    primary_key_ordinal: None,
                 },
             });
         }

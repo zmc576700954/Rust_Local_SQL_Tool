@@ -434,6 +434,9 @@ fn expand_index(idx: &PgIndex) -> Vec<IndexInfo> {
             sort_order: col.sort.clone(),
             is_primary: idx.primary,
             is_expression: idx.has_expression,
+            is_partial: false,
+            predicate: None,
+            definition: None,
         })
         .collect()
 }
@@ -1066,6 +1069,7 @@ mod tests {
             extra: String::new(),
             type_warning: None,
             generation_expression: None,
+            primary_key_ordinal: None,
         }
     }
 
@@ -1087,6 +1091,9 @@ mod tests {
                 sort_order: sort.to_string(),
                 is_primary: primary,
                 is_expression: false,
+                is_partial: false,
+                predicate: None,
+                definition: None,
             })
             .collect()
     }
@@ -1123,6 +1130,8 @@ mod tests {
             columns,
             indexes,
             foreign_keys: fks,
+            without_rowid: false,
+            triggers: vec![],
         }
     }
 

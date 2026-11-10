@@ -2096,9 +2096,9 @@ fn table_schema_cache_key(db_id: Option<&str>, db_name: &str, table_name: &str) 
     format!("{}::{}", schema_cache_key(db_id, db_name), table_name)
 }
 
-/// 把 DbError 转成 AppError：`Unsupported`（如 SQLite 结构内省未支持）会变成
+/// 把 DbError 转成 AppError：`Unsupported`（如 SQLite 单写者冲突）会变成
 /// 400 BadRequest，而不再是 500 Internal，避免把"功能未支持"误报为服务端故障。
-fn db_error_to_app(e: core_lib::db::DbError) -> AppError {
+pub(crate) fn db_error_to_app(e: core_lib::db::DbError) -> AppError {
     core_lib::service::error::ServiceError::from(e).to_app_error()
 }
 
@@ -2137,11 +2137,19 @@ pub(crate) async fn get_cached_table_schema(
     let foreign_keys = SchemaExtractor::get_foreign_keys(db_client, db_name, table_name)
         .await
         .map_err(db_error_to_app)?;
+    let triggers = SchemaExtractor::get_triggers(db_client, db_name, table_name)
+        .await
+        .unwrap_or_default();
+    let without_rowid = SchemaExtractor::is_without_rowid(db_client, table_name)
+        .await
+        .unwrap_or(false);
     let table = TableWithDetails {
         table_name: table_name.to_string(),
         columns,
         indexes,
         foreign_keys,
+        without_rowid,
+        triggers,
     };
 
     let now = Instant::now();
@@ -2592,7 +2600,7 @@ async fn preview_ddl(
         }
         _ => {
             return Err(AppError::BadRequest(
-                "SQLite 结构变更（DDL）当前版本未支持。SQLite 仅支持连接与查询执行。"
+                "SQLite 的结构变更请通过结构同步（事务内表重建）生成并执行；当前 DDL 预览仅支持 MySQL。"
                     .to_string(),
             ));
         }
@@ -2611,6 +2619,53 @@ async fn execute_ddl(
         return Err(AppError::Forbidden(
             "当前连接为只读模式，禁止执行非查询操作！".to_string(),
         ));
+    }
+
+    // SQLite 的结构同步脚本包含建表/拷数据/删表/改名/重建索引与触发器，
+    // 必须整体在一个事务里执行，不能像 MySQL/PG 那样逐条提交。
+    // 先按标记识别重建脚本，再连接；普通 DDL 仍走下面的解析校验，
+    // 以保持既有的错误提示（未连接时也能先报语法/类型错误）。
+    let is_rebuild_script = req
+        .sql
+        .trim_start()
+        .starts_with(core_lib::sqlite_schema_sync::REBUILD_MARKER);
+    if is_rebuild_script {
+        let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
+        if !matches!(db_client.db_type, core_lib::config::DbType::SQLite) {
+            return Err(AppError::BadRequest(
+                "SQLite 表重建脚本只能用于 SQLite 连接。".to_string(),
+            ));
+        }
+        let sqlite_pool = db_client.pool.sqlite()?;
+        match tokio::time::timeout(
+            state.timeouts.db_query,
+            core_lib::sqlite_schema_sync::execute_script(sqlite_pool, &req.sql),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(db_error_to_app(e)),
+            Err(_) => {
+                return Err(AppError::Timeout(
+                    "SQLite 结构同步执行超时。".to_string(),
+                ))
+            }
+        }
+        clear_metadata_caches(&state).await;
+        return Ok(Json(ExecuteResponse {
+            columns: vec![],
+            row_count: 0,
+            rows: vec![],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            has_more: false,
+            next_offset: None,
+            chunk_offset: 0,
+            chunk_size: None,
+            preview_cap: None,
+            truncated: false,
+            transaction_state: None,
+        }));
     }
 
     // Validate SQL is a DDL statement (not arbitrary SQL).
@@ -2652,11 +2707,9 @@ async fn execute_ddl(
     }
 
     let (db_client, _) = resolve_db_client_for_request(&state, req.db_id.as_deref()).await?;
-
-    // SQLite 的结构变更当前明确未支持；PostgreSQL 与 MySQL 允许执行已编写好的 DDL。
     if matches!(db_client.db_type, core_lib::config::DbType::SQLite) {
         return Err(AppError::BadRequest(
-            "SQLite 结构变更（DDL）当前版本未支持。SQLite 仅支持连接与查询执行，请改用 MySQL 或 PostgreSQL。"
+            "SQLite 结构变更请通过结构同步生成重建脚本后执行；单条 DDL 无法保证表重建的原子性。"
                 .to_string(),
         ));
     }
@@ -2745,6 +2798,8 @@ async fn generate_mock_data(
         columns,
         indexes: vec![],
         foreign_keys,
+        without_rowid: false,
+        triggers: vec![],
     };
 
     let config = state.config.read().await.clone();
@@ -2965,6 +3020,10 @@ fn is_pg_client(client: &DbClient) -> bool {
     matches!(client.db_type, core_lib::config::DbType::PostgreSQL)
 }
 
+fn is_sqlite_client(client: &DbClient) -> bool {
+    matches!(client.db_type, core_lib::config::DbType::SQLite)
+}
+
 fn same_engine_family_error(source: &DbClient, target: &DbClient) -> AppError {
     AppError::BadRequest(format!(
         "源库与目标库数据库类型不一致（{} → {}）：结构同步要求两端为同一类型，跨引擎暂不支持",
@@ -3007,6 +3066,31 @@ async fn sync_schema_diff(
 
     if is_pg_client(&source_client) || is_pg_client(&target_client) {
         return Err(same_engine_family_error(&source_client, &target_client));
+    }
+
+    if is_sqlite_client(&source_client) || is_sqlite_client(&target_client) {
+        if !is_sqlite_client(&source_client) || !is_sqlite_client(&target_client) {
+            return Err(same_engine_family_error(&source_client, &target_client));
+        }
+        let source =
+            core_lib::service::schema::SchemaService::get_schema_fresh(&ctx, Some(&req.source_db_id))
+                .await
+                .map_err(|e| e.to_app_error())?;
+        let target =
+            core_lib::service::schema::SchemaService::get_schema_fresh(&ctx, Some(&req.target_db_id))
+                .await
+                .map_err(|e| e.to_app_error())?;
+        let result = core_lib::sqlite_schema_sync::SqliteSchemaSyncEngine::compare(&source, &target);
+        if schema_gap_too_large(&result.diff) {
+            return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+        }
+        let requires_confirmation = !result.destructive.is_empty();
+        return Ok(Json(SyncSchemaDiffResponse {
+            diff: result.diff,
+            destructive_changes: Some(result.destructive),
+            unsupported_changes: Some(result.unsupported),
+            requires_confirmation: Some(requires_confirmation),
+        }));
     }
 
     crate::handlers::util::require_mysql_client(&source_client, "结构同步（源库）")?;
@@ -3108,6 +3192,55 @@ async fn sync_schema_ddl(
 
     if is_pg_client(&source_client) || is_pg_client(&target_client) {
         return Err(same_engine_family_error(&source_client, &target_client));
+    }
+
+    if is_sqlite_client(&source_client) || is_sqlite_client(&target_client) {
+        if !is_sqlite_client(&source_client) || !is_sqlite_client(&target_client) {
+            return Err(same_engine_family_error(&source_client, &target_client));
+        }
+        let source =
+            core_lib::service::schema::SchemaService::get_schema_fresh(&ctx, Some(&req.source_db_id))
+                .await
+                .map_err(|e| e.to_app_error())?;
+        let target =
+            core_lib::service::schema::SchemaService::get_schema_fresh(&ctx, Some(&req.target_db_id))
+                .await
+                .map_err(|e| e.to_app_error())?;
+        let comparison =
+            core_lib::sqlite_schema_sync::SqliteSchemaSyncEngine::compare(&source, &target);
+        if schema_gap_too_large(&comparison.diff) {
+            return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
+        }
+        let plan = match core_lib::sqlite_schema_sync::SqliteSchemaSyncEngine::generate_ddl(
+            &source,
+            &target,
+            Some(&req.selected_tables),
+            req.confirm_destructive,
+        ) {
+            Ok(plan) => plan,
+            Err(core_lib::sqlite_schema_sync::SqliteSyncError::RequiresConfirmation(items)) => {
+                let details = items
+                    .iter()
+                    .map(|d| format!("{}:{}（{}）", d.table_name, d.kind, d.detail))
+                    .collect::<Vec<_>>()
+                    .join("；");
+                return Err(AppError::BadRequest(format!(
+                    "检测到 {} 项破坏性结构变更，未确认前不会生成或执行任何 DDL：{}",
+                    items.len(),
+                    details
+                )));
+            }
+            Err(core_lib::sqlite_schema_sync::SqliteSyncError::Unsupported(msg)) => {
+                return Err(AppError::BadRequest(msg));
+            }
+        };
+        return Ok(Json(SyncSchemaDdlResponse {
+            ddl_statements: plan.script(),
+            // SQLite 表重建必须整体在事务内执行，不能逐条提交。
+            ddl_statement_list: None,
+            destructive_changes: plan.destructive,
+            unsupported_changes: plan.unsupported,
+        }));
     }
 
     crate::handlers::util::require_mysql_client(&source_client, "结构同步（源库）")?;

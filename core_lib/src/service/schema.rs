@@ -327,11 +327,19 @@ impl SchemaService {
         let foreign_keys = SchemaExtractor::get_foreign_keys(db_client, db_name, table_name)
             .await
             .unwrap_or_default();
+        let triggers = SchemaExtractor::get_triggers(db_client, db_name, table_name)
+            .await
+            .unwrap_or_default();
+        let without_rowid = SchemaExtractor::is_without_rowid(db_client, table_name)
+            .await
+            .unwrap_or(false);
         let table = TableWithDetails {
             table_name: table_name.to_string(),
             columns,
             indexes,
             foreign_keys,
+            without_rowid,
+            triggers,
         };
         ctx.schema_state().insert_table_schema(
             key,
@@ -361,6 +369,9 @@ impl SchemaService {
         let foreign_keys_map = SchemaExtractor::get_foreign_keys_map(db_client, db_name)
             .await
             .map_err(ServiceError::from)?;
+        let triggers_map = SchemaExtractor::get_triggers_map(db_client, db_name)
+            .await
+            .unwrap_or_default();
 
         let mut result_tables = Vec::with_capacity(tables.len());
         for t in tables {
@@ -371,11 +382,14 @@ impl SchemaService {
                 .get(&table_name)
                 .cloned()
                 .unwrap_or_default();
+            let triggers = triggers_map.get(&table_name).cloned().unwrap_or_default();
             result_tables.push(TableWithDetails {
                 table_name,
                 columns,
                 indexes,
                 foreign_keys,
+                without_rowid: t.without_rowid,
+                triggers,
             });
         }
 

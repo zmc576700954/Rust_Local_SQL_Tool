@@ -57,6 +57,9 @@ impl OfflineParser {
                             sort_order: "ASC".to_string(),
                             is_primary: true,
                             is_expression: false,
+                            is_partial: false,
+                            predicate: None,
+                            definition: None,
                         });
                     }
 
@@ -71,6 +74,7 @@ impl OfflineParser {
                         extra: "".to_string(),
                         type_warning: None,
                         generation_expression: None,
+                        primary_key_ordinal: if is_primary { Some(1) } else { None },
                     });
                 }
 
@@ -79,6 +83,8 @@ impl OfflineParser {
                     columns: parsed_columns,
                     indexes: parsed_indexes,
                     foreign_keys: vec![],
+                    without_rowid: false,
+                    triggers: vec![],
                 });
             }
         }

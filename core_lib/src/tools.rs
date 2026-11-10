@@ -987,6 +987,7 @@ mod tests {
             extra: String::new(),
             type_warning: None,
             generation_expression: None,
+            primary_key_ordinal: None,
         }
     }
 
@@ -996,6 +997,8 @@ mod tests {
             columns: cols,
             indexes: vec![],
             foreign_keys: vec![],
+            without_rowid: false,
+            triggers: vec![],
         }
     }
 

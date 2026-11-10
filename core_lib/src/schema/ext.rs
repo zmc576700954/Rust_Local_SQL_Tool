@@ -21,6 +21,24 @@ pub struct IndexInfo {
     /// 是否为表达式索引（PostgreSQL 中 indkey 的 attnum 为 0）。
     #[serde(default)]
     pub is_expression: bool,
+    /// 是否为部分索引（SQLite `PRAGMA index_list.partial=1`）。
+    #[serde(default)]
+    pub is_partial: bool,
+    /// 部分索引谓词；SQLite 无法从 PRAGMA 还原时保留为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<String>,
+    /// 索引原始 DDL（SQLite 取自 `sqlite_master.sql`）。表达式/部分索引依赖它
+    /// 才能如实报告 unsupported，而不是静默丢弃。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerInfo {
+    pub trigger_name: String,
+    pub table_name: String,
+    /// `sqlite_master.sql` 中的原始 `CREATE TRIGGER` 文本。
+    pub sql: String,
 }
 
 fn default_sort_order() -> String {
@@ -103,9 +121,7 @@ impl SchemaExtractor {
                 }
                 Ok(result)
             }
-            DbType::SQLite => Err(DbError::Unsupported(
-                "SQLite 结构内省当前版本未支持（仅支持连接与查询执行）".into(),
-            )),
+            DbType::SQLite => crate::schema::sqlite::list_views(client).await,
             other => Err(DbError::Unsupported(other.display_name().into())),
         }
     }
@@ -155,6 +171,9 @@ impl SchemaExtractor {
                         index_type: crate::sql_util::mysql_text(&row, "index_type")
                             .unwrap_or_default(),
                         is_expression: false,
+                        is_partial: false,
+                        predicate: None,
+                        definition: None,
                         index_name,
                     });
                 }
@@ -165,9 +184,7 @@ impl SchemaExtractor {
                 let rows = Self::pg_indexes(client, schema.unwrap_or("public"), Some(table)).await?;
                 Ok(rows.into_iter().map(|(_, idx)| idx).collect())
             }
-            DbType::SQLite => Err(DbError::Unsupported(
-                "SQLite 结构内省当前版本未支持（仅支持连接与查询执行）".into(),
-            )),
+            DbType::SQLite => crate::schema::sqlite::list_indexes(client, table_name).await,
             other => Err(DbError::Unsupported(other.display_name().into())),
         }
     }
@@ -218,6 +235,9 @@ impl SchemaExtractor {
                         index_type: crate::sql_util::mysql_text(&row, "index_type")
                             .unwrap_or_default(),
                         is_expression: false,
+                        is_partial: false,
+                        predicate: None,
+                        definition: None,
                         index_name,
                     });
                 }
@@ -231,9 +251,7 @@ impl SchemaExtractor {
                 }
                 Ok(result)
             }
-            DbType::SQLite => Err(DbError::Unsupported(
-                "SQLite 结构内省当前版本未支持（仅支持连接与查询执行）".into(),
-            )),
+            DbType::SQLite => crate::schema::sqlite::list_indexes_map(client).await,
             other => Err(DbError::Unsupported(other.display_name().into())),
         }
     }
@@ -305,9 +323,7 @@ impl SchemaExtractor {
                 let rows = Self::pg_foreign_keys(client, schema.unwrap_or("public"), Some(table)).await?;
                 Ok(rows.into_iter().map(|(_, fk)| fk).collect())
             }
-            DbType::SQLite => Err(DbError::Unsupported(
-                "SQLite 结构内省当前版本未支持（仅支持连接与查询执行）".into(),
-            )),
+            DbType::SQLite => crate::schema::sqlite::list_foreign_keys(client, table_name).await,
             other => Err(DbError::Unsupported(other.display_name().into())),
         }
     }
@@ -382,9 +398,7 @@ impl SchemaExtractor {
                 }
                 Ok(result)
             }
-            DbType::SQLite => Err(DbError::Unsupported(
-                "SQLite 结构内省当前版本未支持（仅支持连接与查询执行）".into(),
-            )),
+            DbType::SQLite => crate::schema::sqlite::list_foreign_keys_map(client).await,
             other => Err(DbError::Unsupported(other.display_name().into())),
         }
     }
@@ -440,6 +454,9 @@ impl SchemaExtractor {
                     sort_order: row.try_get("sort_order")?,
                     is_primary: row.try_get("is_primary")?,
                     is_expression: row.try_get("is_expression")?,
+                    is_partial: false,
+                    predicate: None,
+                    definition: None,
                 },
             ));
         }

@@ -10,6 +10,8 @@ pub mod navicat;
 pub mod ops;
 pub mod perf_report;
 pub mod pg_schema_sync;
+pub mod sqlite_schema_sync;
+pub mod sqlite_transfer;
 pub mod rule_engine;
 pub mod rule_matcher;
 pub mod schema;
