@@ -32,6 +32,25 @@ export function DataSync({ onCancel }: DataSyncProps) {
   const [errorObj, setErrorObj] = useState<{ title: string; message: string } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
+  // PostgreSQL 分阶段数据同步（与 MySQL 单表 compare/preview/deploy 流程并行）。
+  const [pgTables, setPgTables] = useState('');
+  const [pgBatchSize, setPgBatchSize] = useState('1000');
+  const [pgCreateMissing, setPgCreateMissing] = useState(true);
+  const [pgMirrorConfirmed, setPgMirrorConfirmed] = useState(false);
+  const [pgSingleTransaction, setPgSingleTransaction] = useState(false);
+  const [pgDeferConstraints, setPgDeferConstraints] = useState(false);
+  const [pgAllowNoPk, setPgAllowNoPk] = useState(false);
+  const [pgResume, setPgResume] = useState(false);
+  const [pgJob, setPgJob] = useState<any | null>(null);
+  const pgTimerRef = useRef<number | null>(null);
+  const pgCancelledRef = useRef(false);
+  const sourceConn = dbConnections.find((c) => String(c.id) === sourceDbId);
+  const targetConn = dbConnections.find((c) => String(c.id) === targetDbId);
+  const isPgPair =
+    sourceDbId.length > 0 &&
+    targetDbId.length > 0 &&
+    sourceConn?.db_type === 'postgresql' &&
+    targetConn?.db_type === 'postgresql';
   const recordPreview = diffs[0]
     ? {
         inserts: (diffs[0].inserts || []).slice(0, 5),
@@ -61,8 +80,18 @@ export function DataSync({ onCancel }: DataSyncProps) {
         window.clearInterval(pollTimerRef.current);
         pollTimerRef.current = null;
       }
+      pgCancelledRef.current = true;
+      if (pgTimerRef.current) {
+        window.clearTimeout(pgTimerRef.current);
+        pgTimerRef.current = null;
+      }
     };
   }, []);
+
+  // PG 模式默认 upsert；mirror 必须由用户显式选择并二次确认。
+  useEffect(() => {
+    if (isPgPair) setStrategy('upsert_only');
+  }, [isPgPair]);
 
   useEffect(() => {
     if (strategy !== 'upsert_only') return;
@@ -87,6 +116,8 @@ export function DataSync({ onCancel }: DataSyncProps) {
     setPreviewJob(null);
     setDeployJob(null);
     setErrorObj(null);
+    setPgJob(null);
+    setPgMirrorConfirmed(false);
   };
 
   const normalizeJobStatus = (raw: any, job_id: string, phase: DataSyncJobStatus['phase']): DataSyncJobStatus => {
@@ -180,6 +211,87 @@ export function DataSync({ onCancel }: DataSyncProps) {
       tick();
       pollTimerRef.current = window.setInterval(tick, 1200);
     });
+  };
+
+  const pollPgJob = async (job_id: string): Promise<any | null> => {
+    for (;;) {
+      if (pgCancelledRef.current) return null;
+      const raw = await api.pgDataSyncJobStatus(job_id);
+      setPgJob(raw);
+      const status = String(raw?.status || '').toLowerCase();
+      if (status === 'completed' || status === 'error' || status === 'failed') return raw;
+      await new Promise<void>((resolve) => {
+        pgTimerRef.current = window.setTimeout(resolve, 1200);
+      });
+    }
+  };
+
+  const handlePgExecute = async () => {
+    if (!sourceDbId || !targetDbId || sourceDbId === targetDbId) {
+      toast(tr('请选择不同的源库与目标库。', 'Choose different source and target databases.'), 'info');
+      return;
+    }
+    if (strategy === 'mirror' && !pgMirrorConfirmed) {
+      toast(
+        tr('mirror 会删除目标库中源库不存在的数据，请先勾选确认。', 'Mirror deletes target rows missing from the source; confirm it first.'),
+        'info'
+      );
+      return;
+    }
+    if (pgSingleTransaction && pgResume) {
+      toast(tr('单事务与断点续跑互斥，请二选一。', 'Single transaction and resume are mutually exclusive.'), 'info');
+      return;
+    }
+
+    setIsLoading(true);
+    setErrorObj(null);
+    setPgJob(null);
+    pgCancelledRef.current = false;
+    try {
+      const tables = pgTables
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const batch = Number(pgBatchSize);
+      const res = await api.pgDataSyncRun({
+        source_db_id: sourceDbId,
+        target_db_id: targetDbId,
+        tables: tables.length > 0 ? tables : undefined,
+        mode: strategy,
+        batch_size: Number.isFinite(batch) && batch > 0 ? Math.floor(batch) : undefined,
+        create_missing_tables: pgCreateMissing,
+        mirror_confirmed: strategy === 'mirror' ? pgMirrorConfirmed : undefined,
+        single_transaction: pgSingleTransaction,
+        defer_constraints: pgDeferConstraints,
+        allow_no_pk: pgAllowNoPk,
+        resume: pgResume,
+      });
+      const pgJobId = String(res?.job_id || '');
+      if (!pgJobId) throw new Error('Missing job_id');
+      const final = await pollPgJob(pgJobId);
+      if (!final) return;
+      const failed =
+        String(final?.status || '').toLowerCase() === 'error' ||
+        !!final?.error ||
+        final?.report?.verification_status === 'failed' ||
+        !!final?.report?.error;
+      if (failed) {
+        const msg = String(final?.error || final?.report?.error || '数据同步失败');
+        setErrorObj({ title: tr('数据同步失败', 'Data sync failed'), message: msg });
+        toast(tr('数据同步失败：', 'Data sync failed: ') + msg, 'error');
+      } else {
+        toast(tr('数据同步完成。', 'Data sync completed.'), 'success');
+      }
+    } catch (e: unknown) {
+      const msg =
+        (e as any)?.response?.data?.message ||
+        (e as any)?.error?.message ||
+        (e instanceof Error ? e.message : String(e));
+      setErrorObj({ title: tr('数据同步失败', 'Data sync failed'), message: msg });
+      toast(tr('数据同步失败：', 'Data sync failed: ') + msg, 'error');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const applyDiffResult = (diffResult: DataDiff) => {
@@ -435,7 +547,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
     }
   };
 
-  const steps: WizardStep[] = [
+  const mysqlSteps: WizardStep[] = [
     {
       id: 'source',
       title: tr('配置与对比', 'Config & Compare'),
@@ -678,13 +790,271 @@ export function DataSync({ onCancel }: DataSyncProps) {
     }
   ];
 
+  const pgJobStatus = String(pgJob?.status || '').toLowerCase();
+  const pgReport = pgJob?.report;
+  const pgSteps: WizardStep[] = [
+    {
+      id: 'pg-config',
+      title: tr('连接与选项', 'Connections & Options'),
+      isValid:
+        sourceDbId.length > 0 &&
+        targetDbId.length > 0 &&
+        sourceDbId !== targetDbId &&
+        (strategy !== 'mirror' || pgMirrorConfirmed),
+      content: (
+        <div className="flex flex-col gap-4 h-full">
+          <div className="text-sm text-gray-300 font-bold">
+            {tr('步骤 1：选择 PostgreSQL 源库/目标库并配置同步选项（默认 upsert）', 'Step 1: choose PostgreSQL source/target and configure options (upsert by default)')}
+          </div>
+          {errorObj && (
+            <div className="bg-red-500/10 border border-red-500/30 text-red-200 p-4 rounded-lg">
+              <div className="font-bold mb-1">{errorObj.title}</div>
+              <div className="text-sm opacity-90 whitespace-pre-wrap">{errorObj.message}</div>
+            </div>
+          )}
+          <div className="flex gap-4">
+            <div className="flex-1">
+              <label className="block text-xs text-gray-400 mb-1">{tr('源库', 'Source')}</label>
+              <select
+                value={sourceDbId}
+                onChange={(e) => {
+                  resetRunState();
+                  setSourceDbId(e.target.value);
+                }}
+                className="w-full bg-dark-bg border border-dark-border rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+              >
+                <option value="">{tr('-- 选择源库 --', '-- Select Source --')}</option>
+                {dbConnections.map(conn => (
+                  <option key={conn.id} value={conn.id}>
+                    {conn.name} ({dbTypeDisplayName(conn.db_type)}/{dbLevelDisplayName(conn.capability_level)}) ({conn.url})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="block text-xs text-gray-400 mb-1">{tr('目标库', 'Target')}</label>
+              <select
+                value={targetDbId}
+                onChange={(e) => {
+                  resetRunState();
+                  setTargetDbId(e.target.value);
+                }}
+                className="w-full bg-dark-bg border border-dark-border rounded p-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+              >
+                <option value="">{tr('-- 选择目标库 --', '-- Select Target --')}</option>
+                {dbConnections.map(conn => (
+                  <option key={conn.id} value={conn.id}>
+                    {conn.name} ({dbTypeDisplayName(conn.db_type)}/{dbLevelDisplayName(conn.capability_level)}) ({conn.url})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2">
+            <label className="text-sm text-gray-400">{tr('同步策略', 'Strategy')}</label>
+            <div className="flex flex-wrap gap-3">
+              <label className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer transition-colors ${strategy === 'upsert_only' ? 'border-blue-500/60 bg-blue-500/10 text-blue-300' : 'border-dark-border bg-dark-bg text-gray-300 hover:bg-dark-surface'}`}>
+                <input
+                  type="radio"
+                  checked={strategy === 'upsert_only'}
+                  onChange={() => {
+                    resetRunState();
+                    setStrategy('upsert_only');
+                  }}
+                />
+                <div className="flex flex-col">
+                  <span className="text-sm font-medium">{tr('仅 Upsert（默认，不删除）', 'Upsert Only (default, no deletes)')}</span>
+                  <span className="text-xs opacity-80">INSERT / UPDATE</span>
+                </div>
+              </label>
+              <label className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer transition-colors ${strategy === 'mirror' ? 'border-blue-500/60 bg-blue-500/10 text-blue-300' : 'border-dark-border bg-dark-bg text-gray-300 hover:bg-dark-surface'}`}>
+                <input
+                  type="radio"
+                  checked={strategy === 'mirror'}
+                  onChange={() => {
+                    resetRunState();
+                    setStrategy('mirror');
+                  }}
+                />
+                <div className="flex flex-col">
+                  <span className="text-sm font-medium">{tr('镜像（同步删除）', 'Mirror (with deletes)')}</span>
+                  <span className="text-xs opacity-80">INSERT / UPDATE / DELETE</span>
+                </div>
+              </label>
+            </div>
+          </div>
+          {strategy === 'mirror' && (
+            <div className="border border-red-500/40 bg-red-500/10 rounded p-3 flex flex-col gap-2">
+              <div className="text-xs text-red-200">
+                {tr('mirror 会删除目标库中源库不存在的行，该操作不可撤销。', 'Mirror deletes target rows missing from the source and cannot be undone.')}
+              </div>
+              <label className="flex items-center gap-2 text-sm text-red-200">
+                <input
+                  type="checkbox"
+                  checked={pgMirrorConfirmed}
+                  onChange={(e) => setPgMirrorConfirmed(e.target.checked)}
+                />
+                {tr('我确认执行 mirror 的删除语义', 'I confirm the delete semantics of mirror mode')}
+              </label>
+            </div>
+          )}
+          <div className="flex gap-4">
+            <div className="flex-1">
+              <label className="block text-xs text-gray-400 mb-1">{tr('表名（可选，逗号分隔；留空同步默认 schema 下全部表）', 'Tables (optional, comma separated; empty = all tables in default schema)')}</label>
+              <input
+                value={pgTables}
+                onChange={(e) => setPgTables(e.target.value)}
+                className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                placeholder={tr('例如 users,orders', 'e.g. users,orders')}
+              />
+            </div>
+            <div className="w-40">
+              <label className="block text-xs text-gray-400 mb-1">{tr('批次大小', 'Batch size')}</label>
+              <input
+                value={pgBatchSize}
+                onChange={(e) => setPgBatchSize(e.target.value)}
+                className="w-full bg-dark-bg border border-dark-border rounded px-3 py-2 text-sm text-gray-300 outline-none focus:border-blue-500"
+                placeholder="1000"
+              />
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 border border-dark-border rounded p-3 bg-dark-bg">
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={pgCreateMissing} onChange={(e) => setPgCreateMissing(e.target.checked)} />
+              {tr('目标库缺失表时自动创建', 'Create missing target tables')}
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input
+                type="checkbox"
+                checked={pgSingleTransaction}
+                onChange={(e) => {
+                  setPgSingleTransaction(e.target.checked);
+                  if (e.target.checked) setPgResume(false);
+                }}
+              />
+              {tr('单事务（不可续跑）', 'Single transaction (not resumable)')}
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input
+                type="checkbox"
+                checked={pgResume}
+                onChange={(e) => {
+                  setPgResume(e.target.checked);
+                  if (e.target.checked) setPgSingleTransaction(false);
+                }}
+              />
+              {tr('断点续跑（读取 data-sync/<job_key>.json）', 'Resume from checkpoint (data-sync/<job_key>.json)')}
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={pgDeferConstraints} onChange={(e) => setPgDeferConstraints(e.target.checked)} />
+              {tr('延迟外键约束（外键成环时使用 session_replication_role=replica，需要超级用户）', 'Defer constraints (cycle handling via session_replication_role=replica; requires superuser)')}
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300">
+              <input type="checkbox" checked={pgAllowNoPk} onChange={(e) => setPgAllowNoPk(e.target.checked)} />
+              {tr('允许无主键表（整表复制，不可续跑）', 'Allow tables without a primary key (full copy, not resumable)')}
+            </label>
+          </div>
+        </div>
+      )
+    },
+    {
+      id: 'pg-run',
+      title: tr('确认与执行', 'Confirm & Run'),
+      isValid: !isLoading && (!pgJob || pgJobStatus === 'error'),
+      content: (
+        <div className="flex flex-col gap-4 h-full">
+          <div className="text-sm text-gray-300 font-bold">
+            {tr('步骤 2：确认后执行分阶段同步（Plan → 建结构 → 灌数据 → 索引/外键 → 序列对齐 → 校验）', 'Step 2: run the staged pipeline (Plan → structure → data → indexes/FKs → sequences → verify)')}
+          </div>
+          <div className="text-xs text-gray-400 border border-dark-border rounded p-3 bg-dark-bg flex flex-col gap-1">
+            <div>{tr('源库：', 'Source: ')}{sourceConn?.name || sourceDbId}</div>
+            <div>{tr('目标库：', 'Target: ')}{targetConn?.name || targetDbId}</div>
+            <div>{tr('策略：', 'Strategy: ')}{strategy === 'mirror' ? tr('镜像（含删除）', 'Mirror (with deletes)') : tr('仅 Upsert', 'Upsert only')}</div>
+            <div>{tr('表范围：', 'Tables: ')}{pgTables.trim() || tr('默认 schema 下全部表', 'all tables in default schema')}</div>
+            <div>{tr('单事务：', 'Single transaction: ')}{pgSingleTransaction ? tr('是（不可续跑）', 'yes (not resumable)') : tr('否', 'no')}</div>
+            <div>{tr('断点续跑：', 'Resume: ')}{pgResume ? tr('是', 'yes') : tr('否', 'no')}</div>
+          </div>
+          {errorObj && (
+            <div className="bg-red-500/10 border border-red-500/30 text-red-200 p-4 rounded-lg">
+              <div className="font-bold mb-1">{errorObj.title}</div>
+              <div className="text-sm opacity-90 whitespace-pre-wrap">{errorObj.message}</div>
+            </div>
+          )}
+          {pgJob && (
+            <div className={`border rounded-lg p-3 ${pgJobStatus === 'error' ? 'border-red-500/30 bg-red-500/10' : 'border-dark-border bg-dark-bg'}`}>
+              <div className="flex items-center justify-between gap-4">
+                <div className="text-sm font-medium text-gray-200">{tr('同步作业', 'Sync Job')}</div>
+                <div className={`text-xs ${pgJobStatus === 'error' ? 'text-red-400' : 'text-gray-400'}`}>
+                  {pgJob.status} / {pgJob.stage}
+                </div>
+              </div>
+              {!!pgJob.progress?.message && <div className="mt-2 text-xs text-gray-400">{pgJob.progress.message}</div>}
+              {!!pgJob.error && <div className="mt-2 text-xs text-red-300 whitespace-pre-wrap">{String(pgJob.error)}</div>}
+              {pgReport && (
+                <div className="mt-3 text-xs text-gray-400 flex flex-col gap-1">
+                  <div>job_key：<span className="font-mono">{pgReport.job_key}</span></div>
+                  <div>
+                    {tr('写入行数：', 'Rows written: ')}{pgReport.total_rows}；
+                    {tr('校验：', ' Verification: ')}{pgReport.verification_status}
+                  </div>
+                  <div>
+                    atomic：{String(pgReport.atomic)}；rolled_back：{String(pgReport.rolled_back)}；
+                    {tr('可续跑：', ' Resumable: ')}{String(pgReport.resumable)}
+                  </div>
+                  {!!pgReport.checkpoint_file && <div>checkpoint：<span className="font-mono">{pgReport.checkpoint_file}</span></div>}
+                  {Array.isArray(pgReport.non_transactional_tables) && pgReport.non_transactional_tables.length > 0 && (
+                    <div>{tr('非事务表：', 'Non-transactional tables: ')}{pgReport.non_transactional_tables.join(', ')}</div>
+                  )}
+                  {Array.isArray(pgReport.warnings) && pgReport.warnings.map((w: string, i: number) => (
+                    <div key={i} className="text-yellow-300">{w}</div>
+                  ))}
+                </div>
+              )}
+              {Array.isArray(pgJob.tables) && pgJob.tables.length > 0 && (
+                <div className="mt-3 overflow-x-auto">
+                  <table className="text-xs text-gray-400 w-full">
+                    <thead>
+                      <tr className="text-left border-b border-dark-border">
+                        <th className="py-1 pr-3">{tr('表', 'Table')}</th>
+                        <th className="py-1 pr-3">{tr('状态', 'Status')}</th>
+                        <th className="py-1 pr-3">{tr('写入', 'Rows')}</th>
+                        <th className="py-1 pr-3">{tr('校验', 'Verify')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pgJob.tables.map((t: any) => (
+                        <tr key={t.table_name} className="border-b border-dark-border/50">
+                          <td className="py-1 pr-3 font-mono">{t.table_name}</td>
+                          <td className="py-1 pr-3">{t.status}</td>
+                          <td className="py-1 pr-3">{t.rows_copied}</td>
+                          <td className="py-1 pr-3">{t.verification}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )
+    }
+  ];
+  const steps: WizardStep[] = isPgPair ? pgSteps : mysqlSteps;
+
   return (
     <StepWizard
       title={tr('数据同步', 'Data Sync')}
       steps={steps}
       onCancel={onCancel}
-      onFinish={handleExecute}
-      finalWarningMessage={tr('即将对目标数据库执行部署作业并应用上述变更。该操作会修改数据且不可撤销，请确认目标库选择无误。', 'You are about to deploy changes to target database. This action is irreversible.')}
+      onFinish={isPgPair ? handlePgExecute : handleExecute}
+      finalWarningMessage={
+        isPgPair
+          ? (strategy === 'mirror'
+            ? tr('mirror 模式会删除目标库中源库不存在的行，该操作不可撤销。请确认目标库选择无误。', 'Mirror mode deletes target rows missing from the source and cannot be undone. Confirm the target database.')
+            : tr('即将对目标库执行分阶段数据同步，该操作会修改数据。请确认目标库选择无误。', 'You are about to run the staged data sync against the target database. This modifies data.'))
+          : tr('即将对目标数据库执行部署作业并应用上述变更。该操作会修改数据且不可撤销，请确认目标库选择无误。', 'You are about to deploy changes to target database. This action is irreversible.')
+      }
       isLoading={isLoading}
     />
   );

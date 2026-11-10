@@ -66,15 +66,15 @@ export function dbCapabilities(dbType?: DbType | null): DbCapabilities {
     }
   }
   if (dbType === 'postgresql') {
-    // PG: SQL execution, schema browsing, DDL, import/export and structure sync
-    // are wired. Data sync and the ops-center scenarios remain MySQL-only.
+    // PG: SQL execution, schema browsing, DDL, import/export, structure sync and
+    // staged data sync are wired. Ops-center scenarios remain MySQL-only.
     return {
       level,
       supports_sql: true,
       supports_schema_introspection: true,
       supports_import_export: true,
       supports_struct_sync: true,
-      supports_data_sync: false,
+      supports_data_sync: true,
     }
   }
   if (dbType === 'sqlite') {
@@ -115,8 +115,8 @@ export function dbCapabilityNotice(dbType?: DbType | null): string | null {
   if (dbType === 'mysql' || dbType === 'mariadb') return null
   if (dbType === 'postgresql') {
     return tr(
-      'PostgreSQL：已支持连接、SQL 执行（含事务）、结构浏览、DDL、导入导出与结构同步（预览 + 确认后执行，破坏性变更需二次确认）。数据同步以及运维中心场景（索引优化、性能诊断、定期巡检、字段治理）当前仅支持 MySQL。',
-      'PostgreSQL: connection, SQL execution (with transactions), schema browsing, DDL, import/export and structure sync (preview + confirm; destructive changes require a second confirmation) are supported. Data sync and ops-center scenarios (index advisor, diagnostics, inspection, field governance) are MySQL-only.'
+      'PostgreSQL：已支持连接、SQL 执行（含事务）、结构浏览、DDL、导入导出、结构同步（预览 + 确认后执行，破坏性变更需二次确认）与数据同步（分阶段流水线，mirror 会删除目标库多余数据，必须显式确认）。运维中心场景（索引优化、性能诊断、定期巡检、字段治理）当前仅支持 MySQL。',
+      'PostgreSQL: connection, SQL execution (with transactions), schema browsing, DDL, import/export, structure sync (preview + confirm; destructive changes require a second confirmation) and data sync (staged pipeline; mirror deletes extra target rows and requires explicit confirmation) are supported. Ops-center scenarios (index advisor, diagnostics, inspection, field governance) are MySQL-only.'
     )
   }
   if (dbType === 'sqlite') {

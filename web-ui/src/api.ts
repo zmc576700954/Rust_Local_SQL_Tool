@@ -203,6 +203,20 @@ interface DataSyncDeployPayload {
   actions?: Record<string, string[]>;
 }
 
+interface PgDataSyncRunPayload {
+  source_db_id: string;
+  target_db_id: string;
+  tables?: string[];
+  mode?: 'mirror' | 'upsert_only';
+  batch_size?: number;
+  create_missing_tables?: boolean;
+  mirror_confirmed?: boolean;
+  single_transaction?: boolean;
+  defer_constraints?: boolean;
+  allow_no_pk?: boolean;
+  resume?: boolean;
+}
+
 interface ExportJobPayload {
   table_name: string;
   export_type: string;
@@ -650,6 +664,10 @@ export const api = {
       throw e
     }
   },
+  pgDataSyncRun: (payload: PgDataSyncRunPayload) =>
+    client.post('/tools/data-sync/run', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
+  pgDataSyncJobStatus: (job_id: string) =>
+    client.get(`/tools/data-sync/runs/${encodeURIComponent(job_id)}`, { headers: { 'x-silent-error': '1' }, timeout: JOB_POLL_REQUEST_TIMEOUT_MS }).then(res => res.data),
   // Perf Sync API
   perfSyncStart: (payload: PerfSyncStartPayload) =>
     client.post('/tools/perf-sync/start', payload, { headers: { 'x-silent-error': '1' } }).then(res => res.data),
