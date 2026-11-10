@@ -434,6 +434,13 @@ pub struct ColumnProfile {
     #[serde(default)]
     pub json_key_types: Vec<KeyTypeDistribution>,
     pub json_profiled: bool,
+    /// PG 类型变更预检：`pg_input_is_valid` 判定的不可转换行数。
+    /// `None` 表示未预检（PG<16 或预检失败），由风险引擎按不可判定阻断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pg_cast_invalid_rows: Option<u64>,
+    /// PG 输入校验路径：pg_input_is_valid / client_sample / not_applicable。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pg_input_check: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -443,8 +450,12 @@ impl ColumnProfile {
         matches!(
             self.data_type.as_str(),
             "json"
+                | "jsonb"
                 | "char"
+                | "bpchar"
                 | "varchar"
+                | "name"
+                | "citext"
                 | "tinytext"
                 | "text"
                 | "mediumtext"
@@ -454,6 +465,7 @@ impl ColumnProfile {
 
     pub fn is_json_type(&self) -> bool {
         self.data_type.eq_ignore_ascii_case("json")
+            || self.data_type.eq_ignore_ascii_case("jsonb")
     }
 
     pub fn json_key_presence(&self, key: &str) -> Option<&KeyPresence> {
@@ -522,6 +534,9 @@ pub struct DependencyEvidence {
     pub scan_complete: bool,
     #[serde(default)]
     pub gaps: Vec<String>,
+    /// 已知的匹配边界（例如 PG 例程仅文本匹配 = 下界）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -540,6 +555,26 @@ pub struct EnvironmentEvidence {
     pub long_transactions: u64,
     #[serde(default)]
     pub version_supports_json: bool,
+    /// mysql / postgresql；空字符串按旧 MySQL 证据处理。
+    #[serde(default)]
+    pub engine_family: String,
+    /// PG 当前 schema（脚本限定名使用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version_num: Option<u64>,
+    /// PG `pg_class.relkind`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_kind: Option<String>,
+    /// 任一列使用非确定性排序规则。
+    #[serde(default)]
+    pub nondeterministic_collation: bool,
+    /// `pg_authid` 是否可读；`None` 表示未尝试（非 PG）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pg_authid_readable: Option<bool>,
+    /// 无密码账号数；不可读时必须为 `None`，不得填 0 造成假阴性。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_password_roles: Option<u64>,
 }
 
 // ── 声明验证证据 ───────────────────────────────────────────

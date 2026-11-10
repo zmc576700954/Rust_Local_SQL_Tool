@@ -95,9 +95,12 @@ pub async fn collect(
     input: &FieldGovernanceInput,
     policy: &OpsPolicy,
 ) -> Result<Collected, OpsError> {
+    if ctx.is_postgres() {
+        return super::pg_evidence::collect(ctx, input, policy).await;
+    }
     if !ctx.is_mysql_family() {
         return Err(OpsError::Validation(
-            "字段治理 S1 仅支持 MySQL / MariaDB".into(),
+            "字段治理 S1 仅支持 MySQL / MariaDB / PostgreSQL".into(),
         ));
     }
     validate_identifier(&input.table)

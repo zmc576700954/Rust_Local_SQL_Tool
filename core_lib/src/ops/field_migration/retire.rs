@@ -1204,6 +1204,7 @@ mod tests {
             source_triggers: vec!["trg_orders".into()],
             scan_complete: true,
             gaps: Vec::new(),
+            notes: Vec::new(),
         };
         let policy = OpsPolicy::default();
         let input = input();

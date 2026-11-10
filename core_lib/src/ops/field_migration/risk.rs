@@ -27,7 +27,13 @@ pub fn evaluate(
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if !engine.is_empty() && !engine.contains("innodb") {
+    if !engine.is_empty()
+        && !engine.contains("innodb")
+        && !analysis
+            .environment
+            .engine_family
+            .eq_ignore_ascii_case("postgresql")
+    {
         builder.push(
             "E02_NOT_INNODB",
             RiskLevel::Block,
@@ -209,6 +215,14 @@ pub fn evaluate(
     let declarations = analysis.declarations.clone();
     for declaration in &declarations {
         evaluate_declaration(&mut builder, analysis, input, declaration);
+    }
+
+    if analysis
+        .environment
+        .engine_family
+        .eq_ignore_ascii_case("postgresql")
+    {
+        super::pg_risk::evaluate(&mut builder, analysis, input);
     }
 
     builder
@@ -644,7 +658,14 @@ fn evaluate_column(
             true,
         );
     }
-    if column.is_text_like()
+    // PG 没有列级字符集概念，字符集一律为 None；这条规则的判定前提不成立，
+    // 依据 spec 第 5 节 E13：PG 数据库编码 + 列 collation，字符集不适用。
+    let pg_family = analysis
+        .environment
+        .engine_family
+        .eq_ignore_ascii_case("postgresql");
+    if !pg_family
+        && column.is_text_like()
         && !column.is_json_type()
         && column
             .charset
@@ -1052,7 +1073,11 @@ fn has_typed_target(input: &FieldGovernanceInput, key: &str) -> bool {
 
 fn parse_type_length(sql_type: &str) -> Option<u64> {
     let upper = sql_type.to_ascii_uppercase();
-    if !(upper.starts_with("VARCHAR") || upper.starts_with("CHAR")) {
+    if !(upper.starts_with("VARCHAR")
+        || upper.starts_with("CHAR")
+        || upper.starts_with("CHARACTER VARYING")
+        || upper.starts_with("CHARACTER("))
+    {
         return None;
     }
     let open = upper.find('(')?;
@@ -1061,14 +1086,14 @@ fn parse_type_length(sql_type: &str) -> Option<u64> {
 }
 
 #[derive(Default)]
-struct Builder {
-    risks: Vec<FieldRisk>,
+pub(crate) struct Builder {
+    pub(crate) risks: Vec<FieldRisk>,
     counter: usize,
 }
 
 impl Builder {
     #[allow(clippy::too_many_arguments)]
-    fn push(
+    pub(crate) fn push(
         &mut self,
         code: &str,
         level: RiskLevel,

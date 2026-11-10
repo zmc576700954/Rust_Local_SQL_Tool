@@ -18,6 +18,14 @@ pub fn generate(
     analysis: &mut FieldGovernanceAnalysis,
     input: &FieldGovernanceInput,
 ) {
+    if analysis
+        .environment
+        .engine_family
+        .eq_ignore_ascii_case("postgresql")
+    {
+        super::pg_scripts::generate(snapshot, analysis, input);
+        return;
+    }
     let Some(column_name) = analysis.column.clone() else {
         analysis.scripts = Vec::new();
         analysis.dry_run = DryRunReport {
@@ -594,7 +602,7 @@ pub(crate) fn refresh_dry_run(analysis: &mut FieldGovernanceAnalysis) {
     analysis.dry_run = dry_run_report(&analysis.scripts);
 }
 
-fn dry_run_report(scripts: &[ManualScript]) -> DryRunReport {
+pub(crate) fn dry_run_report(scripts: &[ManualScript]) -> DryRunReport {
     let mut checks = Vec::new();
     for script in scripts {
         checks.push(DryRunCheck {
@@ -635,18 +643,15 @@ fn dry_run_report(scripts: &[ManualScript]) -> DryRunReport {
         });
         if script.kind == "backfill" {
             let upper = script.sql.to_ascii_uppercase();
+            let mysql_upsert =
+                upper.contains("ON DUPLICATE KEY UPDATE") && !upper.contains(" REPLACE ");
+            let pg_upsert = upper.contains("ON CONFLICT") && upper.contains("DO UPDATE");
             checks.push(DryRunCheck {
                 script_id: script.id.clone(),
                 check: "backfill_is_idempotent".into(),
-                status: if upper.contains("ON DUPLICATE KEY UPDATE")
-                    && !upper.contains(" REPLACE ")
-                {
-                    "pass"
-                } else {
-                    "fail"
-                }
-                .into(),
-                detail: "使用 ON DUPLICATE KEY UPDATE，禁止 REPLACE".into(),
+                status: if mysql_upsert || pg_upsert { "pass" } else { "fail" }.into(),
+                detail: "MySQL 使用 ON DUPLICATE KEY UPDATE；PG 使用 ON CONFLICT ... DO UPDATE；禁止 REPLACE"
+                    .into(),
             });
         }
         if script.kind == "retire" {
