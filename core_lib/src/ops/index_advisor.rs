@@ -1,15 +1,17 @@
-//! MySQL 单表索引优化场景：证据采集 + 确定性候选生成 + 统一计划。
+//! 单表索引优化场景：证据采集 + 确定性候选生成 + 统一计划。
 //!
-//! 首期只做「新增普通索引」。候选由 EXPLAIN + 现有索引 + 表结构确定性推导，
-//! 结构化动作再交给 `ddl_compiler` 生成并校验 DDL；不依赖模型也能闭环。
+//! MySQL/MariaDB：可生成 `create_index` 动作，经审批后执行。
+//! PostgreSQL：只做只读分析（EXPLAIN + pg_stat_user_indexes + pg_index），
+//! 不生成可执行 DDL、不提供 apply；计划里显式标注只读。
 
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::MySqlDialect;
+use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use std::collections::{HashMap, HashSet};
 
 use crate::ops::error::OpsError;
 use crate::ops::mysql_rows::{fetch_rows, float_value, int_value, str_value, uint_value};
+use crate::ops::pg_rows;
 use crate::ops::registry::{
     OpsContext, OpsScenario, PlanIdentity, ScenarioDescriptor, ScenarioStatus,
 };
@@ -61,11 +63,12 @@ impl IndexAdvisorScenario {
         Self {
             descriptor: ScenarioDescriptor {
                 id: "mysql-index-advisor".into(),
-                title: "MySQL 单表索引优化".into(),
+                title: "单表索引优化".into(),
                 description:
-                    "收集 schema/索引/EXPLAIN 证据，生成新增索引计划；审批后在线执行并复测，可回滚。"
+                    "MySQL/MariaDB：收集 schema/索引/EXPLAIN 证据，生成新增索引计划，审批后执行并复测。\
+                     PostgreSQL：仅只读分析，不生成可执行 DDL、不提供 apply。"
                         .into(),
-                engines: vec!["mysql".into(), "mariadb".into()],
+                engines: vec!["mysql".into(), "mariadb".into(), "postgresql".into()],
                 status: ScenarioStatus::Enabled,
                 risk_ceiling: RiskClass::L1,
                 allowed_actions: vec!["create_index".into()],
@@ -108,9 +111,10 @@ pub async fn collect_evidence(
     ctx: &OpsContext,
     input: IndexAdvisorInput,
 ) -> Result<EvidencePack, OpsError> {
-    if !ctx.is_mysql_family() {
+    if !ctx.is_mysql_family() && !ctx.is_postgres() {
         return Err(OpsError::Validation(
-            "首期仅支持 MySQL/MariaDB；PG/SQLite 仍为只读实验状态".into(),
+            "索引优化仅支持 MySQL/MariaDB（可执行）与 PostgreSQL（只读）；SQLite 仍为实验状态"
+                .into(),
         ));
     }
     validate_identifier(&input.table)
@@ -137,7 +141,7 @@ pub async fn collect_evidence(
 
     let mut explain = Vec::new();
     for (idx, sql) in input.workload_sql.iter().enumerate() {
-        ensure_explainable_query(sql)?;
+        ensure_explainable_query(ctx, sql)?;
         let label = format!("workload-{}", idx + 1);
         match explain_sql(ctx, &label, sql).await {
             Ok(Some(sample)) => explain.push(sample),
@@ -146,15 +150,32 @@ pub async fn collect_evidence(
         }
     }
     if input.workload_sql.is_empty() {
-        notes.push("未提供 workload SQL，只能基于表结构给出诊断，不会生成索引候选".into());
+        if ctx.is_postgres() {
+            notes.push(
+                "未提供 workload SQL：PG 只读分析只能展示表结构/索引使用情况，不会推导候选索引"
+                    .into(),
+            );
+        } else {
+            notes.push("未提供 workload SQL，只能基于表结构给出诊断，不会生成索引候选".into());
+        }
     }
 
     let index_usage = match load_index_usage(ctx, &input.table).await {
         Ok(usage) => usage,
         Err(err) => {
-            notes.push(format!("读取 performance_schema 索引使用统计失败（可忽略）: {err}"));
+            notes.push(format!("读取索引使用统计失败（可忽略）: {err}"));
             vec![]
         }
+    };
+
+    let extra = if ctx.is_postgres() {
+        Some(serde_json::json!({
+            "engine": "postgresql",
+            "read_only": true,
+            "read_only_reason": "PG 索引优化只读分析：不生成可执行 DDL，不提供 apply",
+        }))
+    } else {
+        None
     };
 
     Ok(EvidencePack {
@@ -168,16 +189,20 @@ pub async fn collect_evidence(
         collected_at: crate::ops::types::now(),
         notes,
         perf: None,
-        extra: None,
+        extra,
     })
 }
 
-fn ensure_explainable_query(sql: &str) -> Result<(), OpsError> {
+fn ensure_explainable_query(ctx: &OpsContext, sql: &str) -> Result<(), OpsError> {
     if sql.len() > 5000 {
         return Err(OpsError::Validation("workload SQL 超过 5000 字符".into()));
     }
-    let statements = Parser::parse_sql(&MySqlDialect {}, sql)
-        .map_err(|e| OpsError::Validation(format!("workload SQL 解析失败: {e}")))?;
+    let statements = if ctx.is_postgres() {
+        Parser::parse_sql(&PostgreSqlDialect {}, sql)
+    } else {
+        Parser::parse_sql(&MySqlDialect {}, sql)
+    }
+    .map_err(|e| OpsError::Validation(format!("workload SQL 解析失败: {e}")))?;
     if statements.len() != 1 {
         return Err(OpsError::Validation(
             "workload 样本必须是单条只读查询".into(),
@@ -214,6 +239,9 @@ pub(crate) async fn explain_sample_public(
 }
 
 async fn load_snapshot(ctx: &OpsContext, table: &str) -> Result<TableSnapshot, OpsError> {
+    if ctx.is_postgres() {
+        return load_snapshot_pg(ctx, table).await;
+    }
     let db = escape_sql_string(&ctx.db_name);
     let tbl = escape_sql_string(table);
 
@@ -290,6 +318,9 @@ async fn load_snapshot(ctx: &OpsContext, table: &str) -> Result<TableSnapshot, O
 }
 
 async fn load_table_stats(ctx: &OpsContext, table: &str) -> Result<TableStats, OpsError> {
+    if ctx.is_postgres() {
+        return load_table_stats_pg(ctx, table).await;
+    }
     let db = escape_sql_string(&ctx.db_name);
     let tbl = escape_sql_string(table);
     let sql = format!(
@@ -317,6 +348,9 @@ async fn explain_sql(
     label: &str,
     sql: &str,
 ) -> Result<Option<ExplainSample>, OpsError> {
+    if ctx.is_postgres() {
+        return explain_sql_pg(ctx, label, sql).await;
+    }
     let explain = format!("EXPLAIN {sql}");
     let rows = fetch_rows(ctx, &explain).await?;
     let Some(row) = rows.first() else {
@@ -336,6 +370,9 @@ async fn explain_sql(
 }
 
 async fn load_index_usage(ctx: &OpsContext, table: &str) -> Result<Vec<IndexUsage>, OpsError> {
+    if ctx.is_postgres() {
+        return load_index_usage_pg(ctx, table).await;
+    }
     let db = escape_sql_string(&ctx.db_name);
     let tbl = escape_sql_string(table);
     let sql = format!(
@@ -343,6 +380,181 @@ async fn load_index_usage(ctx: &OpsContext, table: &str) -> Result<Vec<IndexUsag
          WHERE OBJECT_SCHEMA = '{db}' AND OBJECT_NAME = '{tbl}'"
     );
     let rows = fetch_rows(ctx, &sql).await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            Some(IndexUsage {
+                index_name: str_value(row, "index_name")?,
+                count_star: uint_value(row, "count_star"),
+                count_read: uint_value(row, "count_read"),
+            })
+        })
+        .collect())
+}
+
+// ── PostgreSQL 只读数据源 ───────────────────────────────────
+
+async fn load_snapshot_pg(ctx: &OpsContext, table: &str) -> Result<TableSnapshot, OpsError> {
+    let tbl = escape_sql_string(table);
+    let columns_sql = format!(
+        "SELECT a.attname::text AS column_name, \
+                format_type(a.atttypid, a.atttypmod)::text AS column_type, \
+                CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable, \
+                CASE WHEN EXISTS (SELECT 1 FROM pg_index i \
+                                  JOIN generate_subscripts(i.indkey, 1) AS k(pos) ON true \
+                                  WHERE i.indrelid = c.oid AND i.indisprimary AND i.indkey[k.pos] = a.attnum) \
+                     THEN 'PRI' ELSE '' END AS column_key, \
+                '' AS extra, pg_encoding_to_char(d.encoding) AS character_set, \
+                COALESCE(co.collname, '') AS collation \
+         FROM pg_attribute a \
+         JOIN pg_class c ON c.oid = a.attrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         CROSS JOIN pg_database d \
+         LEFT JOIN pg_collation co ON co.oid = a.attcollation \
+         WHERE n.nspname = current_schema() AND c.relname = '{tbl}' \
+           AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY a.attnum"
+    );
+    let rows = pg_rows::fetch_rows(ctx, &columns_sql).await?;
+    let columns: Vec<ColumnSnapshot> = rows
+        .iter()
+        .map(|row| ColumnSnapshot {
+            name: str_value(row, "column_name").unwrap_or_default(),
+            column_type: str_value(row, "column_type").unwrap_or_default(),
+            nullable: str_value(row, "is_nullable")
+                .map(|v| v.eq_ignore_ascii_case("YES"))
+                .unwrap_or(true),
+            column_key: str_value(row, "column_key").filter(|value| !value.is_empty()),
+            extra: str_value(row, "extra").filter(|value| !value.is_empty()),
+            character_set: str_value(row, "character_set"),
+            collation: str_value(row, "collation").filter(|value| !value.is_empty()),
+        })
+        .filter(|c| !c.name.is_empty())
+        .collect();
+
+    let indexes_sql = format!(
+        "SELECT i.relname::text AS index_name, ix.indisunique::text AS is_unique, \
+                k.ord::text AS seq_in_index, \
+                pg_get_indexdef(ix.indexrelid, k.ord::int, true)::text AS column_name, \
+                am.amname::text AS index_type \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_index ix ON ix.indrelid = c.oid \
+         JOIN pg_class i ON i.oid = ix.indexrelid \
+         JOIN pg_am am ON am.oid = i.relam \
+         JOIN generate_series(1, ix.indnkeyatts) AS k(ord) ON true \
+         WHERE n.nspname = current_schema() AND c.relname = '{tbl}' \
+         ORDER BY i.relname, k.ord"
+    );
+    let index_rows = pg_rows::fetch_rows(ctx, &indexes_sql).await?;
+    let mut grouped: HashMap<String, IndexDefinition> = HashMap::new();
+    for row in &index_rows {
+        let Some(name) = str_value(row, "index_name") else {
+            continue;
+        };
+        let entry = grouped.entry(name.clone()).or_insert_with(|| IndexDefinition {
+            name: name.clone(),
+            unique: false,
+            index_type: str_value(row, "index_type")
+                .unwrap_or_else(|| "btree".into())
+                .to_ascii_uppercase(),
+            columns: vec![],
+        });
+        entry.unique = matches!(
+            str_value(row, "is_unique").as_deref(),
+            Some("true") | Some("t")
+        );
+        entry.columns.push(IndexColumn {
+            name: str_value(row, "column_name").unwrap_or_default(),
+            seq: int_value(row, "seq_in_index").unwrap_or(0),
+            // PG 目录不提供单索引基数，保持 None，不造假数据。
+            cardinality: None,
+        });
+    }
+    let mut indexes: Vec<IndexDefinition> = grouped.into_values().collect();
+    indexes.sort_by(|a, b| a.name.cmp(&b.name));
+    for index in &mut indexes {
+        index.columns.sort_by_key(|c| c.seq);
+    }
+
+    Ok(TableSnapshot {
+        db_name: ctx.db_name.clone(),
+        table_name: table.to_string(),
+        columns,
+        indexes,
+        // PG 没有 SHOW CREATE TABLE 等价物，保持 None 而不是拼接近似 DDL。
+        create_table_sql: None,
+    })
+}
+
+async fn load_table_stats_pg(ctx: &OpsContext, table: &str) -> Result<TableStats, OpsError> {
+    let tbl = escape_sql_string(table);
+    let sql = format!(
+        "SELECT 'heap' AS engine, GREATEST(c.reltuples, 0)::bigint::text AS table_rows, \
+                pg_table_size(c.oid)::text AS data_length, \
+                pg_indexes_size(c.oid)::text AS index_length, \
+                '0' AS data_free, '' AS auto_increment, d.datcollate AS table_collation, \
+                COALESCE(to_char(s.last_autovacuum, 'YYYY-MM-DD HH24:MI:SS'), '') AS update_time \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         CROSS JOIN pg_database d \
+         LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid \
+         WHERE n.nspname = current_schema() AND c.relname = '{tbl}'"
+    );
+    let rows = pg_rows::fetch_rows(ctx, &sql).await?;
+    let Some(row) = rows.first() else {
+        return Ok(TableStats::default());
+    };
+    Ok(TableStats {
+        engine: str_value(row, "engine"),
+        table_rows: uint_value(row, "table_rows"),
+        data_length: uint_value(row, "data_length"),
+        index_length: uint_value(row, "index_length"),
+        data_free: None,
+        auto_increment: None,
+        collation: str_value(row, "table_collation"),
+        update_time: str_value(row, "update_time").filter(|value| !value.is_empty()),
+    })
+}
+
+async fn explain_sql_pg(
+    ctx: &OpsContext,
+    label: &str,
+    sql: &str,
+) -> Result<Option<ExplainSample>, OpsError> {
+    let rows = pg_rows::fetch_rows(ctx, &format!("EXPLAIN (FORMAT JSON) {sql}")).await?;
+    let Some(raw) = rows.first().and_then(|row| row.values().next()).cloned() else {
+        return Ok(None);
+    };
+    let root = crate::ops::pg_explain::parse_root(&raw)
+        .map_err(|err| OpsError::Validation(format!("{label} 的 EXPLAIN 无法解析: {err}")))?;
+    Ok(Some(crate::ops::pg_explain::sample_from_node(
+        label, sql, &root,
+    )))
+}
+
+async fn load_index_usage_pg(
+    ctx: &OpsContext,
+    table: &str,
+) -> Result<Vec<IndexUsage>, OpsError> {
+    let track_counts = pg_rows::fetch_rows(ctx, "SELECT current_setting('track_counts') AS track_counts")
+        .await?
+        .first()
+        .and_then(|row| str_value(row, "track_counts"))
+        .unwrap_or_else(|| "off".into());
+    if !track_counts.eq_ignore_ascii_case("on") {
+        return Err(OpsError::Validation(
+            "track_counts=off：pg_stat_user_indexes 不累计索引扫描，索引使用统计不可用".into(),
+        ));
+    }
+    let tbl = escape_sql_string(table);
+    let sql = format!(
+        "SELECT s.indexrelname::text AS index_name, s.idx_scan::text AS count_star, \
+                s.idx_tup_read::text AS count_read \
+         FROM pg_stat_user_indexes s \
+         WHERE s.schemaname = current_schema() AND s.relname = '{tbl}'"
+    );
+    let rows = pg_rows::fetch_rows(ctx, &sql).await?;
     Ok(rows
         .iter()
         .filter_map(|row| {
@@ -364,6 +576,9 @@ pub fn build_plan(
     policy: &crate::ops::policy::OpsPolicy,
 ) -> Result<OpsPlan, OpsError> {
     let _ = input;
+    if is_read_only_evidence(evidence) {
+        return build_read_only_plan(identity, evidence);
+    }
     let snapshot = &evidence.snapshot;
     let mut findings = Vec::new();
     let mut risks = Vec::new();
@@ -619,6 +834,134 @@ pub fn build_plan(
         verification_explain_analyze: false,
         confidence,
         requires_approval: !actions.is_empty(),
+        created_at: crate::ops::types::now(),
+        plan_hash: String::new(),
+        status: PlanStatus::PendingApproval,
+        evidence_summary: Some(EvidenceSummary {
+            table: snapshot.table_name.clone(),
+            column_count: snapshot.columns.len(),
+            index_count: snapshot.indexes.len(),
+            row_estimate: evidence.stats.table_rows,
+            explain_findings: evidence.explain.iter().map(ExplainSample::summary).collect(),
+        }),
+        execution: None,
+    };
+    Ok(plan.seal())
+}
+
+pub(crate) fn is_read_only_evidence(evidence: &EvidencePack) -> bool {
+    evidence
+        .extra
+        .as_ref()
+        .and_then(|extra| extra.get("read_only"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+/// PostgreSQL 只读计划：只给诊断与建议，不产生任何可执行动作。
+fn build_read_only_plan(
+    identity: &PlanIdentity,
+    evidence: &EvidencePack,
+) -> Result<OpsPlan, OpsError> {
+    let snapshot = &evidence.snapshot;
+    let mut findings = Vec::new();
+    let mut checks = Vec::new();
+
+    findings.push(Finding {
+        id: "read-only".into(),
+        title: "PostgreSQL 只读分析".into(),
+        detail: "本计划不生成可执行 DDL、不提供 apply；仅在界面展示索引缺口与使用情况。".into(),
+        severity: Severity::Info,
+        evidence_refs: vec!["engine:postgresql".into()],
+        confidence: 1.0,
+    });
+    findings.push(Finding {
+        id: "schema-snapshot".into(),
+        title: format!(
+            "表 {} 共 {} 列 / {} 个索引",
+            snapshot.table_name,
+            snapshot.columns.len(),
+            snapshot.indexes.len()
+        ),
+        detail: snapshot
+            .indexes
+            .iter()
+            .map(|index| format!("{} ({})", index.name, index.column_names().join(",")))
+            .collect::<Vec<_>>()
+            .join("; "),
+        severity: Severity::Info,
+        evidence_refs: vec![
+            "schema:pg_attribute".into(),
+            "schema:pg_index".into(),
+        ],
+        confidence: 1.0,
+    });
+
+    for sample in &evidence.explain {
+        if sample.needs_index() {
+            findings.push(Finding {
+                id: format!("explain-{}", sample.label),
+                title: format!(
+                    "{} 命中 {}（只读建议）",
+                    sample.table_name.as_deref().unwrap_or("(table)"),
+                    sample.access_type.as_deref().unwrap_or("-")
+                ),
+                detail: sample.summary(),
+                severity: Severity::Warn,
+                evidence_refs: vec![format!("explain:{}", sample.label)],
+                confidence: 0.75,
+            });
+        }
+    }
+
+    for usage in &evidence.index_usage {
+        if usage.count_star.unwrap_or(0) == 0 {
+            findings.push(Finding {
+                id: format!("unused-{}", usage.index_name),
+                title: format!("索引 {} 在统计窗口内未被扫描", usage.index_name),
+                detail: "仅作只读提示；删除索引属于写操作，不在本轮 PG 能力范围内。".into(),
+                severity: Severity::Info,
+                evidence_refs: vec!["stats:pg_stat_user_indexes.idx_scan".into()],
+                confidence: 0.7,
+            });
+        }
+    }
+
+    checks.push(ValidationCheck {
+        id: "read-only".into(),
+        title: "只读校验".into(),
+        status: ValidationStatus::Pass,
+        detail: "PG 索引优化为只读分析：计划不包含任何 ActionSpec，不提供 apply".into(),
+    });
+
+    let plan = OpsPlan {
+        plan_id: uuid::Uuid::new_v4().to_string(),
+        scenario_id: "mysql-index-advisor".into(),
+        db_id: identity.db_id.clone(),
+        db_name: identity.db_name.clone(),
+        db_fingerprint: identity.db_fingerprint.clone(),
+        evidence_hash: evidence.evidence_hash(),
+        diagnosis: "PostgreSQL 只读分析：展示 EXPLAIN 索引缺口与 pg_stat_user_indexes 使用情况；\
+                    不生成可执行 DDL。"
+            .into(),
+        findings,
+        verification_sql: evidence.workload_sql.clone(),
+        actions: vec![],
+        risks: vec![],
+        validation_checks: checks,
+        rollback: RollbackPlan {
+            summary: "只读计划，没有需要回滚的动作。".into(),
+            actions: vec![],
+            automatic: false,
+        },
+        code_advice: vec![
+            "PG 索引 DDL 请按团队变更流程在数据库中执行；本工具不代执行。".to_string(),
+            "删除未使用索引前，请结合 pg_stat_user_indexes 的统计窗口与业务周期确认。".to_string(),
+        ],
+        rewrite_suggestions: vec![],
+        verification_explain_analyze: false,
+        confidence: 0.6,
+        requires_approval: false,
         created_at: crate::ops::types::now(),
         plan_hash: String::new(),
         status: PlanStatus::PendingApproval,

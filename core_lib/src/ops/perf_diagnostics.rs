@@ -1,16 +1,17 @@
 //! 性能诊断场景：慢 SQL → 证据 → 结构化计划。
 //!
 //! 约束：
-//! - 执行动作仍只有 `CreateIndex` / `AnalyzeTable`，全部走 `ddl_compiler` 与既有审批链路；
-//! - SQL 改写只输出 `RewriteSuggestion` 文本，永不转换为 `ActionSpec`；
-//! - 首期只支持 MySQL/MariaDB。
+//! - MySQL/MariaDB：执行动作仍只有 `CreateIndex` / `AnalyzeTable`，全部走
+//!   `ddl_compiler` 与既有审批链路；
+//! - PostgreSQL：只读诊断，不生成可执行动作、不提供 apply；
+//! - SQL 改写只输出 `RewriteSuggestion` 文本，永不转换为 `ActionSpec`。
 
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
     BinaryOperator, Expr, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, Query,
     SetExpr, Statement, TableFactor, Value,
 };
-use sqlparser::dialect::MySqlDialect;
+use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use std::collections::{HashMap, HashSet};
 
@@ -20,6 +21,7 @@ use crate::ops::index_advisor::extract_candidate_columns;
 use crate::ops::mysql_rows::{
     convert_mysql_rows, fetch_rows, float_value, int_value, str_value, uint_value, RowMap,
 };
+use crate::ops::pg_rows;
 use crate::ops::registry::{
     OpsContext, OpsScenario, PlanIdentity, ScenarioDescriptor, ScenarioStatus,
 };
@@ -95,6 +97,18 @@ fn normalize_sql_option(sql: Option<String>) -> Option<String> {
 
 fn normalize_digest(digest: Option<String>) -> Option<String> {
     let digest = digest?.trim().to_ascii_lowercase();
+    if digest.is_empty() {
+        return None;
+    }
+    // PostgreSQL queryid 是十进制 bigint（可能是负数），与 MySQL 的 64 位 hex 不冲突。
+    let numeric = digest.strip_prefix('-').unwrap_or(&digest);
+    if digest.len() != 64
+        && !numeric.is_empty()
+        && numeric.len() <= 19
+        && numeric.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some(digest);
+    }
     if digest.len() < 16 || digest.len() > 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
@@ -210,6 +224,54 @@ impl SlowQueryCandidate {
             summary,
         })
     }
+
+    /// pg_stat_statements 行：只映射真实存在的列，缺失指标不填近似值。
+    fn from_pg_row(row: &RowMap) -> Option<Self> {
+        let digest = str_value(row, "digest")?;
+        let digest_text = str_value(row, "digest_text").unwrap_or_default();
+        let count_star = uint_value(row, "count_star").unwrap_or(0);
+        let total_latency_ms = float_value(row, "total_exec_time").unwrap_or(0.0);
+        let avg_latency_ms = float_value(row, "mean_exec_time").unwrap_or(0.0);
+        let rows_sent = uint_value(row, "rows_sent").unwrap_or(0);
+        let rows_sent_avg = if count_star > 0 {
+            rows_sent / count_star
+        } else {
+            0
+        };
+        let temp_blks_written = uint_value(row, "temp_blks_written").unwrap_or(0);
+        let summary = format!(
+            "{} | 执行 {} 次 | 总 {:.1}ms / 平均 {:.2}ms | 返回 {}/次 | 临时块写 {} | 来源 pg_stat_statements（无扫描行/临时表/排序行等价指标）",
+            truncate(&digest_text, 160),
+            count_star,
+            total_latency_ms,
+            avg_latency_ms,
+            rows_sent_avg,
+            temp_blks_written
+        );
+        Some(Self {
+            digest,
+            digest_text,
+            schema_name: None,
+            sample_sql: None,
+            count_star,
+            total_latency_ms,
+            avg_latency_ms,
+            rows_examined_sum: 0,
+            rows_examined_avg: 0,
+            rows_sent_avg,
+            rows_affected_avg: 0,
+            created_tmp_tables: 0,
+            created_tmp_disk_tables: 0,
+            sort_rows: 0,
+            scan_flag: None,
+            no_index_used: None,
+            select_scan: None,
+            select_full_join: None,
+            first_seen: None,
+            last_seen: None,
+            summary,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -243,11 +305,17 @@ fn slow_query_order(sort: &str) -> &'static str {
 
 /// 从 performance_schema 读取慢查询摘要。P_S 未开启/无权限时返回 available=false
 /// 并附带原因；空结果也会显式说明“不代表没有慢查询”。
+///
+/// PostgreSQL 走 `pg_stat_statements`，依赖实例预加载与扩展创建；任一前置条件
+/// 不满足都显式降级，不返回空列表冒充“没有慢查询”。
 pub async fn list_slow_queries(
     ctx: &OpsContext,
     sort: &str,
     limit: usize,
 ) -> Result<SlowQueryScan, OpsError> {
+    if ctx.is_postgres() {
+        return list_slow_queries_pg(ctx, sort, limit).await;
+    }
     if !ctx.is_mysql_family() {
         return Err(OpsError::Validation(
             "首期仅支持 MySQL/MariaDB 的 performance_schema".into(),
@@ -397,7 +465,150 @@ pub async fn list_slow_queries(
     Ok(scan)
 }
 
+/// PostgreSQL：从 `pg_stat_statements` 读取慢查询摘要。
+///
+/// 这是依赖实例配置的路径，三类前置条件分别降级：
+/// 未预加载（shared_preload_libraries）、未创建扩展（pg_extension）、无权限；
+/// 均返回 available=false + 可读原因，不返回空候选冒充“没有慢查询”。
+async fn list_slow_queries_pg(
+    ctx: &OpsContext,
+    sort: &str,
+    limit: usize,
+) -> Result<SlowQueryScan, OpsError> {
+    let sort = sort.to_ascii_lowercase();
+    let limit = if limit == 0 {
+        SLOW_QUERY_LIMIT_DEFAULT
+    } else {
+        limit
+    }
+    .clamp(1, SLOW_QUERY_LIMIT_MAX);
+    let mut scan = SlowQueryScan {
+        available: false,
+        degraded_reasons: vec![],
+        sort: sort.clone(),
+        window: None,
+        candidates: vec![],
+        notes: vec![
+            "pg_stat_statements 只保存规范化 SQL（参数以 $1 占位），不能直接执行；诊断时需粘贴实际 SQL"
+                .into(),
+        ],
+    };
+
+    let preload = pg_rows::fetch_rows(
+        ctx,
+        "SELECT current_setting('shared_preload_libraries', true)::text AS libs",
+    )
+    .await
+    .ok()
+    .and_then(|rows| rows.first().and_then(|r| str_value(r, "libs")))
+    .unwrap_or_default();
+    let preloaded = preload
+        .split(',')
+        .any(|item| item.trim().eq_ignore_ascii_case("pg_stat_statements"));
+    if !preloaded {
+        scan.degraded_reasons.push(format!(
+            "pg_stat_statements_not_preloaded: shared_preload_libraries 未包含 pg_stat_statements（当前: {}）",
+            if preload.trim().is_empty() {
+                "(空)"
+            } else {
+                preload.trim()
+            }
+        ));
+        scan.notes.push(
+            "需要在 postgresql.conf 设置 shared_preload_libraries='pg_stat_statements' 并重启实例；这不代表没有慢查询"
+                .into(),
+        );
+        return Ok(scan);
+    }
+
+    match pg_rows::fetch_rows(
+        ctx,
+        "SELECT extversion::text AS version FROM pg_extension WHERE extname = 'pg_stat_statements'",
+    )
+    .await
+    {
+        Ok(rows) if rows.is_empty() => {
+            scan.degraded_reasons.push(
+                "pg_stat_statements_extension_missing: 已预加载但当前库未 CREATE EXTENSION pg_stat_statements"
+                    .into(),
+            );
+            scan.notes.push(
+                "在目标库执行 CREATE EXTENSION pg_stat_statements（需相应权限）后重新读取；这不代表没有慢查询"
+                    .into(),
+            );
+            return Ok(scan);
+        }
+        Ok(_) => {}
+        Err(err) => {
+            scan.degraded_reasons
+                .push(format!("permission_denied: 无法读取 pg_extension（{err}）"));
+            scan.notes.push(
+                "这不代表没有慢查询；请检查当前账号对 pg_extension 的读取权限".into(),
+            );
+            return Ok(scan);
+        }
+    }
+
+    let window = load_perf_window(ctx, &ctx.db_name).await;
+    scan.notes.push(window.note.clone());
+    scan.window = Some(window);
+
+    let order = match sort.as_str() {
+        "avg_latency" => "mean_exec_time DESC",
+        "rows_examined" => "rows DESC",
+        _ => "total_exec_time DESC",
+    };
+    let sql = format!(
+        "SELECT queryid::text AS digest, query::text AS digest_text, calls::text AS count_star, \
+                total_exec_time::text AS total_exec_time, mean_exec_time::text AS mean_exec_time, \
+                rows::text AS rows_sent, temp_blks_written::text AS temp_blks_written \
+         FROM pg_stat_statements \
+         WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+           AND query NOT ILIKE '%pg_stat_statements%' \
+           AND query NOT ILIKE 'SHOW %' AND query NOT ILIKE 'EXPLAIN %' \
+           AND query NOT ILIKE 'SET %' AND query NOT ILIKE 'SELECT current_setting%' \
+         ORDER BY {order}, calls DESC LIMIT {limit}"
+    );
+    let rows = match pg_rows::fetch_rows(ctx, &sql).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            scan.degraded_reasons.push(format!(
+                "permission_denied: 读取 pg_stat_statements 失败（{err}）"
+            ));
+            scan.notes.push(
+                "这不代表没有慢查询；请检查当前账号对 pg_stat_statements 的 SELECT 权限".into(),
+            );
+            return Ok(scan);
+        }
+    };
+
+    scan.available = true;
+    scan.degraded_reasons.push(
+        "rows_examined_unavailable: pg_stat_statements 没有扫描行等价列，列表的“扫描”字段固定为 0"
+            .into(),
+    );
+    if rows.is_empty() {
+        scan.degraded_reasons.push(
+            "empty: pg_stat_statements 已可用但当前库暂无语句记录".into(),
+        );
+        scan.notes.push(
+            "空记录不代表没有慢查询；可能刚重启、统计已重置或语句尚未进入 pg_stat_statements"
+                .into(),
+        );
+        return Ok(scan);
+    }
+
+    scan.candidates = rows
+        .iter()
+        .filter_map(SlowQueryCandidate::from_pg_row)
+        .collect();
+    Ok(scan)
+}
+
 async fn load_perf_window(ctx: &OpsContext, schema: &str) -> PerfWindowInfo {
+    if ctx.is_postgres() {
+        return load_perf_window_pg(ctx).await;
+    }
     let uptime_seconds = fetch_rows(
         ctx,
         "SELECT VARIABLE_VALUE AS uptime FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Uptime'",
@@ -453,7 +664,83 @@ async fn load_perf_window(ctx: &OpsContext, schema: &str) -> PerfWindowInfo {
     }
 }
 
+/// PG 统计窗口：实例启动时间 + pg_stat_statements.stats_reset（重置时间）。
+///
+/// stats_reset 仅在扩展已创建且版本 >= 14 时可读；不可读时明确写进 note，
+/// 不把它当成“窗口很新”。
+async fn load_perf_window_pg(ctx: &OpsContext) -> PerfWindowInfo {
+    let uptime_seconds = pg_rows::fetch_rows(
+        ctx,
+        "SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))::bigint::text AS uptime",
+    )
+    .await
+    .ok()
+    .and_then(|rows| rows.first().and_then(|r| str_value(r, "uptime")))
+    .and_then(|v| v.parse::<i64>().ok());
+
+    let reset_read = pg_rows::fetch_rows(
+        ctx,
+        "SELECT to_char(stats_reset, 'YYYY-MM-DD HH24:MI:SS') AS stats_reset \
+         FROM pg_stat_statements_info",
+    )
+    .await;
+    let (stats_reset, reset_note) = match reset_read {
+        Ok(rows) => (
+            rows.first()
+                .and_then(|r| str_value(r, "stats_reset"))
+                .and_then(|v| parse_mysql_datetime(&v)),
+            None,
+        ),
+        Err(err) => (
+            None,
+            Some(format!(
+                "pg_stat_statements.stats_reset 不可用（{err}；扩展未创建或版本 < 14），窗口起点仅按实例运行时长"
+            )),
+        ),
+    };
+
+    let now = chrono::Local::now().naive_local();
+    let server_start = uptime_seconds
+        .filter(|s| *s >= 0)
+        .and_then(|s| now.checked_sub_signed(chrono::Duration::seconds(s)));
+    let start = match (server_start, stats_reset) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    let source = match (server_start.is_some(), stats_reset.is_some()) {
+        (true, true) => "server_uptime+pg_stat_statements_stats_reset",
+        (true, false) => "server_uptime",
+        (false, true) => "pg_stat_statements_stats_reset",
+        (false, false) => "unknown",
+    };
+    let window_hours = start.map(|s| (now - s).num_seconds().max(0) as f64 / 3600.0);
+    let mut note = match (start, window_hours) {
+        (Some(start), Some(hours)) => format!(
+            "统计窗口：实例已运行 {hours:.1} 小时（起点 {}，来源 {source}）；pg_stat_statements 为累计值，不是最近该时长的增量。",
+            start.format("%Y-%m-%d %H:%M:%S")
+        ),
+        _ => "统计窗口不可知（未能取得实例启动时间 / stats_reset）；pg_stat_statements 为累计值。"
+            .to_string(),
+    };
+    if let Some(extra) = reset_note {
+        note.push_str(&format!("；{extra}"));
+    }
+    PerfWindowInfo {
+        window_start: start.map(|s| s.format("%Y-%m-%d %H:%M:%S").to_string()),
+        window_hours,
+        source: source.into(),
+        cumulative: true,
+        note,
+    }
+}
+
 async fn lookup_sample_sql(ctx: &OpsContext, digest: &str, schema: &str) -> Option<String> {
+    // pg_stat_statements 没有会话历史表，只有带 $1 占位的规范化 query，不能作为可执行样本。
+    if ctx.is_postgres() {
+        return None;
+    }
     let digest = normalize_digest(Some(digest.to_string()))?;
     let schema = escape_sql_string(schema);
     for table in [
@@ -474,6 +761,9 @@ async fn lookup_sample_sql(ctx: &OpsContext, digest: &str, schema: &str) -> Opti
 }
 
 async fn load_digest_info(ctx: &OpsContext, digest: &str) -> Option<DigestInfo> {
+    if ctx.is_postgres() {
+        return load_digest_info_pg(ctx, digest).await;
+    }
     let digest = normalize_digest(Some(digest.to_string()))?;
     let db = escape_sql_string(&ctx.db_name);
     for filter in [format!("AND SCHEMA_NAME = '{db}'"), String::new()] {
@@ -530,6 +820,50 @@ async fn load_digest_info(ctx: &OpsContext, digest: &str) -> Option<DigestInfo> 
     None
 }
 
+/// PG digest 指标：queryid 是十进制 bigint，不是 MySQL 的 64 位 hex digest。
+async fn load_digest_info_pg(ctx: &OpsContext, digest: &str) -> Option<DigestInfo> {
+    let query_id: i64 = digest.trim().parse().ok()?;
+    let sql = format!(
+        "SELECT queryid::text AS digest, query::text AS digest_text, calls::text AS count_star, \
+                total_exec_time::text AS total_exec_time, mean_exec_time::text AS mean_exec_time, \
+                rows::text AS rows_sent \
+         FROM pg_stat_statements WHERE queryid = {query_id} LIMIT 1"
+    );
+    let rows = pg_rows::fetch_rows(ctx, &sql).await.ok()?;
+    let row = rows.first()?;
+    let count_star = uint_value(row, "count_star").unwrap_or(0);
+    let rows_sent = uint_value(row, "rows_sent").unwrap_or(0);
+    let stats_since = pg_rows::fetch_rows(
+        ctx,
+        "SELECT to_char(stats_reset, 'YYYY-MM-DD HH24:MI:SS') AS stats_since \
+         FROM pg_stat_statements_info",
+    )
+    .await
+    .ok()
+    .and_then(|rows| rows.first().and_then(|r| str_value(r, "stats_since")));
+    Some(DigestInfo {
+        digest: str_value(row, "digest").unwrap_or_else(|| digest.to_string()),
+        digest_text: str_value(row, "digest_text").unwrap_or_default(),
+        schema_name: None,
+        count_star,
+        total_latency_ms: float_value(row, "total_exec_time").unwrap_or(0.0),
+        avg_latency_ms: float_value(row, "mean_exec_time").unwrap_or(0.0),
+        rows_examined_sum: 0,
+        rows_examined_avg: 0,
+        rows_sent_avg: if count_star > 0 {
+            rows_sent / count_star
+        } else {
+            0
+        },
+        rows_affected_avg: 0,
+        created_tmp_tables: 0,
+        created_tmp_disk_tables: 0,
+        sort_rows: 0,
+        first_seen: stats_since,
+        last_seen: None,
+    })
+}
+
 // ── 场景 ───────────────────────────────────────────────────
 
 pub struct PerfDiagnosticsScenario {
@@ -543,9 +877,9 @@ impl PerfDiagnosticsScenario {
                 id: "perf-diagnostics".into(),
                 title: "性能诊断（慢 SQL → 方案）".into(),
                 description:
-                    "对一条 SQL 采集 EXPLAIN/索引/统计证据，生成可审批执行的索引或 ANALYZE 动作；SQL 改写仅文本建议。"
+                    "对一条 SQL 采集 EXPLAIN/索引/统计证据；MySQL/MariaDB 生成可审批执行的索引或 ANALYZE 动作，PostgreSQL 仅只读诊断。SQL 改写仅文本建议。"
                         .into(),
-                engines: vec!["mysql".into(), "mariadb".into()],
+                engines: vec!["mysql".into(), "mariadb".into(), "postgresql".into()],
                 status: ScenarioStatus::Enabled,
                 risk_ceiling: RiskClass::L1,
                 allowed_actions: vec!["create_index".into(), "analyze_table".into()],
@@ -588,9 +922,10 @@ pub async fn collect_evidence(
     ctx: &OpsContext,
     input: PerfDiagnosticsInput,
 ) -> Result<EvidencePack, OpsError> {
-    if !ctx.is_mysql_family() {
+    if !ctx.is_mysql_family() && !ctx.is_postgres() {
         return Err(OpsError::Validation(
-            "首期性能诊断仅支持 MySQL/MariaDB".into(),
+            "性能诊断支持 MySQL/MariaDB（可执行）与 PostgreSQL（只读）；SQLite 仍为实验状态"
+                .into(),
         ));
     }
     if ctx.db_name.trim().is_empty() {
@@ -611,7 +946,7 @@ pub async fn collect_evidence(
     let (target_sql, sql_source, digest_info) =
         resolve_target_sql(ctx, &input, &mut notes, &mut degraded_reasons).await?;
 
-    let statement = parse_single_readonly_query(&target_sql)?;
+    let statement = parse_single_readonly_query_for(&ctx.db_client.db_type, &target_sql)?;
     let aliases = build_alias_map(&statement);
 
     let rich = explain_rich(ctx, "target", &target_sql).await?;
@@ -625,11 +960,17 @@ pub async fn collect_evidence(
     }
 
     let mut sort_or_temp: Vec<String> = Vec::new();
-    if facts.using_filesort {
-        sort_or_temp.push("FORMAT=JSON: using_filesort=true".into());
-    }
-    if facts.using_temporary_table {
-        sort_or_temp.push("FORMAT=JSON: using_temporary_table=true".into());
+    if ctx.is_postgres() {
+        if facts.using_filesort {
+            sort_or_temp.push("EXPLAIN: 存在 Sort 节点（排序未走索引）".into());
+        }
+    } else {
+        if facts.using_filesort {
+            sort_or_temp.push("FORMAT=JSON: using_filesort=true".into());
+        }
+        if facts.using_temporary_table {
+            sort_or_temp.push("FORMAT=JSON: using_temporary_table=true".into());
+        }
     }
     for sample in &explain {
         let extra = sample.extra.as_deref().unwrap_or("");
@@ -696,9 +1037,20 @@ pub async fn collect_evidence(
         (table.table.clone(), table.snapshot.clone(), table.stats.clone())
     };
 
-    let implicit_casts = detect_implicit_casts(&statement, &tables);
+    let implicit_casts = if ctx.is_postgres() {
+        notes.push(
+            "PG 未做隐式类型转换判定：该规则依赖 MySQL 列类型/排序规则语义，本报告不含该项".into(),
+        );
+        Vec::new()
+    } else {
+        detect_implicit_casts(&statement, &tables)
+    };
     let estimated_scan_rows = estimated_scan_rows(&explain, facts.rows_examined_per_scan);
-    let row_estimate = compute_row_estimate(&tables, primary, &explain);
+    let row_estimate = if ctx.is_postgres() {
+        compute_row_estimate_pg(&tables, primary, &explain)
+    } else {
+        compute_row_estimate(&tables, primary, &explain)
+    };
     notes.push(row_estimate.reason.clone());
 
     let mut actual_latency_ms = None;
@@ -784,6 +1136,16 @@ pub async fn collect_evidence(
         degraded_reasons: degraded_reasons.clone(),
     };
 
+    let extra = if ctx.is_postgres() {
+        Some(serde_json::json!({
+            "engine": "postgresql",
+            "read_only": true,
+            "read_only_reason": "PG 性能诊断只读：不生成可执行动作，不提供 apply",
+        }))
+    } else {
+        None
+    };
+
     Ok(EvidencePack {
         db_name: ctx.db_name.clone(),
         table: primary_table_name,
@@ -795,7 +1157,7 @@ pub async fn collect_evidence(
         collected_at: crate::ops::types::now(),
         notes,
         perf: Some(perf),
-        extra: None,
+        extra,
     })
 }
 
@@ -812,20 +1174,30 @@ async fn resolve_target_sql(
             degraded.push(format!(
                 "digest_metrics_unavailable: 未在 digest 表中找到 {digest} 的指标"
             ));
+        } else if ctx.is_postgres() {
+            notes.push(
+                "pg_stat_statements 不提供扫描行/临时表/排序行等价列；digest 指标仅含执行次数、耗时与返回行数"
+                    .into(),
+            );
         }
     }
 
     if let Some(sql) = &input.sql {
-        ensure_single_readonly_query(sql)?;
+        ensure_single_readonly_query_for(&ctx.db_client.db_type, sql)?;
         return Ok((sql.clone(), "user".into(), digest_info));
     }
     if let Some(sql) = &input.sample_sql {
-        ensure_single_readonly_query(sql)?;
+        ensure_single_readonly_query_for(&ctx.db_client.db_type, sql)?;
         return Ok((sql.clone(), "digest_sample".into(), digest_info));
     }
     if let Some(digest) = &input.digest {
+        if ctx.is_postgres() {
+            return Err(OpsError::Validation(format!(
+                "pg_stat_statements 只保留带 $1 占位的规范化 SQL（queryid={digest}），不能直接执行；请粘贴实际 SQL 后再诊断"
+            )));
+        }
         if let Some(sample) = lookup_sample_sql(ctx, digest, &ctx.db_name).await {
-            ensure_single_readonly_query(&sample)?;
+            ensure_single_readonly_query_for(&ctx.db_client.db_type, &sample)?;
             notes.push("已从 performance_schema history 回查 digest 对应的 SQL_TEXT".into());
             return Ok((sample, "digest_sample".into(), digest_info));
         }
@@ -838,14 +1210,22 @@ async fn resolve_target_sql(
     ))
 }
 
-fn ensure_single_readonly_query(sql: &str) -> Result<(), OpsError> {
+/// 按引擎选择方言：PG 的 `::` 转换、`$1` 参数、ILIKE 等在 MySQL 方言下解析会失败。
+fn ensure_single_readonly_query_for(
+    db_type: &crate::config::DbType,
+    sql: &str,
+) -> Result<(), OpsError> {
     if sql.len() > MAX_SQL_LEN {
         return Err(OpsError::Validation(format!(
             "SQL 超过 {MAX_SQL_LEN} 字符"
         )));
     }
-    let statements = Parser::parse_sql(&MySqlDialect {}, sql)
-        .map_err(|e| OpsError::Validation(format!("SQL 解析失败: {e}")))?;
+    let statements = if matches!(db_type, crate::config::DbType::PostgreSQL) {
+        Parser::parse_sql(&PostgreSqlDialect {}, sql)
+    } else {
+        Parser::parse_sql(&MySqlDialect {}, sql)
+    }
+    .map_err(|e| OpsError::Validation(format!("SQL 解析失败: {e}")))?;
     if statements.len() != 1 {
         return Err(OpsError::Validation(
             "性能诊断只接受单条 SQL".into(),
@@ -862,10 +1242,18 @@ fn ensure_single_readonly_query(sql: &str) -> Result<(), OpsError> {
     Ok(())
 }
 
-fn parse_single_readonly_query(sql: &str) -> Result<Statement, OpsError> {
-    ensure_single_readonly_query(sql)?;
-    Parser::parse_sql(&MySqlDialect {}, sql)
-        .map_err(|e| OpsError::Validation(format!("SQL 解析失败: {e}")))?
+fn parse_single_readonly_query_for(
+    db_type: &crate::config::DbType,
+    sql: &str,
+) -> Result<Statement, OpsError> {
+    ensure_single_readonly_query_for(db_type, sql)?;
+    let statements = if matches!(db_type, crate::config::DbType::PostgreSQL) {
+        Parser::parse_sql(&PostgreSqlDialect {}, sql)
+    } else {
+        Parser::parse_sql(&MySqlDialect {}, sql)
+    }
+    .map_err(|e| OpsError::Validation(format!("SQL 解析失败: {e}")))?;
+    statements
         .into_iter()
         .next()
         .ok_or_else(|| OpsError::Validation("SQL 为空".into()))
@@ -927,6 +1315,9 @@ pub(crate) async fn explain_rich(
     label: &str,
     sql: &str,
 ) -> Result<ExplainRich, OpsError> {
+    if ctx.is_postgres() {
+        return explain_rich_pg(ctx, label, sql).await;
+    }
     let mut samples = explain_plain_rows(ctx, label, sql).await?;
     let mut notes = Vec::new();
     let mut facts = ExplainJsonFacts::default();
@@ -953,6 +1344,57 @@ pub(crate) async fn explain_rich(
         if let Some(first) = samples.first_mut() {
             first.estimated_cost = Some(cost);
         }
+    }
+    Ok(ExplainRich {
+        samples,
+        facts,
+        notes,
+    })
+}
+
+/// PostgreSQL：只解析 `EXPLAIN (FORMAT JSON)`，节点到 `ExplainSample` 的映射统一走 `pg_explain`。
+async fn explain_rich_pg(
+    ctx: &OpsContext,
+    label: &str,
+    sql: &str,
+) -> Result<ExplainRich, OpsError> {
+    let rows = pg_rows::fetch_rows(ctx, &format!("EXPLAIN (FORMAT JSON) {sql}")).await?;
+    let raw = rows
+        .first()
+        .and_then(|row| row.values().next().cloned())
+        .ok_or_else(|| OpsError::Validation("EXPLAIN (FORMAT JSON) 无返回内容".into()))?;
+    let root = crate::ops::pg_explain::parse_root(&raw)
+        .map_err(|err| OpsError::Validation(format!("EXPLAIN JSON 解析失败: {err}")))?;
+    let nodes = crate::ops::pg_explain::walk_nodes(&root);
+    let mut samples = Vec::new();
+    let mut facts = ExplainJsonFacts::default();
+    facts.query_cost = root.get("Total Cost").and_then(|value| value.as_f64());
+    for (idx, node) in nodes.iter().enumerate() {
+        if node.get("Node Type").and_then(|value| value.as_str()) == Some("Sort") {
+            facts.using_filesort = true;
+        }
+        if let Some(rows) = node.get("Plan Rows").and_then(|value| value.as_i64()) {
+            facts.rows_examined_per_scan =
+                Some(facts.rows_examined_per_scan.map_or(rows, |r| r.max(rows)));
+        }
+        if let Some(name) = node.get("Relation Name").and_then(|value| value.as_str()) {
+            if !facts
+                .table_names
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(name))
+            {
+                facts.table_names.push(name.to_string());
+            }
+            samples.push(crate::ops::pg_explain::sample_from_node(
+                &format!("{label}-{}", idx + 1),
+                sql,
+                node,
+            ));
+        }
+    }
+    let mut notes = vec!["PostgreSQL：EXPLAIN (FORMAT JSON) 只做计划分析，不执行 SQL".to_string()];
+    if facts.using_filesort {
+        notes.push("计划中存在 Sort 节点（排序未走索引）".into());
     }
     Ok(ExplainRich {
         samples,
@@ -1043,6 +1485,9 @@ async fn explain_analyze_with_timeout(
     sql: &str,
     timeout_ms: u64,
 ) -> AnalyzeRun {
+    if ctx.is_postgres() {
+        return explain_analyze_pg(ctx, sql, timeout_ms).await;
+    }
     let pool = match ctx.db_client.mysql_pool() {
         Ok(pool) => pool,
         Err(err) => {
@@ -1125,6 +1570,112 @@ async fn explain_analyze_with_timeout(
             }
         }
     }
+}
+
+/// PostgreSQL：同一连接上设置 `statement_timeout`，再执行
+/// `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`；超时由 PG 报错，按超时降级。
+async fn explain_analyze_pg(ctx: &OpsContext, sql: &str, timeout_ms: u64) -> AnalyzeRun {
+    let pool = match ctx.db_client.pool.pg() {
+        Ok(pool) => pool,
+        Err(err) => {
+            return AnalyzeRun {
+                result: AnalyzeResult::NotConfigured(err.to_string()),
+                duration_ms: 0,
+            }
+        }
+    };
+    let mut conn = match pool.acquire().await {
+        Ok(conn) => conn,
+        Err(err) => {
+            return AnalyzeRun {
+                result: AnalyzeResult::NotConfigured(format!("获取连接失败: {err}")),
+                duration_ms: 0,
+            }
+        }
+    };
+    let set_sql = format!("SET statement_timeout = {timeout_ms}");
+    if let Err(err) = sqlx::query(&set_sql).execute(&mut *conn).await {
+        return AnalyzeRun {
+            result: AnalyzeResult::NotConfigured(err.to_string()),
+            duration_ms: 0,
+        };
+    }
+    let started = std::time::Instant::now();
+    let result = sqlx::query(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}"
+    ))
+    .fetch_all(&mut *conn)
+    .await;
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let _ = sqlx::query("RESET statement_timeout")
+        .execute(&mut *conn)
+        .await;
+
+    match result {
+        Ok(rows) => {
+            let maps = pg_rows::convert_pg_rows(&rows);
+            let raw = maps
+                .first()
+                .and_then(|row| row.values().next().cloned())
+                .unwrap_or_default();
+            if raw.trim().is_empty() {
+                return AnalyzeRun {
+                    result: AnalyzeResult::Empty,
+                    duration_ms,
+                };
+            }
+            match crate::ops::pg_explain::parse_root(&raw) {
+                Ok(root) => {
+                    let ms = root
+                        .get("Execution Time")
+                        .and_then(|value| value.as_f64())
+                        .or_else(|| {
+                            crate::ops::pg_explain::walk_nodes(&root)
+                                .iter()
+                                .filter_map(|node| {
+                                    node.get("Actual Total Time").and_then(|v| v.as_f64())
+                                })
+                                .fold(None, |acc: Option<f64>, value| {
+                                    Some(acc.map_or(value, |existing| existing.max(value)))
+                                })
+                        });
+                    match ms {
+                        Some(ms) => AnalyzeRun {
+                            result: AnalyzeResult::Success { ms, raw },
+                            duration_ms,
+                        },
+                        None => AnalyzeRun {
+                            result: AnalyzeResult::Failed(
+                                "无法从 EXPLAIN ANALYZE JSON 解析 Execution Time".into(),
+                            ),
+                            duration_ms,
+                        },
+                    }
+                }
+                Err(err) => AnalyzeRun {
+                    result: AnalyzeResult::Failed(err),
+                    duration_ms,
+                },
+            }
+        }
+        Err(err) => {
+            let text = err.to_string();
+            let result = if is_pg_analyze_timeout(&text) {
+                AnalyzeResult::Timeout(text)
+            } else {
+                AnalyzeResult::Failed(text)
+            };
+            AnalyzeRun {
+                result,
+                duration_ms,
+            }
+        }
+    }
+}
+
+fn is_pg_analyze_timeout(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("statement timeout") || lower.contains("canceling statement")
 }
 
 fn is_analyze_timeout(err: &str) -> bool {
@@ -1301,6 +1852,9 @@ fn collect_table_names(explain: &[ExplainSample], aliases: &HashMap<String, Stri
 }
 
 async fn load_freshness(ctx: &OpsContext, table: &str, stats: &TableStats) -> StatsFreshness {
+    if ctx.is_postgres() {
+        return load_freshness_pg(ctx, table, stats).await;
+    }
     let database = escape_sql_string(&ctx.db_name);
     let tbl = escape_sql_string(table);
     let innodb_last_update = match fetch_rows(
@@ -1357,6 +1911,70 @@ async fn load_freshness(ctx: &OpsContext, table: &str, stats: &TableStats) -> St
     StatsFreshness {
         update_time: stats.update_time.clone(),
         innodb_last_update,
+        stale_days,
+        status,
+        notes,
+    }
+}
+
+/// PostgreSQL 统计新鲜度：`pg_stat_user_tables.last_analyze/last_autoanalyze`。
+/// PG 没有 `innodb_table_stats`，`innodb_last_update` 保持 None，不填近似值。
+async fn load_freshness_pg(
+    ctx: &OpsContext,
+    table: &str,
+    stats: &TableStats,
+) -> StatsFreshness {
+    let tbl = escape_sql_string(table);
+    let row = pg_rows::fetch_rows(
+        ctx,
+        &format!(
+            "SELECT to_char(last_analyze, 'YYYY-MM-DD HH24:MI:SS') AS last_analyze, \
+                    to_char(last_autoanalyze, 'YYYY-MM-DD HH24:MI:SS') AS last_autoanalyze \
+             FROM pg_stat_user_tables \
+             WHERE schemaname = current_schema() AND relname = '{tbl}'"
+        ),
+    )
+    .await
+    .ok()
+    .and_then(|rows| rows.into_iter().next());
+
+    let mut notes = Vec::new();
+    let now = chrono::Utc::now().naive_utc();
+    let mut status = "unknown".to_string();
+    let mut stale_days = None;
+    let update_time = row
+        .as_ref()
+        .and_then(|r| str_value(r, "last_analyze"))
+        .or_else(|| row.as_ref().and_then(|r| str_value(r, "last_autoanalyze")));
+
+    if let Some(update) = update_time.as_deref() {
+        if let Some(dt) = parse_mysql_datetime(update) {
+            let days = (now - dt).num_days().max(0);
+            stale_days = Some(days);
+            status = if days > STATS_STALE_DAYS {
+                "stale".into()
+            } else {
+                "fresh".into()
+            };
+        } else {
+            notes.push(format!("last_analyze 无法解析: {update}"));
+        }
+    } else {
+        notes.push(
+            "pg_stat_user_tables.last_analyze / last_autoanalyze 均为空（该表可能从未 ANALYZE）"
+                .into(),
+        );
+    }
+    if stats.table_rows.is_none() {
+        notes.push("pg_class.reltuples 不可用".into());
+    }
+    notes.push(format!(
+        "新鲜度判定规则：last_analyze/last_autoanalyze 距现在超过 {STATS_STALE_DAYS} 天为 stale；无法取得时间记为 unknown"
+    ));
+
+    StatsFreshness {
+        update_time,
+        innodb_last_update: None,
         stale_days,
         status,
         notes,
@@ -1439,6 +2057,50 @@ fn compute_row_estimate(
         source: "none".into(),
         trusted: false,
         reason: "TABLE_ROWS 与 EXPLAIN rows 均不可用或为 0；行数不可知".into(),
+    }
+}
+
+/// PostgreSQL 行数估算：优先 `pg_class.reltuples`，0 表示从未 ANALYZE，
+/// 降级到 EXPLAIN 的 `Plan Rows`；两者都不可用时标记为不可信。
+fn compute_row_estimate_pg(
+    tables: &[PerfTableEvidence],
+    primary: usize,
+    explain: &[ExplainSample],
+) -> RowEstimateEvidence {
+    let table = &tables[primary];
+    if let Some(rows) = table.stats.table_rows.filter(|rows| *rows > 0) {
+        return RowEstimateEvidence {
+            value: rows as i64,
+            source: "pg_class.reltuples".into(),
+            trusted: true,
+            reason: format!("使用 pg_class.reltuples={rows}（>0）"),
+        };
+    }
+
+    let explain_rows = explain
+        .iter()
+        .filter_map(|s| s.rows_examined)
+        .max()
+        .unwrap_or(0);
+    if explain_rows > 0 {
+        let reason = if table.stats.table_rows.is_none() {
+            format!("pg_class.reltuples 不可用，降级使用 EXPLAIN Plan Rows={explain_rows}")
+        } else {
+            format!("pg_class.reltuples=0（可能从未 ANALYZE），降级使用 EXPLAIN Plan Rows={explain_rows}")
+        };
+        return RowEstimateEvidence {
+            value: explain_rows,
+            source: "EXPLAIN Plan Rows".into(),
+            trusted: true,
+            reason,
+        };
+    }
+
+    RowEstimateEvidence {
+        value: 0,
+        source: "none".into(),
+        trusted: false,
+        reason: "pg_class.reltuples 与 EXPLAIN Plan Rows 均不可用或为 0；行数不可知".into(),
     }
 }
 
@@ -1752,6 +2414,9 @@ pub fn build_plan(
     input: PerfDiagnosticsInput,
     policy: &crate::ops::policy::OpsPolicy,
 ) -> Result<OpsPlan, OpsError> {
+    if crate::ops::index_advisor::is_read_only_evidence(evidence) {
+        return build_read_only_perf_plan(identity, evidence);
+    }
     let perf = evidence
         .perf
         .as_ref()
@@ -2400,6 +3065,181 @@ fn make_index_name(table: &str, columns: &[String], existing: &HashSet<String>) 
     candidate
 }
 
+// ── PostgreSQL 只读计划 ────────────────────────────────────
+
+/// PostgreSQL 只读诊断计划：只输出证据与文本建议，`actions` 恒为空、不提供 apply。
+fn build_read_only_perf_plan(
+    identity: &PlanIdentity,
+    evidence: &EvidencePack,
+) -> Result<OpsPlan, OpsError> {
+    let perf = evidence
+        .perf
+        .as_ref()
+        .ok_or_else(|| OpsError::Validation("性能诊断缺少 perf 证据".into()))?;
+    let mut findings = Vec::new();
+    let mut checks = Vec::new();
+
+    findings.push(Finding {
+        id: "read-only".into(),
+        title: "PostgreSQL 只读诊断".into(),
+        detail: "本计划不生成可执行动作、不提供 apply；仅展示 EXPLAIN/统计证据与文本建议。".into(),
+        severity: Severity::Info,
+        evidence_refs: vec!["engine:postgresql".into()],
+        confidence: 1.0,
+    });
+    findings.push(Finding {
+        id: "perf-target".into(),
+        title: "慢 SQL 目标".into(),
+        detail: format!(
+            "来源 {}；SQL 长度 {} 字符；涉及表 {}",
+            perf.sql_source,
+            perf.target_sql.chars().count(),
+            perf.tables
+                .iter()
+                .map(|t| t.table.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        severity: Severity::Info,
+        evidence_refs: vec!["sql:target".into()],
+        confidence: 1.0,
+    });
+
+    if let Some(window) = &perf.window {
+        findings.push(Finding {
+            id: "stats-window".into(),
+            title: "统计窗口".into(),
+            detail: window.note.clone(),
+            severity: Severity::Info,
+            evidence_refs: vec![
+                "pg:pg_postmaster_start_time".into(),
+                "pg:pg_stat_statements_info.stats_reset".into(),
+            ],
+            confidence: if window.source == "unknown" { 0.5 } else { 0.9 },
+        });
+    }
+
+    if let Some(digest) = &perf.digest {
+        findings.push(Finding {
+            id: "digest-metrics".into(),
+            title: format!("pg_stat_statements queryid {}", digest.digest),
+            detail: format!(
+                "累计指标：执行 {} 次 | 总 {:.1}ms / 平均 {:.2}ms | 返回 {} 行/次；\
+                 pg_stat_statements 不提供扫描行/临时表/排序行等价指标",
+                digest.count_star,
+                digest.total_latency_ms,
+                digest.avg_latency_ms,
+                digest.rows_sent_avg
+            ),
+            severity: Severity::Info,
+            evidence_refs: vec!["pg:pg_stat_statements".into()],
+            confidence: 1.0,
+        });
+    }
+
+    if let Some(row) = &perf.row_estimate {
+        findings.push(Finding {
+            id: "row-estimate".into(),
+            title: "行数估算".into(),
+            detail: format!(
+                "{}（来源 {}，可信 {}）",
+                row.reason, row.source, row.trusted
+            ),
+            severity: Severity::Info,
+            evidence_refs: vec![row.source.clone()],
+            confidence: if row.trusted { 0.9 } else { 0.5 },
+        });
+    }
+
+    for sample in &perf.explain {
+        if sample.needs_index() {
+            findings.push(Finding {
+                id: format!("explain-{}", sample.label),
+                title: format!(
+                    "{} 命中 {}（只读建议）",
+                    sample.table_name.as_deref().unwrap_or("(table)"),
+                    sample.access_type.as_deref().unwrap_or("-")
+                ),
+                detail: sample.summary(),
+                severity: Severity::Warn,
+                evidence_refs: vec![format!("explain:{}", sample.label)],
+                confidence: 0.75,
+            });
+        }
+    }
+
+    if !perf.sort_or_temp.is_empty() {
+        findings.push(Finding {
+            id: "sort-temp".into(),
+            title: "存在排序证据".into(),
+            detail: perf.sort_or_temp.join("; "),
+            severity: Severity::Warn,
+            evidence_refs: vec!["explain:sort".into()],
+            confidence: 0.8,
+        });
+    }
+
+    for (idx, reason) in perf.degraded_reasons.iter().enumerate() {
+        findings.push(Finding {
+            id: format!("degraded-{}", idx + 1),
+            title: "降级说明".into(),
+            detail: reason.clone(),
+            severity: Severity::Info,
+            evidence_refs: vec![],
+            confidence: 1.0,
+        });
+    }
+
+    checks.push(ValidationCheck {
+        id: "read-only".into(),
+        title: "只读校验".into(),
+        status: ValidationStatus::Pass,
+        detail: "PG 性能诊断为只读：计划不包含任何 ActionSpec，不提供 apply".into(),
+    });
+
+    let plan = OpsPlan {
+        plan_id: uuid::Uuid::new_v4().to_string(),
+        scenario_id: "perf-diagnostics".into(),
+        db_id: identity.db_id.clone(),
+        db_name: identity.db_name.clone(),
+        db_fingerprint: identity.db_fingerprint.clone(),
+        evidence_hash: evidence.evidence_hash(),
+        diagnosis: "PostgreSQL 只读性能诊断：基于 EXPLAIN 与 pg_stat_statements 给出证据与文本建议；\
+                    不生成可执行 DDL。"
+            .into(),
+        findings,
+        verification_sql: vec![perf.target_sql.clone()],
+        actions: vec![],
+        risks: vec![],
+        validation_checks: checks,
+        rollback: RollbackPlan {
+            summary: "只读计划，没有需要回滚的动作。".into(),
+            actions: vec![],
+            automatic: false,
+        },
+        code_advice: vec![
+            "PG 的索引/ANALYZE 等写操作请按团队变更流程在数据库中执行；本工具不代执行。".to_string(),
+            "SQL 改写只作为文本建议，不会转换成可执行动作。".to_string(),
+        ],
+        rewrite_suggestions: vec![],
+        verification_explain_analyze: false,
+        confidence: 0.6,
+        requires_approval: false,
+        created_at: crate::ops::types::now(),
+        plan_hash: String::new(),
+        status: PlanStatus::PendingApproval,
+        evidence_summary: Some(EvidenceSummary {
+            table: evidence.table.clone(),
+            column_count: evidence.snapshot.columns.len(),
+            index_count: evidence.snapshot.indexes.len(),
+            row_estimate: evidence.stats.table_rows,
+            explain_findings: perf.explain.iter().map(ExplainSample::summary).collect(),
+        }),
+        execution: None,
+    };
+    Ok(plan.seal())
+}
+
 // ── 单测 ───────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2537,7 +3377,8 @@ mod tests {
 
     #[test]
     fn implicit_cast_rule_only_flags_index_risky_direction() {
-        let statement = parse_single_readonly_query(
+        let statement = parse_single_readonly_query_for(
+            &crate::config::DbType::MySQL,
             "SELECT * FROM orders WHERE status = 1 AND user_id = '42' AND created_at >= '2026-01-01'",
         )
         .unwrap();
@@ -2685,7 +3526,8 @@ mod tests {
 
     #[test]
     fn alias_map_resolves_explain_alias_to_real_table() {
-        let statement = parse_single_readonly_query(
+        let statement = parse_single_readonly_query_for(
+            &crate::config::DbType::MySQL,
             "SELECT * FROM orders o WHERE o.user_id = 42",
         )
         .unwrap();
@@ -2865,11 +3707,141 @@ mod tests {
     }
 
     #[test]
+    fn digest_accepts_pg_queryid_and_mysql_hex() {
+        // PG queryid 十进制，可为负（64 位 hash 溢出）。
+        assert_eq!(
+            normalize_digest(Some("-9123456789012345678".into())),
+            Some("-9123456789012345678".into())
+        );
+        assert_eq!(
+            normalize_digest(Some("12345".into())),
+            Some("12345".into())
+        );
+        // MySQL digest：64 位 hex。
+        let mysql = "a".repeat(64);
+        assert_eq!(normalize_digest(Some(mysql.clone())), Some(mysql));
+        assert_eq!(normalize_digest(Some("not-a-digest".into())), None);
+        assert_eq!(normalize_digest(Some("--1".into())), None);
+    }
+
+    #[test]
     fn analyze_timeout_error_is_recognized() {
         assert!(is_analyze_timeout(
             "Error 3024: Query execution was interrupted, maximum execution time exceeded"
         ));
         assert!(is_analyze_timeout("maximum execution time of 5000 ms exceeded"));
         assert!(!is_analyze_timeout("Access denied for user"));
+    }
+
+    #[test]
+    fn pg_analyze_timeout_error_is_recognized() {
+        assert!(is_pg_analyze_timeout(
+            "canceling statement due to statement timeout"
+        ));
+        assert!(is_pg_analyze_timeout("ERROR: statement timeout"));
+        assert!(!is_pg_analyze_timeout("permission denied for table orders"));
+    }
+
+    #[test]
+    fn pg_slow_query_row_maps_only_real_columns() {
+        let mut row = RowMap::new();
+        row.insert("digest".into(), "9123456789012345678".into());
+        row.insert("digest_text".into(), "SELECT * FROM orders WHERE id = $1".into());
+        row.insert("count_star".into(), "12".into());
+        row.insert("total_exec_time".into(), "480.5".into());
+        row.insert("mean_exec_time".into(), "40.04".into());
+        row.insert("rows_sent".into(), "120".into());
+        row.insert("temp_blks_written".into(), "8".into());
+        let candidate = SlowQueryCandidate::from_pg_row(&row).unwrap();
+        assert_eq!(candidate.digest, "9123456789012345678");
+        assert_eq!(candidate.count_star, 12);
+        assert_eq!(candidate.total_latency_ms, 480.5);
+        assert_eq!(candidate.rows_sent_avg, 10);
+        // 不存在的列不填近似值
+        assert_eq!(candidate.rows_examined_sum, 0);
+        assert_eq!(candidate.created_tmp_tables, 0);
+        assert_eq!(candidate.scan_flag, None);
+        assert!(candidate.summary.contains("无扫描行/临时表/排序行等价指标"));
+    }
+
+    #[test]
+    fn pg_row_estimate_falls_back_to_plan_rows() {
+        let table = PerfTableEvidence {
+            table: "orders".into(),
+            snapshot: snapshot("orders", &[("id", "integer")]),
+            stats: TableStats {
+                table_rows: Some(0),
+                ..Default::default()
+            },
+            freshness: StatsFreshness::default(),
+        };
+        let explain = vec![ExplainSample {
+            label: "target-1".into(),
+            sql: "select * from orders".into(),
+            access_type: Some("ALL".into()),
+            rows_examined: Some(420),
+            ..Default::default()
+        }];
+        let estimate = compute_row_estimate_pg(std::slice::from_ref(&table), 0, &explain);
+        assert_eq!(estimate.value, 420);
+        assert_eq!(estimate.source, "EXPLAIN Plan Rows");
+        assert!(estimate.trusted);
+        assert!(estimate.reason.contains("reltuples=0"));
+
+        let counted = PerfTableEvidence {
+            table: "orders".into(),
+            snapshot: snapshot("orders", &[("id", "integer")]),
+            stats: TableStats {
+                table_rows: Some(5000),
+                ..Default::default()
+            },
+            freshness: StatsFreshness::default(),
+        };
+        let trusted = compute_row_estimate_pg(std::slice::from_ref(&counted), 0, &explain);
+        assert_eq!(trusted.value, 5000);
+        assert_eq!(trusted.source, "pg_class.reltuples");
+        assert!(trusted.trusted);
+    }
+
+    #[test]
+    fn pg_read_only_plan_has_no_actions() {
+        let snapshot = snapshot("orders", &[("id", "integer"), ("status", "text")]);
+        let mut evidence = perf_evidence("SELECT * FROM orders WHERE status = 'open'", snapshot);
+        evidence.extra = Some(serde_json::json!({
+            "engine": "postgresql",
+            "read_only": true,
+            "read_only_reason": "PG 性能诊断只读",
+        }));
+        let plan = build_plan(
+            &identity(),
+            &evidence,
+            PerfDiagnosticsInput::default(),
+            &crate::ops::policy::OpsPolicy::default(),
+        )
+        .unwrap();
+        assert!(plan.actions.is_empty());
+        assert!(!plan.requires_approval);
+        assert!(!plan.verification_explain_analyze);
+        assert!(plan.diagnosis.contains("PostgreSQL 只读"));
+        assert!(plan.code_advice.iter().any(|advice| advice.contains("不代执行")));
+        assert!(plan
+            .validation_checks
+            .iter()
+            .any(|check| check.id == "read-only"));
+    }
+
+    #[test]
+    fn pg_dialect_accepts_pg_specific_readonly_sql() {
+        assert!(ensure_single_readonly_query_for(
+            &crate::config::DbType::PostgreSQL,
+            "SELECT id::text FROM orders WHERE name ILIKE 'a%'",
+        )
+        .is_ok());
+        // 只读判定对所有引擎一致：写语句仍然被拒绝。
+        assert!(ensure_single_readonly_query_for(
+            &crate::config::DbType::PostgreSQL,
+            "UPDATE orders SET status = 'x'",
+        )
+        .is_err());
     }
 }
