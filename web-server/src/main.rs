@@ -4,6 +4,8 @@ mod ai_handlers;
 mod bridge;
 mod handlers;
 #[cfg(test)]
+mod data_sync_integration_mysql;
+#[cfg(test)]
 mod data_sync_integration_pg;
 #[cfg(test)]
 mod import_sql_integration_mysql;

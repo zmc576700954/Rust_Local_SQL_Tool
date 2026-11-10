@@ -186,10 +186,10 @@ pub struct PgDataSyncEngine;
 
 impl PgDataSyncEngine {
     pub async fn run(
-        source: &crate::db::DbClient,
-        target: &crate::db::DbClient,
+        source: crate::db::DbClient,
+        target: crate::db::DbClient,
         mut options: PgDataSyncOptions,
-        progress: impl Fn(PgDataSyncProgress) + Send + Sync,
+        progress: Box<dyn Fn(PgDataSyncProgress) + Send + Sync>,
     ) -> Result<PgDataSyncReport, AppError> {
         if !matches!(source.db_type, DbType::PostgreSQL) {
             return Err(AppError::BadRequest(format!(
@@ -203,17 +203,7 @@ impl PgDataSyncEngine {
                 target.db_type
             )));
         }
-        if options.mode == SyncMode::Mirror && !options.mirror_confirmed {
-            return Err(AppError::BadRequest(
-                "mirror 模式会删除目标库中源库不存在的数据，必须在接口上显式确认 mirror_confirmed=true"
-                    .to_string(),
-            ));
-        }
-        if options.single_transaction && options.resume {
-            return Err(AppError::BadRequest(
-                "single_transaction 与 resume 互斥：单事务作业不可续跑".to_string(),
-            ));
-        }
+        crate::sync::pipeline::validate_options(&options)?;
         options.batch_size = options.batch_size.max(1);
 
         let src_pool: &PgPool = source.pool.pg()?;
@@ -385,13 +375,13 @@ impl PgDataSyncEngine {
             }
         }
 
-        report.total_rows = report.tables.iter().map(|t| t.rows_copied).sum();
-        report.finished_at = chrono::Utc::now().timestamp();
-        report.resumable =
-            !options.single_transaction && ordered.iter().all(|p| !p.pk_columns.is_empty());
-        if !options.single_transaction {
-            report.checkpoint_file = Some(store.path_for(&key).display().to_string());
-        }
+        crate::sync::pipeline::finalize_report(
+            &mut report,
+            &options,
+            &store,
+            &key,
+            ordered.iter().all(|p| !p.pk_columns.is_empty()),
+        );
         Ok(report)
     }
 }
@@ -1451,29 +1441,4 @@ async fn compute_digest(
     Ok((total.max(0) as u64, Some(format!("{:x}", hasher.finalize()))))
 }
 
-pub fn overall_verification_status(tables: &[PgTableReport]) -> String {
-    let mut any_failed = false;
-    let mut any_unverified = false;
-    let mut any_count_only = false;
-    let mut any_verified = false;
-    for t in tables {
-        match t.verification.as_str() {
-            "failed" => any_failed = true,
-            "unverified" => any_unverified = true,
-            "count_only" => any_count_only = true,
-            "verified" => any_verified = true,
-            _ => {}
-        }
-    }
-    if any_failed {
-        "failed".to_string()
-    } else if any_unverified {
-        "unverified".to_string()
-    } else if any_count_only {
-        "count_only".to_string()
-    } else if any_verified {
-        "verified".to_string()
-    } else {
-        "unverified".to_string()
-    }
-}
+pub use crate::sync::pipeline::overall_verification_status;

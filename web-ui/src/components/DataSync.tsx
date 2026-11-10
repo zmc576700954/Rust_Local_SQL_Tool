@@ -51,6 +51,13 @@ export function DataSync({ onCancel }: DataSyncProps) {
     targetDbId.length > 0 &&
     sourceConn?.db_type === 'postgresql' &&
     targetConn?.db_type === 'postgresql';
+  // MySQL / MariaDB 已迁移到与 PG 同一套分阶段流水线；两族不能混用。
+  const isMySqlPair =
+    sourceDbId.length > 0 &&
+    targetDbId.length > 0 &&
+    (sourceConn?.db_type === 'mysql' || sourceConn?.db_type === 'mariadb') &&
+    (targetConn?.db_type === 'mysql' || targetConn?.db_type === 'mariadb');
+  const isStagedPair = isPgPair || isMySqlPair;
   const recordPreview = diffs[0]
     ? {
         inserts: (diffs[0].inserts || []).slice(0, 5),
@@ -88,10 +95,12 @@ export function DataSync({ onCancel }: DataSyncProps) {
     };
   }, []);
 
-  // PG 模式默认 upsert；mirror 必须由用户显式选择并二次确认。
+  // 分阶段模式默认 upsert；mirror 必须由用户显式选择并二次确认。
   useEffect(() => {
-    if (isPgPair) setStrategy('upsert_only');
-  }, [isPgPair]);
+    if (isStagedPair) setStrategy('upsert_only');
+    // MySQL/MariaDB 的 DDL 会隐式提交，单事务不可用，切过去时强制关掉。
+    if (isMySqlPair) setPgSingleTransaction(false);
+  }, [isStagedPair, isMySqlPair]);
 
   useEffect(() => {
     if (strategy !== 'upsert_only') return;
@@ -242,6 +251,16 @@ export function DataSync({ onCancel }: DataSyncProps) {
       toast(tr('单事务与断点续跑互斥，请二选一。', 'Single transaction and resume are mutually exclusive.'), 'info');
       return;
     }
+    if (isMySqlPair && pgSingleTransaction) {
+      toast(
+        tr(
+          'MySQL/MariaDB 的建表/建索引/AUTO_INCREMENT 对齐都会隐式提交，单事务无法覆盖整个作业，请关闭单事务。',
+          'MySQL/MariaDB DDL (CREATE TABLE/INDEX, AUTO_INCREMENT) implicitly commits, so a job-wide single transaction is unavailable.'
+        ),
+        'info'
+      );
+      return;
+    }
 
     setIsLoading(true);
     setErrorObj(null);
@@ -261,7 +280,7 @@ export function DataSync({ onCancel }: DataSyncProps) {
         batch_size: Number.isFinite(batch) && batch > 0 ? Math.floor(batch) : undefined,
         create_missing_tables: pgCreateMissing,
         mirror_confirmed: strategy === 'mirror' ? pgMirrorConfirmed : undefined,
-        single_transaction: pgSingleTransaction,
+        single_transaction: isMySqlPair ? false : pgSingleTransaction,
         defer_constraints: pgDeferConstraints,
         allow_no_pk: pgAllowNoPk,
         resume: pgResume,
@@ -923,16 +942,19 @@ export function DataSync({ onCancel }: DataSyncProps) {
               <input type="checkbox" checked={pgCreateMissing} onChange={(e) => setPgCreateMissing(e.target.checked)} />
               {tr('目标库缺失表时自动创建', 'Create missing target tables')}
             </label>
-            <label className="flex items-center gap-2 text-sm text-gray-300">
+            <label className={`flex items-center gap-2 text-sm ${isMySqlPair ? 'text-gray-500' : 'text-gray-300'}`}>
               <input
                 type="checkbox"
-                checked={pgSingleTransaction}
+                checked={isMySqlPair ? false : pgSingleTransaction}
+                disabled={isMySqlPair}
                 onChange={(e) => {
                   setPgSingleTransaction(e.target.checked);
                   if (e.target.checked) setPgResume(false);
                 }}
               />
-              {tr('单事务（不可续跑）', 'Single transaction (not resumable)')}
+              {isMySqlPair
+                ? tr('单事务（MySQL/MariaDB 不支持：DDL 隐式提交）', 'Single transaction (unavailable: MySQL/MariaDB DDL implicitly commits)')
+                : tr('单事务（不可续跑）', 'Single transaction (not resumable)')}
             </label>
             <label className="flex items-center gap-2 text-sm text-gray-300">
               <input
@@ -947,7 +969,9 @@ export function DataSync({ onCancel }: DataSyncProps) {
             </label>
             <label className="flex items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={pgDeferConstraints} onChange={(e) => setPgDeferConstraints(e.target.checked)} />
-              {tr('延迟外键约束（外键成环时使用 session_replication_role=replica，需要超级用户）', 'Defer constraints (cycle handling via session_replication_role=replica; requires superuser)')}
+              {isMySqlPair
+                ? tr('外键环处理：数据灌完后再建外键（不使用 SET FOREIGN_KEY_CHECKS=0）', 'FK cycles: create FKs after loading data (never SET FOREIGN_KEY_CHECKS=0)')
+                : tr('延迟外键约束（外键成环时使用 session_replication_role=replica，需要超级用户）', 'Defer constraints (cycle handling via session_replication_role=replica; requires superuser)')}
             </label>
             <label className="flex items-center gap-2 text-sm text-gray-300">
               <input type="checkbox" checked={pgAllowNoPk} onChange={(e) => setPgAllowNoPk(e.target.checked)} />
@@ -1040,16 +1064,16 @@ export function DataSync({ onCancel }: DataSyncProps) {
       )
     }
   ];
-  const steps: WizardStep[] = isPgPair ? pgSteps : mysqlSteps;
+  const steps: WizardStep[] = isStagedPair ? pgSteps : mysqlSteps;
 
   return (
     <StepWizard
       title={tr('数据同步', 'Data Sync')}
       steps={steps}
       onCancel={onCancel}
-      onFinish={isPgPair ? handlePgExecute : handleExecute}
+      onFinish={isStagedPair ? handlePgExecute : handleExecute}
       finalWarningMessage={
-        isPgPair
+        isStagedPair
           ? (strategy === 'mirror'
             ? tr('mirror 模式会删除目标库中源库不存在的行，该操作不可撤销。请确认目标库选择无误。', 'Mirror mode deletes target rows missing from the source and cannot be undone. Confirm the target database.')
             : tr('即将对目标库执行分阶段数据同步，该操作会修改数据。请确认目标库选择无误。', 'You are about to run the staged data sync against the target database. This modifies data.'))

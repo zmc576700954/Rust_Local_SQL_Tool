@@ -196,10 +196,10 @@ async fn pg_data_sync_end_to_end_types_sequence_and_idempotent() {
 
     let dir = checkpoint_dir("types");
     let report = PgDataSyncEngine::run(
-        &f.source_client,
-        &f.target_client,
+        f.source_client.clone(),
+        f.target_client.clone(),
         options(1, dir.clone()),
-        |_| {},
+        Box::new(|_| {}),
     )
     .await
     .expect("数据同步应成功");
@@ -328,10 +328,10 @@ async fn pg_data_sync_end_to_end_types_sequence_and_idempotent() {
     )
     .await;
     let again = PgDataSyncEngine::run(
-        &f.source_client,
-        &f.target_client,
+        f.source_client.clone(),
+        f.target_client.clone(),
         options(1, dir.clone()),
-        |_| {},
+        Box::new(|_| {}),
     )
     .await
     .expect("重复执行应成功");
@@ -386,7 +386,7 @@ async fn pg_data_sync_resume_after_interruption() {
     let mut opts = options(1, dir.clone());
     opts.tables = Some(vec!["resume_users".to_string()]);
 
-    let first = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts.clone(), |_| {})
+    let first = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts.clone(), Box::new(|_| {}))
         .await
         .expect("引擎应返回失败报告而不是 panic");
     assert!(
@@ -410,7 +410,7 @@ async fn pg_data_sync_resume_after_interruption() {
     .await;
 
     opts.resume = true;
-    let resumed = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts.clone(), |_| {})
+    let resumed = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts.clone(), Box::new(|_| {}))
         .await
         .expect("续跑应成功");
     assert!(resumed.error.is_none(), "{resumed:?}");
@@ -432,7 +432,7 @@ async fn pg_data_sync_resume_after_interruption() {
     let mut missing = options(1, checkpoint_dir("resume-missing"));
     missing.tables = Some(vec!["resume_users".to_string()]);
     missing.resume = true;
-    let err = PgDataSyncEngine::run(&f.source_client, &f.target_client, missing, |_| {})
+    let err = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), missing, Box::new(|_| {}))
         .await
         .expect_err("缺少断点时必须拒绝续跑");
     assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
@@ -468,13 +468,13 @@ async fn pg_data_sync_mirror_requires_confirmation_and_deletes() {
     opts.tables = Some(vec!["mirror_items".to_string()]);
     opts.mode = SyncMode::Mirror;
 
-    let err = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts.clone(), |_| {})
+    let err = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts.clone(), Box::new(|_| {}))
         .await
         .expect_err("mirror 未确认时必须拒绝");
     assert!(err.to_string().contains("mirror"), "{err}");
 
     opts.mirror_confirmed = true;
-    let report = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts, |_| {})
+    let report = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts, Box::new(|_| {}))
         .await
         .expect("mirror 同步应成功");
     assert!(report.error.is_none(), "{report:?}");
@@ -537,7 +537,7 @@ async fn pg_data_sync_plan_rejections_and_single_transaction() {
     // 1) 无主键默认拒绝
     let mut opts = options(10, checkpoint_dir("reject-nopk"));
     opts.tables = Some(vec!["no_pk_table".to_string()]);
-    let err = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts, |_| {})
+    let err = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts, Box::new(|_| {}))
         .await
         .expect_err("无主键必须拒绝");
     assert!(err.to_string().contains("没有主键"), "{err}");
@@ -545,7 +545,7 @@ async fn pg_data_sync_plan_rejections_and_single_transaction() {
     // 2) 复合类型 Plan 阶段拒绝
     let mut opts = options(10, checkpoint_dir("reject-comp"));
     opts.tables = Some(vec!["comp_col".to_string()]);
-    let err = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts, |_| {})
+    let err = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts, Box::new(|_| {}))
         .await
         .expect_err("复合类型必须拒绝");
     assert!(err.to_string().contains("复合/伪类型"), "{err}");
@@ -553,7 +553,7 @@ async fn pg_data_sync_plan_rejections_and_single_transaction() {
     // 3) 外键环默认拒绝并列出环上的表
     let mut opts = options(10, checkpoint_dir("reject-cycle"));
     opts.tables = Some(vec!["cyc_a".to_string(), "cyc_b".to_string()]);
-    let err = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts, |_| {})
+    let err = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts, Box::new(|_| {}))
         .await
         .expect_err("外键环默认必须拒绝");
     assert!(err.to_string().contains("外键循环依赖"), "{err}");
@@ -564,7 +564,7 @@ async fn pg_data_sync_plan_rejections_and_single_transaction() {
     let mut opts = options(10, checkpoint_dir("defer-cycle"));
     opts.tables = Some(vec!["cyc_a".to_string(), "cyc_b".to_string()]);
     opts.defer_constraints = true;
-    let report = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts, |_| {})
+    let report = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts, Box::new(|_| {}))
         .await
         .expect("defer 模式应成功");
     assert!(report.error.is_none(), "{report:?}");
@@ -587,7 +587,7 @@ async fn pg_data_sync_plan_rejections_and_single_transaction() {
     )
     .await;
     opts.create_missing_tables = false;
-    let err = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts, |_| {})
+    let err = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts, Box::new(|_| {}))
         .await
         .expect_err("目标缺表且禁止建表必须拒绝");
     assert!(err.to_string().contains("create_missing_tables=false"), "{err}");
@@ -596,7 +596,7 @@ async fn pg_data_sync_plan_rejections_and_single_transaction() {
     let mut opts = options(10, checkpoint_dir("mutex"));
     opts.single_transaction = true;
     opts.resume = true;
-    let err = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts, |_| {})
+    let err = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts, Box::new(|_| {}))
         .await
         .expect_err("单事务与续跑互斥");
     assert!(err.to_string().contains("互斥"), "{err}");
@@ -606,7 +606,7 @@ async fn pg_data_sync_plan_rejections_and_single_transaction() {
     let mut opts = options(1, dir.clone());
     opts.tables = Some(vec!["atomic_items".to_string()]);
     opts.single_transaction = true;
-    let failed = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts.clone(), |_| {})
+    let failed = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts.clone(), Box::new(|_| {}))
         .await
         .expect("引擎应返回失败报告");
     assert!(failed.rolled_back, "单事务失败必须回滚: {failed:?}");
@@ -625,7 +625,7 @@ async fn pg_data_sync_plan_rejections_and_single_transaction() {
         "ALTER TABLE atomic_items DROP CONSTRAINT atomic_items_v_check;",
     )
     .await;
-    let ok = PgDataSyncEngine::run(&f.source_client, &f.target_client, opts, |_| {})
+    let ok = PgDataSyncEngine::run(f.source_client.clone(), f.target_client.clone(), opts, Box::new(|_| {}))
         .await
         .expect("单事务同步应成功");
     assert!(ok.error.is_none(), "{ok:?}");

@@ -9,7 +9,7 @@
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,6 +31,13 @@ pub struct Checkpoint {
     pub version: u32,
     pub job_key: String,
     pub tables: BTreeMap<String, TableCheckpoint>,
+    /// 本作业已经执行过建表 DDL 的表。
+    ///
+    /// MySQL/MariaDB 的 DDL 会隐式提交，无法和断点放在同一事务里；续跑时靠
+    /// 这个集合区分“本作业新建的表”和“执行前就存在的表”，避免对已有表
+    /// 擅自补建索引/外键，同时又能把上次中断前的 DDL 阶段做完。
+    #[serde(default)]
+    pub created_tables: BTreeSet<String>,
 }
 
 impl Checkpoint {
@@ -39,6 +46,7 @@ impl Checkpoint {
             version: CHECKPOINT_VERSION,
             job_key: job_key.into(),
             tables: BTreeMap::new(),
+            created_tables: BTreeSet::new(),
         }
     }
 }

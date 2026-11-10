@@ -7,8 +7,6 @@ use crate::config::DbType;
 use crate::error::AppError;
 use crate::sql_util::quote_ident_pg;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PgColumnSpec {
@@ -457,65 +455,7 @@ pub fn create_index_if_not_exists(def: &str) -> String {
 
 /// `edges` 为 `(子表, 被引用父表)`。父表必须先同步。
 /// 存在环时返回环上（Kahn 剩余）的表名列表。
-pub fn topological_order(
-    tables: &[String],
-    edges: &[(String, String)],
-) -> Result<Vec<String>, Vec<String>> {
-    let known: BTreeSet<&str> = tables.iter().map(|t| t.as_str()).collect();
-    let mut indegree: BTreeMap<&str, usize> = tables.iter().map(|t| (t.as_str(), 0)).collect();
-    let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-
-    for (child, parent) in edges {
-        if child == parent {
-            continue;
-        }
-        let (Some(child), Some(parent)) = (
-            known.get(child.as_str()).copied(),
-            known.get(parent.as_str()).copied(),
-        ) else {
-            continue;
-        };
-        if !children
-            .get(parent)
-            .map(|v| v.contains(&child))
-            .unwrap_or(false)
-        {
-            children.entry(parent).or_default().push(child);
-            *indegree.get_mut(child).unwrap() += 1;
-        }
-    }
-
-    let mut ready: BTreeSet<&str> = indegree
-        .iter()
-        .filter(|(_, d)| **d == 0)
-        .map(|(t, _)| *t)
-        .collect();
-    let mut order = Vec::with_capacity(tables.len());
-    while let Some(next) = ready.iter().next().copied() {
-        ready.remove(next);
-        order.push(next.to_string());
-        if let Some(kids) = children.get(next) {
-            for kid in kids {
-                let d = indegree.get_mut(kid).unwrap();
-                *d -= 1;
-                if *d == 0 {
-                    ready.insert(kid);
-                }
-            }
-        }
-    }
-
-    if order.len() == tables.len() {
-        Ok(order)
-    } else {
-        let cycle = indegree
-            .into_iter()
-            .filter(|(_, d)| *d > 0)
-            .map(|(t, _)| t.to_string())
-            .collect::<Vec<_>>();
-        Err(cycle)
-    }
-}
+pub use crate::sync::pipeline::topological_order;
 
 // ── 作业指纹 ───────────────────────────────────────────
 
@@ -526,37 +466,30 @@ pub fn compute_job_key(
     batch_size: usize,
     plans: &[PgTablePlan],
 ) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(source_label.as_bytes());
-    hasher.update(b"\x1f");
-    hasher.update(target_label.as_bytes());
-    hasher.update(b"\x1f");
-    hasher.update(mode.as_bytes());
-    hasher.update(b"\x1f");
-    hasher.update(batch_size.to_string().as_bytes());
-    hasher.update(b"\x1f");
-    let mut sorted = plans.to_vec();
-    sorted.sort_by(|a, b| a.display_name.cmp(&b.display_name));
-    for plan in sorted {
-        hasher.update(plan.display_name.as_bytes());
-        hasher.update(b"\x1e");
-        for col in &plan.columns {
-            hasher.update(col.name.as_bytes());
-            hasher.update(b"\x1d");
-            hasher.update(col.formatted_type.as_bytes());
-            hasher.update(b"\x1d");
-            hasher.update(col.identity.as_bytes());
-            hasher.update(b"\x1d");
-            hasher.update(col.generated.as_bytes());
-            hasher.update(b"\x1e");
-        }
-        for pk in &plan.pk_columns {
-            hasher.update(b"\x1c");
-            hasher.update(pk.as_bytes());
-        }
-        hasher.update(b"\x1f");
-    }
-    format!("{:x}", hasher.finalize())
+    let tables = plans
+        .iter()
+        .map(|plan| crate::sync::pipeline::JobKeyTable {
+            display_name: plan.display_name.clone(),
+            columns: plan
+                .columns
+                .iter()
+                .map(|col| crate::sync::pipeline::JobKeyColumn {
+                    name: col.name.clone(),
+                    type_text: col.formatted_type.clone(),
+                    identity: col.identity.clone(),
+                    generated: col.generated.clone(),
+                })
+                .collect(),
+            pk_columns: plan.pk_columns.clone(),
+        })
+        .collect::<Vec<_>>();
+    crate::sync::pipeline::compute_job_key_for_tables(
+        source_label,
+        target_label,
+        mode,
+        batch_size,
+        &tables,
+    )
 }
 
 /// 校验 Plan：没有主键的表默认拒绝；目标表缺列/主键不一致时拒绝。
