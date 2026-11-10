@@ -57,9 +57,11 @@ impl OfflineParser {
                             sort_order: "ASC".to_string(),
                             is_primary: true,
                             is_expression: false,
+                            expression: None,
                             is_partial: false,
                             predicate: None,
                             definition: None,
+                            conversion_blocker: None,
                         });
                     }
 

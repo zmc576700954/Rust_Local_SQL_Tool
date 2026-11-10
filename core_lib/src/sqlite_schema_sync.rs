@@ -21,14 +21,19 @@
 //! SQLite 的 DDL 是事务性的，任何一步失败（含外键校验失败）都会回滚到
 //! 重建前的旧表；PRAGMA 的设置在成功/失败路径都由执行器恢复为进入前的值。
 //!
-//! 表达式索引/部分索引无法在 `IndexInfo` 里完整表达：生成计划时进入
-//! `unsupported` 并跳过该表的重建，避免生成一张结构被削弱的表。
+//! 表达式索引与部分索引按 `sqlite_master.sql` 还原出的表达式文本/谓词
+//! 生成 `CREATE INDEX ... ((expr)) WHERE pred`；只有元数据不足以安全重建
+//! 时才进入 `unsupported`（区分「未支持」与「无法安全转换」）并跳过该表。
 
 use crate::db::DbError;
 use crate::pg_schema_sync::DestructiveChange;
-use crate::schema::{ColumnInfo, IndexInfo, SchemaResponse, TableWithDetails};
-use crate::tools::{SchemaDiff, SyncEngine};
+use crate::schema::{
+    normalize_index_expression, ColumnInfo, IndexInfo, SchemaResponse, SqlDialect, SyncIssue,
+    TableWithDetails,
+};
+use crate::tools::{IndexDiff, SchemaDiff, SyncEngine};
 use sqlx::{Row, SqlitePool};
+use std::collections::BTreeMap;
 
 pub const REBUILD_MARKER: &str = "-- sqlite-rebuild-plan";
 
@@ -44,7 +49,7 @@ pub struct SqliteDdlPlan {
     /// 事务内语句（不含 PRAGMA/BEGIN/COMMIT）。
     pub statements: Vec<String>,
     pub destructive: Vec<DestructiveChange>,
-    pub unsupported: Vec<String>,
+    pub unsupported: Vec<SyncIssue>,
     /// COMMIT 前做外键校验的表（重建/新建的表）。
     pub check_tables: Vec<String>,
 }
@@ -81,7 +86,7 @@ impl SqliteDdlPlan {
 pub struct SqliteSyncResult {
     pub diff: SchemaDiff,
     pub destructive: Vec<DestructiveChange>,
-    pub unsupported: Vec<String>,
+    pub unsupported: Vec<SyncIssue>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +148,35 @@ impl SqliteSchemaSyncEngine {
                 .iter()
                 .find(|t| t.table_name == table_diff.table_name);
 
+            // 索引按名称分组对比。SyncEngine 的逐行比较无法表达"表达式列"
+            // 与"WHERE 谓词"，这里用规范化后的文本重新判定，覆盖其索引结果。
+            if let Some(tgt) = tgt {
+                let src_groups = grouped_indexes(src);
+                let tgt_groups = grouped_indexes(tgt);
+                let mut added = Vec::new();
+                let mut removed = Vec::new();
+                let mut modified = Vec::new();
+                for (name, src_rows) in &src_groups {
+                    match tgt_groups.get(name) {
+                        Some(tgt_rows) if !index_rows_equal(src_rows, tgt_rows) => {
+                            modified.extend(index_row_diffs(tgt_rows, src_rows));
+                        }
+                        Some(_) => {}
+                        None => added.extend(src_rows.clone()),
+                    }
+                }
+                for (name, tgt_rows) in &tgt_groups {
+                    if !src_groups.contains_key(name) {
+                        removed.extend(tgt_rows.clone());
+                    }
+                }
+                table_diff.indexes_added = added;
+                table_diff.indexes_removed = removed;
+                table_diff.indexes_modified = modified;
+            } else {
+                table_diff.indexes_added = group_index_rows(src);
+            }
+
             if let Some(tgt) = tgt {
                 if tgt.without_rowid != src.without_rowid {
                     table_diff.status = "modified".to_string();
@@ -150,6 +184,22 @@ impl SqliteSchemaSyncEngine {
                 if !same_triggers(&src.triggers, &tgt.triggers) {
                     table_diff.status = "modified".to_string();
                 }
+                let changed = !table_diff.columns_added.is_empty()
+                    || !table_diff.columns_removed.is_empty()
+                    || !table_diff.columns_modified.is_empty()
+                    || !table_diff.indexes_added.is_empty()
+                    || !table_diff.indexes_removed.is_empty()
+                    || !table_diff.indexes_modified.is_empty()
+                    || !table_diff.fks_added.is_empty()
+                    || !table_diff.fks_removed.is_empty()
+                    || !table_diff.fks_modified.is_empty()
+                    || tgt.without_rowid != src.without_rowid
+                    || !same_triggers(&src.triggers, &tgt.triggers);
+                table_diff.status = if changed {
+                    "modified".to_string()
+                } else {
+                    "unchanged".to_string()
+                };
             }
 
             if !table_diff.columns_removed.is_empty() {
@@ -205,26 +255,20 @@ impl SqliteSchemaSyncEngine {
                 }
             }
 
-            // 只有表确实需要变更时才报告无法自动同步的索引；
-            // 完全一致的表不应因为存在表达式索引而反复告警。
+            // 只有表确实需要变更时才报告无法安全同步的索引；
+            // 完全一致的表不应因为存在无法解析的历史索引而反复告警。
             if table_diff.status != "unchanged" {
-                for idx in src
-                    .indexes
-                    .iter()
-                    .chain(tgt.map(|t| t.indexes.as_slice()).unwrap_or(&[]))
-                {
-                    if idx.is_expression || idx.is_partial {
-                        let reason = if idx.is_partial {
-                            "部分索引"
-                        } else {
-                            "表达式索引"
-                        };
-                        unsupported.push(format!(
-                            "{}.{}: {}无法自动同步，原始 SQL: {}",
-                            table_diff.table_name,
-                            idx.index_name,
+                let mut groups: Vec<Vec<IndexInfo>> =
+                    grouped_indexes(src).into_values().collect();
+                if let Some(tgt) = tgt {
+                    groups.extend(grouped_indexes(tgt).into_values());
+                }
+                for group in &groups {
+                    if let Some(reason) = index_rows_blocker(group) {
+                        unsupported.push(SyncIssue::unsafe_conversion(
+                            Some(&table_diff.table_name),
+                            group.first().map(|r| r.index_name.as_str()),
                             reason,
-                            idx.definition.as_deref().unwrap_or("<not available>")
                         ));
                     }
                 }
@@ -297,9 +341,7 @@ impl SqliteSchemaSyncEngine {
                 .find(|t| t.table_name == table_diff.table_name);
             match table_diff.status.as_str() {
                 "added" => {
-                    let reasons = unsupported_index_reasons(src);
-                    if !reasons.is_empty() {
-                        plan.unsupported.extend(reasons);
+                    if table_has_blocked_index(src) {
                         continue;
                     }
                     plan.statements
@@ -309,17 +351,36 @@ impl SqliteSchemaSyncEngine {
                     plan.check_tables.push(src.table_name.clone());
                 }
                 "modified" => {
-                    let reasons = unsupported_index_reasons(src);
-                    if !reasons.is_empty() {
-                        plan.unsupported.extend(reasons);
+                    if table_has_blocked_index(src) {
                         continue;
                     }
                     let Some(tgt) = tgt else {
                         continue;
                     };
+                    // 仅索引/触发器不同时不需要重建表：直接 DROP/CREATE INDEX，
+                    // 避免整表拷贝。列、外键、WITHOUT ROWID 变化才走重建。
+                    let structure_changed = !table_diff.columns_added.is_empty()
+                        || !table_diff.columns_removed.is_empty()
+                        || !table_diff.columns_modified.is_empty()
+                        || !table_diff.fks_added.is_empty()
+                        || !table_diff.fks_removed.is_empty()
+                        || !table_diff.fks_modified.is_empty()
+                        || primary_key_columns(src) != primary_key_columns(tgt)
+                        || src.without_rowid != tgt.without_rowid;
+                    if !structure_changed {
+                        push_index_diff_statements(&mut plan, src, tgt);
+                        if !same_triggers(&src.triggers, &tgt.triggers) {
+                            push_trigger_statements(&mut plan, src, &tgt.triggers);
+                        }
+                        continue;
+                    }
                     let mut table_statements = Vec::new();
                     if let Err(reason) = rebuild_table_sql(src, tgt, &mut table_statements) {
-                        plan.unsupported.push(reason);
+                        plan.unsupported.push(SyncIssue::unsafe_conversion(
+                            Some(&src.table_name),
+                            None,
+                            reason,
+                        ));
                         continue;
                     }
                     plan.statements.extend(table_statements);
@@ -330,8 +391,9 @@ impl SqliteSchemaSyncEngine {
                     plan.check_tables.push(src.table_name.clone());
                 }
                 _ => {
-                    // 表本身没变，但触发器可能不同。
+                    // 表本身没变：索引/触发器差异可以原地同步，不需要重建。
                     if let Some(tgt) = tgt {
+                        push_index_diff_statements(&mut plan, src, tgt);
                         if !same_triggers(&src.triggers, &tgt.triggers) {
                             push_trigger_statements(&mut plan, src, &tgt.triggers);
                         }
@@ -353,34 +415,153 @@ impl SqliteSchemaSyncEngine {
     }
 }
 
-fn unsupported_index_reasons(table: &TableWithDetails) -> Vec<String> {
-    table
-        .indexes
+fn grouped_indexes(table: &TableWithDetails) -> BTreeMap<String, Vec<IndexInfo>> {
+    let mut map: BTreeMap<String, Vec<IndexInfo>> = BTreeMap::new();
+    for idx in &table.indexes {
+        map.entry(idx.index_name.clone())
+            .or_default()
+            .push(idx.clone());
+    }
+    for rows in map.values_mut() {
+        rows.sort_by_key(|r| r.seq_in_index);
+    }
+    map
+}
+
+fn group_index_rows(table: &TableWithDetails) -> Vec<IndexInfo> {
+    grouped_indexes(table).into_values().flatten().collect()
+}
+
+fn normalized_predicate(predicate: &Option<String>) -> Option<String> {
+    predicate
+        .as_ref()
+        .map(|p| normalize_index_expression(SqlDialect::Sqlite, p))
+}
+
+fn normalized_expression(expression: &Option<String>) -> Option<String> {
+    expression
+        .as_ref()
+        .map(|e| normalize_index_expression(SqlDialect::Sqlite, e))
+}
+
+/// 同名的多列索引必须整体比较：列顺序、表达式文本、排序方向、谓词任一不同
+/// 都是差异。只比较第一行或只比较列名会把表达式索引误判为相同。
+fn index_rows_equal(a: &[IndexInfo], b: &[IndexInfo]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(x, y)| {
+        x.non_unique == y.non_unique
+            && x.sort_order.eq_ignore_ascii_case(&y.sort_order)
+            && normalized_predicate(&x.predicate) == normalized_predicate(&y.predicate)
+            && match (&x.expression, &y.expression) {
+                (Some(ex), Some(ey)) => normalized_expression(&Some(ex.clone()))
+                    == normalized_expression(&Some(ey.clone())),
+                (None, None) => x.column_name.eq_ignore_ascii_case(&y.column_name),
+                _ => false,
+            }
+    })
+}
+
+fn index_row_diffs(tgt_rows: &[IndexInfo], src_rows: &[IndexInfo]) -> Vec<IndexDiff> {
+    src_rows
         .iter()
-        .filter(|idx| {
-            idx.is_expression
-                || idx.is_partial
-                || (!idx.is_primary
-                    && !idx.index_name.starts_with("sqlite_autoindex_")
-                    && idx.definition.is_none())
-        })
-        .map(|idx| {
-            let reason = if idx.is_partial {
-                "部分索引"
-            } else if idx.is_expression {
-                "表达式索引"
-            } else {
-                "索引缺少原始 SQL"
-            };
-            format!(
-                "{}.{}: {}无法在表重建中自动恢复，原始 SQL: {}",
-                table.table_name,
-                idx.index_name,
-                reason,
-                idx.definition.as_deref().unwrap_or("<not available>")
-            )
+        .enumerate()
+        .map(|(i, new)| IndexDiff {
+            old: tgt_rows
+                .get(i)
+                .or_else(|| tgt_rows.first())
+                .cloned()
+                .unwrap_or_else(|| new.clone()),
+            new: new.clone(),
         })
         .collect()
+}
+
+fn index_rows_blocker(rows: &[IndexInfo]) -> Option<String> {
+    rows.iter().find_map(|r| r.conversion_blocker.clone())
+}
+
+fn table_has_blocked_index(table: &TableWithDetails) -> bool {
+    grouped_indexes(table)
+        .values()
+        .any(|rows| index_rows_blocker(rows).is_some())
+}
+
+fn is_managed_index(rows: &[IndexInfo]) -> bool {
+    rows.first()
+        .map(|r| r.is_primary || r.index_name.starts_with("sqlite_autoindex_"))
+        .unwrap_or(true)
+}
+
+fn index_create_sql(table_name: &str, rows: &[IndexInfo]) -> Option<String> {
+    if is_managed_index(rows) || index_rows_blocker(rows).is_some() {
+        return None;
+    }
+    let first = rows.first()?;
+    let parts: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let base = match &r.expression {
+                Some(expr) => format!("({})", expr.trim()),
+                None => quote_ident(&r.column_name),
+            };
+            let sort = if r.sort_order.eq_ignore_ascii_case("DESC") {
+                "DESC"
+            } else {
+                "ASC"
+            };
+            format!("{} {}", base, sort)
+        })
+        .collect();
+    let predicate = rows
+        .iter()
+        .find_map(|r| r.predicate.clone())
+        .map(|p| format!(" WHERE {}", p.trim()))
+        .unwrap_or_default();
+    Some(format!(
+        "CREATE {}INDEX {} ON {} ({}){}",
+        if first.non_unique { "" } else { "UNIQUE " },
+        quote_ident(&first.index_name),
+        quote_ident(table_name),
+        parts.join(", "),
+        predicate
+    ))
+}
+
+fn push_index_diff_statements(
+    plan: &mut SqliteDdlPlan,
+    src: &TableWithDetails,
+    tgt: &TableWithDetails,
+) {
+    let src_groups = grouped_indexes(src);
+    let tgt_groups = grouped_indexes(tgt);
+    for (name, rows) in &src_groups {
+        match tgt_groups.get(name) {
+            Some(old_rows) if !index_rows_equal(rows, old_rows) => {
+                if index_rows_blocker(rows).is_some() || index_rows_blocker(old_rows).is_some() {
+                    continue;
+                }
+                if !is_managed_index(old_rows) {
+                    plan.statements.push(format!("DROP INDEX IF EXISTS {}", quote_ident(name)));
+                }
+                if let Some(sql) = index_create_sql(&src.table_name, rows) {
+                    plan.statements.push(sql);
+                }
+            }
+            Some(_) => {}
+            None => {
+                if let Some(sql) = index_create_sql(&src.table_name, rows) {
+                    plan.statements.push(sql);
+                }
+            }
+        }
+    }
+    for (name, rows) in &tgt_groups {
+        if !src_groups.contains_key(name) && !is_managed_index(rows) {
+            plan.statements.push(format!("DROP INDEX IF EXISTS {}", quote_ident(name)));
+        }
+    }
 }
 
 fn rebuild_table_sql(
@@ -582,21 +763,10 @@ fn primary_key_columns(table: &TableWithDetails) -> Vec<(String, u32)> {
 }
 
 fn push_index_statements(plan: &mut SqliteDdlPlan, table: &TableWithDetails) {
-    for idx in &table.indexes {
-        if idx.is_primary || idx.index_name.starts_with("sqlite_autoindex_") {
-            continue;
+    for rows in grouped_indexes(table).values() {
+        if let Some(sql) = index_create_sql(&table.table_name, rows) {
+            plan.statements.push(sql);
         }
-        if idx.is_expression || idx.is_partial {
-            continue; // 已在 unsupported 中报告
-        }
-        let Some(definition) = &idx.definition else {
-            plan.unsupported.push(format!(
-                "{}.{}: 缺少索引原始 SQL，无法在重建后恢复",
-                table.table_name, idx.index_name
-            ));
-            continue;
-        };
-        plan.statements.push(definition.clone());
     }
 }
 
@@ -652,9 +822,10 @@ fn push_view_statements(
             continue;
         }
         if src.view_definition.trim().is_empty() {
-            plan.unsupported.push(format!(
-                "视图 {} 缺少原始定义，无法同步",
-                src.table_name
+            plan.unsupported.push(SyncIssue::unsafe_conversion(
+                Some(&src.table_name),
+                None,
+                "视图缺少原始定义，无法同步",
             ));
             continue;
         }
@@ -1218,29 +1389,224 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn find_index<'a>(
+        schema: &'a SchemaResponse,
+        table: &str,
+        index: &str,
+    ) -> Vec<&'a IndexInfo> {
+        let mut rows: Vec<&IndexInfo> = schema
+            .tables
+            .iter()
+            .find(|t| t.table_name == table)
+            .map(|t| {
+                t.indexes
+                    .iter()
+                    .filter(|i| i.index_name == index)
+                    .collect()
+            })
+            .unwrap_or_default();
+        rows.sort_by_key(|r| r.seq_in_index);
+        rows
+    }
+
     #[tokio::test]
-    async fn expression_and_partial_indexes_are_reported_unsupported() {
-        let (client, path) = temp_client("unsupported").await;
-        exec(&client, "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT)").await;
-        exec(&client, "CREATE INDEX idx_expr ON t(lower(a))").await;
+    async fn expression_and_partial_index_diffs_are_detected() {
+        let (src, src_path) = temp_client("expr_diff_src").await;
         exec(
-            &client,
-            "CREATE INDEX idx_partial ON t(a) WHERE a IS NOT NULL",
+            &src,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT)",
         )
         .await;
-        let source = schema(&client).await;
-        let mut target = source.clone();
-        target.tables.clear();
+        exec(&src, "CREATE INDEX idx_expr ON t (lower(a))").await;
+        exec(
+            &src,
+            "CREATE INDEX idx_partial ON t (a) WHERE b IS NOT NULL",
+        )
+        .await;
 
-        let plan = SqliteSchemaSyncEngine::generate_ddl(&source, &target, None, true).unwrap();
-        assert!(plan.unsupported.iter().any(|u| u.contains("表达式索引")));
-        assert!(plan.unsupported.iter().any(|u| u.contains("部分索引")));
-        assert!(plan.unsupported.iter().any(|u| u.contains("idx_expr")));
-        assert!(!plan
-            .statements
+        // 完全等价（仅大小写/空白/多余括号不同）不应产生 diff。
+        let (equal, equal_path) = temp_client("expr_diff_equal").await;
+        exec(
+            &equal,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT)",
+        )
+        .await;
+        exec(&equal, "CREATE INDEX idx_expr ON t ( LOWER( a ) )").await;
+        exec(
+            &equal,
+            "CREATE INDEX idx_partial ON t (a) WHERE (b IS NOT NULL)",
+        )
+        .await;
+
+        // 仅谓词不同。
+        let (pred, pred_path) = temp_client("expr_diff_pred").await;
+        exec(
+            &pred,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT)",
+        )
+        .await;
+        exec(&pred, "CREATE INDEX idx_expr ON t (lower(a))").await;
+        exec(
+            &pred,
+            "CREATE INDEX idx_partial ON t (a) WHERE b IS NOT NULL AND a <> ''",
+        )
+        .await;
+
+        // 仅表达式不同。
+        let (expr, expr_path) = temp_client("expr_diff_expr").await;
+        exec(
+            &expr,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT)",
+        )
+        .await;
+        exec(&expr, "CREATE INDEX idx_expr ON t (upper(a))").await;
+        exec(
+            &expr,
+            "CREATE INDEX idx_partial ON t (a) WHERE b IS NOT NULL",
+        )
+        .await;
+
+        // 表达式与谓词都不同。
+        let (both, both_path) = temp_client("expr_diff_both").await;
+        exec(
+            &both,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT)",
+        )
+        .await;
+        exec(&both, "CREATE INDEX idx_expr ON t (upper(a))").await;
+        exec(
+            &both,
+            "CREATE INDEX idx_partial ON t (a) WHERE a <> ''",
+        )
+        .await;
+
+        let source = schema(&src).await;
+        for (client, expect_diff) in [
+            (&equal, false),
+            (&pred, true),
+            (&expr, true),
+            (&both, true),
+        ] {
+            let target = schema(client).await;
+            let result = SqliteSchemaSyncEngine::compare(&source, &target);
+            let table = result
+                .diff
+                .tables
+                .iter()
+                .find(|t| t.table_name == "t")
+                .expect("table t");
+            assert_eq!(
+                table.status,
+                if expect_diff { "modified" } else { "unchanged" },
+                "status mismatch for expect_diff={expect_diff}"
+            );
+            assert_eq!(
+                !table.indexes_modified.is_empty(),
+                expect_diff,
+                "index diff mismatch for expect_diff={expect_diff}"
+            );
+            assert!(
+                result.unsupported.is_empty(),
+                "表达式/部分索引应可真同步，不应报 unsupported: {:?}",
+                result.unsupported
+            );
+        }
+
+        for path in [
+            src_path,
+            equal_path,
+            pred_path,
+            expr_path,
+            both_path,
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[tokio::test]
+    async fn expression_and_partial_indexes_rebuild_and_recover_shape() {
+        let (src, src_path) = temp_client("expr_rebuild_src").await;
+        exec(
+            &src,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT)",
+        )
+        .await;
+        exec(&src, "CREATE UNIQUE INDEX idx_expr ON t (lower(a) DESC, b)").await;
+        exec(
+            &src,
+            "CREATE INDEX idx_partial ON t (lower(b) ASC) WHERE a IS NOT NULL",
+        )
+        .await;
+
+        let (tgt, tgt_path) = temp_client("expr_rebuild_tgt").await;
+        exec(
+            &tgt,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT, legacy TEXT)",
+        )
+        .await;
+        exec(&tgt, "INSERT INTO t (id, a, b, legacy) VALUES (1, 'A', 'B', 'x')").await;
+        exec(&tgt, "CREATE INDEX idx_expr ON t (b)").await;
+
+        let source = schema(&src).await;
+        let target = schema(&tgt).await;
+        let plan = SqliteSchemaSyncEngine::generate_ddl(&source, &target, None, true)
+            .expect("plan");
+        assert!(plan.unsupported.is_empty(), "{:?}", plan.unsupported);
+        assert!(
+            plan.statements
+                .iter()
+                .any(|s| s.contains("__sqlite_sync_new_t")),
+            "应走表重建以移除 legacy 列: {:?}",
+            plan.statements
+        );
+        execute_plan(tgt.pool.sqlite().unwrap(), &plan)
+            .await
+            .expect("execute plan");
+
+        let after = schema(&tgt).await;
+        let columns: Vec<_> = after.tables[0]
+            .columns
             .iter()
-            .any(|s| s.contains("CREATE TABLE") && s.contains("\"t\"")));
-        let _ = std::fs::remove_file(path);
+            .map(|c| c.column_name.as_str())
+            .collect();
+        assert_eq!(columns, vec!["id", "a", "b"]);
+
+        for index in ["idx_expr", "idx_partial"] {
+            let src_rows: Vec<IndexInfo> =
+                find_index(&source, "t", index).into_iter().cloned().collect();
+            let tgt_rows: Vec<IndexInfo> =
+                find_index(&after, "t", index).into_iter().cloned().collect();
+            assert!(index_rows_equal(&src_rows, &tgt_rows), "{index} 形态不一致");
+        }
+        let expr = find_index(&after, "t", "idx_expr");
+        assert!(expr[0].expression.as_deref().unwrap_or("").contains("lower"));
+        assert_eq!(expr[0].sort_order, "DESC");
+
+        let partial = find_index(&after, "t", "idx_partial");
+        assert!(partial[0]
+            .predicate
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("a is not null"));
+
+        let sql: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_partial'",
+        )
+        .fetch_one(tgt.pool.sqlite().unwrap())
+        .await
+        .unwrap();
+        assert!(sql.to_ascii_uppercase().contains("WHERE"));
+
+        let violations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+                .fetch_one(tgt.pool.sqlite().unwrap())
+                .await
+                .unwrap();
+        assert_eq!(violations, 0);
+
+        let _ = std::fs::remove_file(src_path);
+        let _ = std::fs::remove_file(tgt_path);
     }
 
     #[tokio::test]

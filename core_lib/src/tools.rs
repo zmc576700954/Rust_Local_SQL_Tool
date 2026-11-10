@@ -152,6 +152,11 @@ impl DdlEngine {
 
             // Indexes handling
             for new_idx in &new_table.indexes {
+                if new_idx.is_expression || new_idx.column_name.is_empty() {
+                    // MySQL 函数索引 / MariaDB 无对应概念：不生成会报错的 SQL，
+                    // 由 mysql_unsupported_indexes 明确报告。
+                    continue;
+                }
                 if !old
                     .indexes
                     .iter()
@@ -253,7 +258,10 @@ impl DdlEngine {
             }
 
             for idx in &new_table.indexes {
-                if idx.index_name != "PRIMARY" {
+                if idx.index_name != "PRIMARY"
+                    && !idx.is_expression
+                    && !idx.column_name.is_empty()
+                {
                     let idx_type = if idx.non_unique {
                         "INDEX"
                     } else {
@@ -376,6 +384,8 @@ impl DdlEngine {
         // Indexes dropped in forward → ADD INDEX (with old definition)
         for old_idx in &old.indexes {
             if old_idx.index_name != "PRIMARY"
+                && !old_idx.is_expression
+                && !old_idx.column_name.is_empty()
                 && !new_table
                     .indexes
                     .iter()
@@ -434,6 +444,35 @@ impl DdlEngine {
             rollbacks.join(",\n  ")
         )
     }
+}
+
+/// MySQL/MariaDB 结构同步无法安全生成的索引差异。
+///
+/// MySQL 8.0.13+ 的函数索引在 `information_schema.STATISTICS` 中以表达式列
+/// 出现（`COLUMN_NAME` 为空）；MariaDB 没有函数索引概念。两端共用同一套
+/// DDL 生成器，无法保证生成语句在目标端可执行，因此明确报告而不是硬生成。
+pub fn mysql_unsupported_indexes(
+    source: &SchemaResponse,
+    selected_tables: &[String],
+) -> Vec<crate::schema::SyncIssue> {
+    let mut issues = Vec::new();
+    for table in &source.tables {
+        if !selected_tables.is_empty() && !selected_tables.iter().any(|t| t == &table.table_name) {
+            continue;
+        }
+        for idx in &table.indexes {
+            if idx.is_expression || idx.expression.is_some() {
+                issues.push(crate::schema::SyncIssue::unsupported(
+                    Some(&table.table_name),
+                    Some(&idx.index_name),
+                    "函数索引（MySQL 8.0.13+）在 MariaDB 无对应概念，且当前 DDL 生成器无法保证两端可执行，不自动生成",
+                ));
+            }
+        }
+    }
+    issues.sort();
+    issues.dedup();
+    issues
 }
 
 /// Classify ALTER clauses and return the most appropriate MySQL ALGORITHM hint.

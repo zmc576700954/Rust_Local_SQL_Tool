@@ -4,7 +4,10 @@
 //! 生成列、外键约束与 MySQL 语义不同，硬塞进 MySQL 形状会丢失信息。
 //! 输出仍然映射到共享的 `SchemaDiff` 供前端展示，但 DDL 由本模块独立生成。
 
-use crate::schema::{ColumnInfo, IndexInfo, SchemaResponse, TableWithDetails};
+use crate::schema::{
+    normalize_index_expression, ColumnInfo, IndexInfo, SchemaResponse, SqlDialect, SyncIssue,
+    TableWithDetails,
+};
 use crate::schema_ext::ForeignKeyInfo;
 use crate::sql_util::split_pg_table_ref;
 use crate::tools::{ColumnDiff, FkDiff, IndexDiff, SchemaDiff, TableDiff};
@@ -25,15 +28,15 @@ pub struct DestructiveChange {
 pub struct PgDdlPlan {
     pub statements: Vec<String>,
     pub destructive: Vec<DestructiveChange>,
-    /// 当前无法自动处理的差异（例如表达式索引），会在界面上单独提示。
-    pub unsupported: Vec<String>,
+    /// 不能自动处理的差异，区分「未支持」与「无法安全转换」。
+    pub unsupported: Vec<SyncIssue>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PgSyncResult {
     pub diff: SchemaDiff,
     pub destructive: Vec<DestructiveChange>,
-    pub unsupported: Vec<String>,
+    pub unsupported: Vec<SyncIssue>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +84,10 @@ impl PgSchemaSyncEngine {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexColumn {
+    /// 普通列名；表达式列为空。
     name: String,
+    /// 表达式列文本（`pg_get_indexdef(index, colno, true)`）。
+    expression: Option<String>,
     sort: String,
 }
 
@@ -90,7 +96,12 @@ struct PgIndex {
     name: String,
     unique: bool,
     primary: bool,
-    has_expression: bool,
+    /// 访问方法（btree/hash/gin/...）。
+    method: String,
+    /// 部分索引谓词。
+    predicate: Option<String>,
+    /// 元数据无法完整表达时（INCLUDE/opclass/collation）给出的原因。
+    conversion_blocker: Option<String>,
     columns: Vec<IndexColumn>,
 }
 
@@ -98,7 +109,13 @@ impl PgIndex {
     fn column_list(&self) -> String {
         self.columns
             .iter()
-            .map(|c| format!("{} {}", quote_ident(&c.name), c.sort))
+            .map(|c| {
+                let base = match &c.expression {
+                    Some(expr) => format!("({})", expr.trim()),
+                    None => quote_ident(&c.name),
+                };
+                format!("{} {}", base, c.sort)
+            })
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -106,10 +123,40 @@ impl PgIndex {
     fn plain_column_list(&self) -> String {
         self.columns
             .iter()
-            .map(|c| quote_ident(&c.name))
+            .map(|c| match &c.expression {
+                Some(expr) => format!("({})", expr.trim()),
+                None => quote_ident(&c.name),
+            })
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+/// 表达式/谓词先按 PostgreSQL 语义规范化，再比较；避免把格式差异当等价。
+fn pg_indexes_equal(a: &PgIndex, b: &PgIndex) -> bool {
+    a.name == b.name
+        && a.unique == b.unique
+        && a.primary == b.primary
+        && a.method.eq_ignore_ascii_case(&b.method)
+        && normalize_predicate(&a.predicate) == normalize_predicate(&b.predicate)
+        && a.columns.len() == b.columns.len()
+        && a.columns.iter().zip(b.columns.iter()).all(|(x, y)| {
+            let key_equal = match (&x.expression, &y.expression) {
+                (Some(ex), Some(ey)) => {
+                    normalize_index_expression(SqlDialect::Postgres, ex)
+                        == normalize_index_expression(SqlDialect::Postgres, ey)
+                }
+                (None, None) => x.name.eq_ignore_ascii_case(&y.name),
+                _ => false,
+            };
+            key_equal && x.sort.eq_ignore_ascii_case(&y.sort)
+        })
+}
+
+fn normalize_predicate(predicate: &Option<String>) -> Option<String> {
+    predicate.as_ref().map(|p| {
+        normalize_index_expression(SqlDialect::Postgres, p)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,7 +267,7 @@ fn compare_table(src: &TableWithDetails, tgt: &TableWithDetails) -> TableCompari
     for src_idx in &src_indexes {
         match tgt_indexes.iter().find(|i| i.name == src_idx.name) {
             Some(tgt_idx) => {
-                if tgt_idx != src_idx {
+                if !pg_indexes_equal(tgt_idx, src_idx) {
                     cmp.indexes_modified.push((tgt_idx.clone(), src_idx.clone()));
                 }
             }
@@ -283,13 +330,23 @@ fn group_indexes(table: &TableWithDetails) -> Vec<PgIndex> {
                 name,
                 unique: !first.non_unique,
                 primary: rows.iter().any(|r| r.is_primary),
-                has_expression: rows
+                method: rows
                     .iter()
-                    .any(|r| r.is_expression || r.column_name.is_empty()),
+                    .map(|r| r.index_type.clone())
+                    .find(|m| !m.is_empty())
+                    .unwrap_or_else(|| "btree".to_string()),
+                predicate: rows
+                    .iter()
+                    .find_map(|r| r.predicate.clone())
+                    .filter(|p| !p.trim().is_empty()),
+                conversion_blocker: rows
+                    .iter()
+                    .find_map(|r| r.conversion_blocker.clone()),
                 columns: rows
                     .iter()
                     .map(|r| IndexColumn {
                         name: r.column_name.clone(),
+                        expression: r.expression.clone().filter(|e| !e.trim().is_empty()),
                         sort: if r.sort_order.eq_ignore_ascii_case("DESC") {
                             "DESC".to_string()
                         } else {
@@ -429,14 +486,16 @@ fn expand_index(idx: &PgIndex) -> Vec<IndexInfo> {
             index_name: idx.name.clone(),
             column_name: col.name.clone(),
             non_unique: !idx.unique,
-            index_type: "btree".to_string(),
+            index_type: idx.method.clone(),
             seq_in_index: (i + 1) as u32,
             sort_order: col.sort.clone(),
             is_primary: idx.primary,
-            is_expression: idx.has_expression,
-            is_partial: false,
-            predicate: None,
+            is_expression: col.expression.is_some(),
+            expression: col.expression.clone(),
+            is_partial: idx.predicate.is_some(),
+            predicate: idx.predicate.clone(),
             definition: None,
+            conversion_blocker: idx.conversion_blocker.clone(),
         })
         .collect()
 }
@@ -545,10 +604,15 @@ fn build_plan(
             add_drop_index(&mut plan, &cmp.table_name, idx);
         }
         for (old, new) in &cmp.indexes_modified {
-            if old.has_expression || new.has_expression {
-                plan.unsupported.push(format!(
-                    "表达式索引 {}.{} 定义发生变化，当前不支持自动重建",
-                    cmp.table_name, old.name
+            if let Some(reason) = old
+                .conversion_blocker
+                .as_deref()
+                .or(new.conversion_blocker.as_deref())
+            {
+                plan.unsupported.push(SyncIssue::unsafe_conversion(
+                    Some(&cmp.table_name),
+                    Some(&old.name),
+                    format!("{reason}，索引定义已变化，无法安全重建"),
                 ));
                 continue;
             }
@@ -643,8 +707,8 @@ fn build_plan(
             add_create_index(&mut plan, &cmp.table_name, idx);
         }
         for (_, new) in &cmp.indexes_modified {
-            if new.has_expression {
-                continue; // 已在上面记为 unsupported
+            if new.conversion_blocker.is_some() {
+                continue; // 已在上面记为 unsafe_conversion
             }
             add_create_index(&mut plan, &cmp.table_name, new);
         }
@@ -663,17 +727,12 @@ fn build_plan(
         }
     }
 
+    plan.unsupported.sort();
+    plan.unsupported.dedup();
     plan
 }
 
 fn add_drop_index(plan: &mut PgDdlPlan, table: &str, idx: &PgIndex) {
-    if idx.has_expression && !idx.primary {
-        plan.unsupported.push(format!(
-            "表达式索引 {}.{} 的删除未自动生成，请手工确认",
-            table, idx.name
-        ));
-        return;
-    }
     if idx.primary {
         plan.destructive.push(DestructiveChange {
             table_name: table.to_string(),
@@ -706,10 +765,11 @@ fn add_drop_index(plan: &mut PgDdlPlan, table: &str, idx: &PgIndex) {
 }
 
 fn add_create_index(plan: &mut PgDdlPlan, table: &str, idx: &PgIndex) {
-    if idx.has_expression {
-        plan.unsupported.push(format!(
-            "表达式索引 {}.{} 暂不支持自动创建",
-            table, idx.name
+    if let Some(reason) = idx.conversion_blocker.as_deref() {
+        plan.unsupported.push(SyncIssue::unsafe_conversion(
+            Some(table),
+            Some(&idx.name),
+            reason.to_string(),
         ));
         return;
     }
@@ -722,12 +782,24 @@ fn add_create_index(plan: &mut PgDdlPlan, table: &str, idx: &PgIndex) {
         return;
     }
     let unique = if idx.unique { "UNIQUE " } else { "" };
+    let using = if idx.method.eq_ignore_ascii_case("btree") {
+        String::new()
+    } else {
+        format!("USING {} ", idx.method)
+    };
+    let where_clause = idx
+        .predicate
+        .as_deref()
+        .map(|p| format!(" WHERE {}", p.trim()))
+        .unwrap_or_default();
     plan.statements.push(format!(
-        "CREATE {}INDEX {} ON {} ({});",
+        "CREATE {}INDEX {} ON {} {}({}){};",
         unique,
         quote_index(table, &idx.name),
         quote_display(table),
-        idx.column_list()
+        using,
+        idx.column_list(),
+        where_clause
     ));
 }
 
@@ -1091,9 +1163,11 @@ mod tests {
                 sort_order: sort.to_string(),
                 is_primary: primary,
                 is_expression: false,
+                expression: None,
                 is_partial: false,
                 predicate: None,
                 definition: None,
+                conversion_blocker: None,
             })
             .collect()
     }
@@ -1482,9 +1556,12 @@ mod tests {
     }
 
     #[test]
-    fn expression_indexes_are_reported_as_unsupported_not_silently_ignored() {
+    fn expression_indexes_are_generated_instead_of_reported_unsupported() {
+        // 行为变更：表达式索引从"报 unsupported"升级为真同步，因此断言
+        // 生成语句，而不是断言 unsupported 列表。
         let mut idx = index("idx_lower_name", &[("", "ASC")], false, false);
         idx[0].is_expression = true;
+        idx[0].expression = Some("lower(name)".to_string());
         idx[0].column_name = String::new();
         let src = table(
             "users",
@@ -1496,9 +1573,51 @@ mod tests {
 
         let cmp = modified(&src, &tgt);
         let plan = build_plan(&vec![cmp], None);
-        assert!(plan
-            .unsupported
-            .iter()
-            .any(|u| u.contains("表达式索引")));
+        assert!(
+            plan.statements
+                .iter()
+                .any(|s| s.contains("(lower(name)) ASC")),
+            "应生成表达式索引 DDL: {:?}",
+            plan.statements
+        );
+        assert!(plan.unsupported.is_empty());
+    }
+
+    #[test]
+    fn expression_and_predicate_changes_are_real_diffs() {
+        let base = |predicate: Option<&str>, expression: &str| {
+            let mut rows = index("idx_expr", &[("", "ASC")], false, false);
+            rows[0].is_expression = true;
+            rows[0].expression = Some(expression.to_string());
+            rows[0].column_name = String::new();
+            rows[0].is_partial = predicate.is_some();
+            rows[0].predicate = predicate.map(str::to_string);
+            table(
+                "users",
+                vec![column("name", "text", "YES", None)],
+                rows,
+                vec![],
+            )
+        };
+
+        // 仅谓词不同
+        let src = base(Some("name IS NOT NULL"), "lower(name)");
+        let tgt = base(None, "lower(name)");
+        assert_eq!(modified(&src, &tgt).indexes_modified.len(), 1);
+
+        // 仅表达式不同（大小写不构成差异，语义不同才构成）
+        let src = base(Some("name IS NOT NULL"), "lower(name)");
+        let tgt = base(Some("name IS NOT NULL"), "upper(name)");
+        assert_eq!(modified(&src, &tgt).indexes_modified.len(), 1);
+
+        // 两者都不同
+        let src = base(Some("name IS NOT NULL"), "lower(name)");
+        let tgt = base(Some("name = 'x'"), "upper(name)");
+        assert_eq!(modified(&src, &tgt).indexes_modified.len(), 1);
+
+        // 规范化后相同：仅空白/大小写/多余括号不同，不产生 diff
+        let src = base(Some("name IS NOT NULL"), "LOWER( name )");
+        let tgt = base(Some("(name IS NOT NULL)"), "(lower(name))");
+        assert!(modified(&src, &tgt).indexes_modified.is_empty());
     }
 }

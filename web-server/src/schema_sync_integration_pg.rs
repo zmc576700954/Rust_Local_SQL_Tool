@@ -453,3 +453,243 @@ async fn pg_schema_sync_diff_execute_and_idempotent() {
     drop(admin);
     drop(admin_pool);
 }
+
+/// 在指定库创建同一张表与三组索引：表达式索引、部分索引、带 DESC 的表达式索引。
+async fn setup_expression_index_table(
+    pool: &PgPool,
+    expr: &str,
+    predicate: &str,
+    expr_desc: &str,
+) {
+    exec(
+        pool,
+        "CREATE TABLE idx_t (id integer PRIMARY KEY, a text, b text)",
+    )
+    .await;
+    exec(
+        pool,
+        &format!("CREATE INDEX idx_expr ON idx_t ({expr})"),
+    )
+    .await;
+    exec(
+        pool,
+        &format!("CREATE INDEX idx_partial ON idx_t (a) WHERE {predicate}"),
+    )
+    .await;
+    exec(
+        pool,
+        &format!("CREATE INDEX idx_expr_desc ON idx_t ({expr_desc})"),
+    )
+    .await;
+}
+
+async fn open_database(url: &str, db: &str) -> (DbClient, PgPool) {
+    let url = with_database(url, db);
+    let client = DbClient::new_default(&url)
+        .await
+        .expect("创建库连接失败");
+    let pool = PgPool::connect(&url).await.expect("连接库失败");
+    (client, pool)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pg_expression_and_partial_index_sync() {
+    let Some(url) = pg_url() else { return };
+    let admin_pool = PgPool::connect(&url)
+        .await
+        .expect("连接 PostgreSQL 失败，请确认 compose 服务已就绪");
+    let source_db = unique_db("it_expr_src");
+    let equal_db = unique_db("it_expr_equal");
+    let pred_db = unique_db("it_expr_pred");
+    let expr_db = unique_db("it_expr_expr");
+    let both_db = unique_db("it_expr_both");
+    for db in [&source_db, &equal_db, &pred_db, &expr_db, &both_db] {
+        create_database(&admin_pool, db).await;
+    }
+
+    let (source_client, source_pool) = open_database(&url, &source_db).await;
+    let (equal_client, equal_pool) = open_database(&url, &equal_db).await;
+    let (pred_client, pred_pool) = open_database(&url, &pred_db).await;
+    let (expr_client, expr_pool) = open_database(&url, &expr_db).await;
+    let (both_client, both_pool) = open_database(&url, &both_db).await;
+
+    setup_expression_index_table(
+        &source_pool,
+        "lower(a)",
+        "b IS NOT NULL",
+        "lower(a) DESC",
+    )
+    .await;
+    // 完全等价：格式差异不应产生 diff。
+    setup_expression_index_table(
+        &equal_pool,
+        "LOWER( a )",
+        "(b IS NOT NULL)",
+        "LOWER(a)   DESC",
+    )
+    .await;
+    // 仅谓词不同。
+    setup_expression_index_table(
+        &pred_pool,
+        "lower(a)",
+        "b <> ''",
+        "lower(a) DESC",
+    )
+    .await;
+    // 仅表达式不同。
+    setup_expression_index_table(
+        &expr_pool,
+        "upper(a)",
+        "b IS NOT NULL",
+        "lower(a) DESC",
+    )
+    .await;
+    // 表达式与谓词都不同（含 DESC 变 ASC）。
+    setup_expression_index_table(
+        &both_pool,
+        "upper(a)",
+        "a <> ''",
+        "lower(a) ASC",
+    )
+    .await;
+
+    let source = schema_of(&source_client).await;
+    let cases = [
+        (&equal_client, "equal", 0usize),
+        (&pred_client, "predicate", 1),
+        (&expr_client, "expression", 1),
+        (&both_client, "both", 3),
+    ];
+    for (client, label, expect_modified) in cases {
+        let target = schema_of(client).await;
+        let result = PgSchemaSyncEngine::compare(&source, &target);
+        assert!(
+            result.unsupported.is_empty(),
+            "{label}: 表达式/部分索引应可真同步，不应报 unsupported: {:?}",
+            result.unsupported
+        );
+        let table = result
+            .diff
+            .tables
+            .iter()
+            .find(|t| t.table_name == "idx_t")
+            .expect("idx_t diff");
+        assert_eq!(
+            table.indexes_modified.len(),
+            expect_modified,
+            "{label}: 索引差异数量不符，实际 {:?}",
+            table
+                .indexes_modified
+                .iter()
+                .map(|d| d.new.index_name.clone())
+                .collect::<Vec<_>>()
+        );
+        if label == "predicate" {
+            assert_eq!(table.indexes_modified[0].new.index_name, "idx_partial");
+        }
+        if label == "expression" {
+            assert_eq!(table.indexes_modified[0].new.index_name, "idx_expr");
+        }
+        if label == "both" {
+            let names: Vec<_> = table
+                .indexes_modified
+                .iter()
+                .map(|d| d.new.index_name.as_str())
+                .collect();
+            assert!(names.contains(&"idx_expr") && names.contains(&"idx_partial"));
+            assert!(names.contains(&"idx_expr_desc"));
+        }
+    }
+
+    // ── 执行生成的 DDL，验证索引在目标库按源形态恢复 ──────
+    let source = schema_of(&source_client).await;
+    let target = schema_of(&both_client).await;
+    let plan = PgSchemaSyncEngine::generate_ddl(
+        &source,
+        &target,
+        &["idx_t".to_string()],
+        true,
+    )
+    .expect("应生成表达式/部分索引 DDL");
+    assert!(
+        plan.unsupported.is_empty(),
+        "不应有 unsupported: {:?}",
+        plan.unsupported
+    );
+    println!("表达式/部分索引 DDL:");
+    for statement in &plan.statements {
+        println!("  {statement}");
+    }
+    for statement in &plan.statements {
+        exec(&both_pool, statement).await;
+    }
+
+    let target_after = schema_of(&both_client).await;
+    let after = PgSchemaSyncEngine::compare(&source, &target_after);
+    let remaining = after
+        .diff
+        .tables
+        .iter()
+        .find(|t| t.table_name == "idx_t")
+        .expect("idx_t after");
+    assert!(
+        remaining.indexes_added.is_empty()
+            && remaining.indexes_removed.is_empty()
+            && remaining.indexes_modified.is_empty(),
+        "执行后索引差异必须归零: +{:?} -{:?} ~{:?}",
+        remaining
+            .indexes_added
+            .iter()
+            .map(|i| i.index_name.clone())
+            .collect::<Vec<_>>(),
+        remaining
+            .indexes_removed
+            .iter()
+            .map(|i| i.index_name.clone())
+            .collect::<Vec<_>>(),
+        remaining
+            .indexes_modified
+            .iter()
+            .map(|i| i.new.index_name.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // pg_indexes 里的最终形态必须与源一致（含表达式、谓词、DESC）。
+    for index in ["idx_expr", "idx_partial", "idx_expr_desc"] {
+        let source_def: String = sqlx::query_scalar(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1",
+        )
+        .bind(index)
+        .fetch_one(&source_pool)
+        .await
+        .expect("读取源索引定义失败");
+        let target_def: String = sqlx::query_scalar(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1",
+        )
+        .bind(index)
+        .fetch_one(&both_pool)
+        .await
+        .expect("读取目标索引定义失败");
+        assert_eq!(source_def, target_def, "{index} 在目标库形态不一致");
+    }
+    let desc_def: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_expr_desc'",
+    )
+    .fetch_one(&both_pool)
+    .await
+    .expect("读取 DESC 索引失败");
+    assert!(desc_def.contains("DESC"), "DESC 方向必须保留: {desc_def}");
+
+    for client in [source_client, equal_client, pred_client, expr_client, both_client] {
+        drop(client);
+    }
+    drop(source_pool);
+    drop(equal_pool);
+    drop(pred_pool);
+    drop(expr_pool);
+    drop(both_pool);
+    for db in [&source_db, &equal_db, &pred_db, &expr_db, &both_db] {
+        cleanup_database(&admin_pool, db).await;
+    }
+    drop(admin_pool);
+}

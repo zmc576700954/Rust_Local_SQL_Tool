@@ -160,10 +160,13 @@ pub async fn list_indexes(client: &DbClient, table: &str) -> Result<Vec<IndexInf
         let origin: String = idx.try_get("origin").unwrap_or_default();
         let partial: i64 = idx.try_get("partial").unwrap_or(0);
         let definition = definitions.get(&index_name).cloned();
+        let parsed = definition.as_deref().and_then(parse_index_sql);
         let xinfo = format!("PRAGMA index_xinfo({})", quote_ident(&index_name));
-        let cols = sqlx::query(&xinfo)
+        let mut cols = sqlx::query(&xinfo)
             .fetch_all(client.pool.sqlite()?)
             .await?;
+        cols.sort_by_key(|col| col.try_get::<i64, _>("seqno").unwrap_or(0));
+        let auto_index = index_name.starts_with("sqlite_autoindex_");
         for col in cols {
             let key: i64 = col.try_get("key").unwrap_or(0);
             if key == 0 {
@@ -173,19 +176,40 @@ pub async fn list_indexes(client: &DbClient, table: &str) -> Result<Vec<IndexInf
             let cid: i64 = col.try_get("cid").unwrap_or(0);
             let name: Option<String> = col.try_get("name").unwrap_or(None);
             let desc: i64 = col.try_get("desc").unwrap_or(0);
-            let is_expression = cid < 0 || name.as_deref().unwrap_or("").is_empty();
+            let column_name = name.unwrap_or_default();
+            let is_expression = cid < 0 || column_name.is_empty();
+            let parsed_col = parsed
+                .as_ref()
+                .and_then(|p| p.columns.get(seqno.max(0) as usize));
+            let expression = parsed_col.and_then(|c| c.expression.clone());
+            let predicate = parsed.as_ref().and_then(|p| p.predicate.clone());
+            let conversion_blocker = if auto_index {
+                None
+            } else {
+                if definition.is_none() {
+                    Some("sqlite_master 中没有该索引的 SQL，无法安全重建".to_string())
+                } else if is_expression && expression.is_none() {
+                    Some("无法从索引 SQL 中解析出表达式列文本".to_string())
+                } else if partial != 0 && predicate.is_none() {
+                    Some("无法从索引 SQL 中解析出部分索引谓词".to_string())
+                } else {
+                    None
+                }
+            };
             result.push(IndexInfo {
                 index_name: index_name.clone(),
-                column_name: name.unwrap_or_default(),
+                column_name,
                 non_unique: unique == 0,
                 index_type: "BTREE".to_string(),
                 seq_in_index: (seqno + 1) as u32,
                 sort_order: if desc != 0 { "DESC" } else { "ASC" }.to_string(),
                 is_primary: origin == "pk",
                 is_expression,
-                is_partial: partial != 0,
-                predicate: None,
+                expression,
+                is_partial: partial != 0 || predicate.is_some(),
+                predicate,
                 definition: definition.clone(),
+                conversion_blocker,
             });
         }
     }
@@ -346,6 +370,206 @@ async fn index_definitions(
         }
     }
     Ok(result)
+}
+
+/// `CREATE INDEX` 解析结果：按位置给出表达式列文本与 `WHERE` 谓词。
+#[derive(Debug, Clone, Default)]
+struct ParsedIndexSql {
+    columns: Vec<ParsedIndexColumn>,
+    predicate: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ParsedIndexColumn {
+    /// 非裸列的表达式文本（包含 COLLATE 等修饰），不含 ASC/DESC。
+    expression: Option<String>,
+}
+
+/// 解析 SQLite 索引 DDL。`PRAGMA index_xinfo` 只给列名与表达式标志，
+/// 表达式文本和部分索引谓词只能从 `sqlite_master.sql` 还原。
+fn parse_index_sql(sql: &str) -> Option<ParsedIndexSql> {
+    let on = find_keyword_outside_quotes(sql, "ON")?;
+    let after_on = &sql[on + 2..];
+    let open = find_top_level_open_paren(after_on)?;
+    let (body, tail) = split_at_matching_paren(&after_on[open + 1..])?;
+    let predicate = find_keyword_outside_quotes(tail, "WHERE")
+        .map(|i| tail[i + 5..].trim().trim_end_matches(';').trim().to_string())
+        .filter(|p| !p.is_empty());
+
+    let mut columns = Vec::new();
+    for part in split_top_level(body) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (rest, _) = strip_sort_direction(part);
+        if unquote_identifier(rest).is_some() || is_bare_identifier(rest) {
+            // 裸列名（含引用符）由 index_xinfo 提供，表达式为空。
+            columns.push(ParsedIndexColumn { expression: None });
+        } else {
+            columns.push(ParsedIndexColumn {
+                expression: Some(rest.to_string()),
+            });
+        }
+    }
+    Some(ParsedIndexSql { columns, predicate })
+}
+
+fn find_top_level_open_paren(sql: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    for (i, c) in sql.char_indices() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => quote = Some(c),
+            '[' => quote = Some(']'),
+            '(' => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 给定 `(` 之后的文本，返回 (括号内文本, 闭括号之后文本)。
+fn split_at_matching_paren(body: &str) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for (i, c) in body.char_indices() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => quote = Some(c),
+            '[' => quote = Some(']'),
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return Some((&body[..i], &body[i + 1..]));
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn strip_sort_direction(part: &str) -> (&str, Option<&'static str>) {
+    let trimmed = part.trim_end();
+    for dir in ["DESC", "ASC"] {
+        if trimmed.len() < dir.len() {
+            continue;
+        }
+        let split = trimmed.len() - dir.len();
+        if !trimmed.is_char_boundary(split) {
+            continue;
+        }
+        let (head, tail) = trimmed.split_at(split);
+        if tail.eq_ignore_ascii_case(dir)
+            && head.ends_with(|c: char| c.is_whitespace())
+            && !is_inside_quotes(head)
+        {
+            return (head.trim_end(), Some(dir));
+        }
+    }
+    (trimmed, None)
+}
+
+fn is_inside_quotes(prefix: &str) -> bool {
+    let mut quote: Option<char> = None;
+    for c in prefix.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' | '`' => quote = Some(c),
+                '[' => quote = Some(']'),
+                _ => {}
+            },
+        }
+    }
+    quote.is_some()
+}
+
+fn unquote_identifier(part: &str) -> Option<String> {
+    let mut chars = part.char_indices();
+    let (_, first) = chars.next()?;
+    if !matches!(first, '"' | '`' | '[') {
+        return None;
+    }
+    let close = if first == '[' { ']' } else { first };
+    let rest = &part[1..];
+    let end = rest.find(close)?;
+    if rest[end + close.len_utf8()..].trim().is_empty() {
+        Some(rest[..end].to_string())
+    } else {
+        None
+    }
+}
+
+fn is_bare_identifier(part: &str) -> bool {
+    let mut chars = part.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+fn find_keyword_outside_quotes(sql: &str, keyword: &str) -> Option<usize> {
+    let needle = keyword.as_bytes();
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == q {
+                if q != b']' && bytes.get(i + 1) == Some(&q) {
+                    i += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = Some(b);
+                i += 1;
+                continue;
+            }
+            b'[' => {
+                quote = Some(b']');
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if i + needle.len() <= bytes.len()
+            && bytes[i..i + needle.len()].eq_ignore_ascii_case(needle)
+        {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1] as char);
+            let after = i + needle.len();
+            let after_ok = after == bytes.len() || !is_ident_char(bytes[after] as char);
+            if before_ok && after_ok {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// 判断 SQL 文本是否包含关键字；先去掉引号内内容，避免列名误判。
@@ -562,5 +786,33 @@ mod tests {
             r#"CREATE TABLE t (a TEXT) WITHOUT ROWID"#,
             "WITHOUT ROWID"
         ));
+    }
+
+    #[test]
+    fn parses_expression_and_partial_index_sql() {
+        let parsed = parse_index_sql(
+            r#"CREATE UNIQUE INDEX "idx_on_on" ON "t" ((lower(name)) DESC, age COLLATE NOCASE) WHERE "status" = 'Active'"#,
+        )
+        .expect("parse ok");
+        assert_eq!(parsed.columns.len(), 2);
+        assert_eq!(
+            parsed.columns[0].expression.as_deref(),
+            Some("(lower(name))")
+        );
+        assert_eq!(
+            parsed.columns[1].expression.as_deref(),
+            Some("age COLLATE NOCASE")
+        );
+        assert_eq!(parsed.predicate.as_deref(), Some("\"status\" = 'Active'"));
+    }
+
+    #[test]
+    fn parses_plain_column_index_sql() {
+        let parsed =
+            parse_index_sql(r#"CREATE INDEX idx ON t (a ASC, "b" DESC)"#).expect("parse ok");
+        assert_eq!(parsed.columns.len(), 2);
+        assert!(parsed.columns.iter().all(|c| c.expression.is_none()));
+        assert!(parsed.predicate.is_none());
+        assert_eq!(strip_sort_direction("lower(a) DESC").0, "lower(a)");
     }
 }

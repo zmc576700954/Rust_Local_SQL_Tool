@@ -3012,6 +3012,10 @@ struct SyncSchemaDiffResponse {
     destructive_changes: Option<Vec<core_lib::pg_schema_sync::DestructiveChange>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unsupported_changes: Option<Vec<String>>,
+    /// 与 `unsupported_changes` 一一对应的结构化条目，`kind` 区分
+    /// 「未支持」与「无法安全转换」。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsupported_details: Option<Vec<core_lib::schema::SyncIssue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requires_confirmation: Option<bool>,
 }
@@ -3056,10 +3060,16 @@ async fn sync_schema_diff(
             return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
         }
         let requires_confirmation = !result.destructive.is_empty();
+        let unsupported_changes: Vec<String> = result
+            .unsupported
+            .iter()
+            .map(|issue| issue.display_line())
+            .collect();
         return Ok(Json(SyncSchemaDiffResponse {
             diff: result.diff,
             destructive_changes: Some(result.destructive),
-            unsupported_changes: Some(result.unsupported),
+            unsupported_changes: Some(unsupported_changes),
+            unsupported_details: Some(result.unsupported),
             requires_confirmation: Some(requires_confirmation),
         }));
     }
@@ -3085,10 +3095,16 @@ async fn sync_schema_diff(
             return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
         }
         let requires_confirmation = !result.destructive.is_empty();
+        let unsupported_changes: Vec<String> = result
+            .unsupported
+            .iter()
+            .map(|issue| issue.display_line())
+            .collect();
         return Ok(Json(SyncSchemaDiffResponse {
             diff: result.diff,
             destructive_changes: Some(result.destructive),
-            unsupported_changes: Some(result.unsupported),
+            unsupported_changes: Some(unsupported_changes),
+            unsupported_details: Some(result.unsupported),
             requires_confirmation: Some(requires_confirmation),
         }));
     }
@@ -3107,10 +3123,20 @@ async fn sync_schema_diff(
     if schema_gap_too_large(&diff) {
         return Err(AppError::BadRequest(GAP_TOO_LARGE_MSG.to_string()));
     }
+    let issues = core_lib::tools::mysql_unsupported_indexes(&source, &[]);
     Ok(Json(SyncSchemaDiffResponse {
         diff,
         destructive_changes: None,
-        unsupported_changes: None,
+        unsupported_changes: if issues.is_empty() {
+            None
+        } else {
+            Some(issues.iter().map(|i| i.display_line()).collect())
+        },
+        unsupported_details: if issues.is_empty() {
+            None
+        } else {
+            Some(issues)
+        },
         requires_confirmation: None,
     }))
 }
@@ -3135,6 +3161,9 @@ struct SyncSchemaDdlResponse {
     destructive_changes: Vec<core_lib::pg_schema_sync::DestructiveChange>,
     #[serde(default)]
     unsupported_changes: Vec<String>,
+    /// 与 `unsupported_changes` 一一对应的结构化条目。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unsupported_details: Vec<core_lib::schema::SyncIssue>,
 }
 
 async fn sync_schema_ddl(
@@ -3182,11 +3211,17 @@ async fn sync_schema_ddl(
             }
         };
 
+        let unsupported_changes: Vec<String> = plan
+            .unsupported
+            .iter()
+            .map(|issue| issue.display_line())
+            .collect();
         return Ok(Json(SyncSchemaDdlResponse {
             ddl_statements: plan.statements.join("\n"),
             ddl_statement_list: Some(plan.statements),
             destructive_changes: plan.destructive,
-            unsupported_changes: plan.unsupported,
+            unsupported_changes,
+            unsupported_details: plan.unsupported,
         }));
     }
 
@@ -3234,12 +3269,18 @@ async fn sync_schema_ddl(
                 return Err(AppError::BadRequest(msg));
             }
         };
+        let unsupported_changes: Vec<String> = plan
+            .unsupported
+            .iter()
+            .map(|issue| issue.display_line())
+            .collect();
         return Ok(Json(SyncSchemaDdlResponse {
             ddl_statements: plan.script(),
             // SQLite 表重建必须整体在事务内执行，不能逐条提交。
             ddl_statement_list: None,
             destructive_changes: plan.destructive,
-            unsupported_changes: plan.unsupported,
+            unsupported_changes,
+            unsupported_details: plan.unsupported,
         }));
     }
 
@@ -3262,11 +3303,13 @@ async fn sync_schema_ddl(
         &target,
         &req.selected_tables,
     );
+    let issues = core_lib::tools::mysql_unsupported_indexes(&source, &req.selected_tables);
     Ok(Json(SyncSchemaDdlResponse {
         ddl_statements: ddl,
         ddl_statement_list: None,
         destructive_changes: Vec::new(),
-        unsupported_changes: Vec::new(),
+        unsupported_changes: issues.iter().map(|i| i.display_line()).collect(),
+        unsupported_details: issues,
     }))
 }
 
