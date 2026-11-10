@@ -141,20 +141,11 @@ impl ScenarioRegistry {
             index_advisor.descriptor().clone(),
             perf_diagnostics.descriptor().clone(),
             field_governance.descriptor().clone(),
-            // 首期仅开放 MySQL。PG/SQLite 标为实验性，继续只读，不出计划。
-            ScenarioDescriptor {
-                id: "pg-index-advisor".into(),
-                title: "PostgreSQL 索引优化（实验性）".into(),
-                description: "首期仅支持 MySQL/MariaDB；PG 仅保留只读实验入口。".into(),
-                engines: vec!["postgres".into()],
-                status: ScenarioStatus::ExperimentalReadOnly,
-                risk_ceiling: RiskClass::L0,
-                allowed_actions: vec![],
-            },
+            // SQLite 仍为实验性；PostgreSQL 已并入「单表索引优化」的只读分析。
             ScenarioDescriptor {
                 id: "sqlite-index-advisor".into(),
                 title: "SQLite 索引优化（实验性）".into(),
-                description: "首期仅支持 MySQL/MariaDB；SQLite 仅保留只读实验入口。".into(),
+                description: "SQLite 仅保留只读实验入口；当前不生成可执行动作。".into(),
                 engines: vec!["sqlite".into()],
                 status: ScenarioStatus::ExperimentalReadOnly,
                 risk_ceiling: RiskClass::L0,
@@ -164,7 +155,7 @@ impl ScenarioRegistry {
                 id: "periodic-inspection".into(),
                 title: "定期巡检（阶段 1）".into(),
                 description: "规则型只读检查 + 应用内调度；入口在运维中心巡检页。".into(),
-                engines: vec!["mysql".into(), "mariadb".into()],
+                engines: vec!["mysql".into(), "mariadb".into(), "postgresql".into()],
                 status: ScenarioStatus::Enabled,
                 risk_ceiling: RiskClass::L0,
                 allowed_actions: vec![],

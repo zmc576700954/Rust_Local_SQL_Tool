@@ -54,10 +54,6 @@ pub(crate) async fn build_ctx(
     session_id: Option<String>,
 ) -> Result<core_lib::ops::OpsContext, AppError> {
     let (db_client, db_name) = resolve_db_client_for_request(state, db_id).await?;
-    // 运维中心的四类场景（索引优化、性能诊断、定期巡检、字段治理）依赖 MySQL
-    // 的 information_schema / performance_schema 与 MySQL 方言，当前仅支持 MySQL。
-    // 非 MySQL 连接返回明确提示，避免驱动层错误直接冒到界面。
-    crate::handlers::util::require_mysql_client(&db_client, "运维中心场景")?;
     let resolved_id = match db_id {
         Some(id) => id.to_string(),
         None => state
@@ -96,6 +92,47 @@ async fn plan_ctx(state: &AppState, plan: &OpsPlan) -> Result<core_lib::ops::Ops
         Some(plan.db_id.as_str())
     };
     build_ctx(state, db_id, None).await
+}
+
+/// 场景级引擎守卫。
+///
+/// PostgreSQL 在本轮只开放只读场景（巡检、性能诊断、索引优化只读分析）；
+/// 字段治理的写路径仍是 MySQL 方言，明确拒绝并给出原因，避免入口点进去才报错。
+fn ensure_scenario_engine(
+    ctx: &core_lib::ops::OpsContext,
+    scenario_id: &str,
+) -> Result<(), AppError> {
+    scenario_engine_decision(ctx.is_postgres(), scenario_id).map_err(AppError::BadRequest)
+}
+
+fn scenario_engine_decision(is_postgres: bool, scenario_id: &str) -> Result<(), String> {
+    if !is_postgres {
+        return Ok(());
+    }
+    match scenario_id {
+        "mysql-index-advisor" | "perf-diagnostics" | "periodic-inspection" => Ok(()),
+        "field-governance" => Err(
+            "PostgreSQL 不提供字段治理：写路径仍是 MySQL 方言，尚未重写；level A 不含 PG 字段治理。请切换到 MySQL/MariaDB 连接。"
+                .into(),
+        ),
+        other => Err(format!(
+            "PostgreSQL 暂不支持场景 {other}；当前开放只读场景：巡检、性能诊断、索引优化（只读分析）。"
+        )),
+    }
+}
+
+/// PG 写动作不在本轮范围：执行/回滚入口显式拒绝，不依赖“计划恰好为空”。
+fn ensure_write_engine(ctx: &core_lib::ops::OpsContext, operation: &str) -> Result<(), AppError> {
+    write_engine_decision(ctx.is_postgres(), operation).map_err(AppError::BadRequest)
+}
+
+fn write_engine_decision(is_postgres: bool, operation: &str) -> Result<(), String> {
+    if is_postgres {
+        return Err(format!(
+            "PostgreSQL 的 {operation} 不在本轮范围：PG 场景保持只读，不执行写动作。请切换到 MySQL/MariaDB 连接。"
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn audit_event(state: &AppState, event: &str, outcome: &str, detail: serde_json::Value) {
@@ -313,6 +350,7 @@ async fn run_analyze(
     let ctx = build_ctx(state, db_id.as_deref(), Some(session_id(headers)))
         .await?
         .with_policy(std::sync::Arc::new(policy.clone()));
+    ensure_scenario_engine(&ctx, &scenario_id)?;
     let input_value = req.into_input(&scenario_id)?;
 
     let evidence = scenario.collect_evidence(&ctx, &input_value).await?;
@@ -374,6 +412,7 @@ pub(crate) async fn ops_field_diff_page(
 ) -> Result<Json<core_lib::ops::field_migration::diff::DiffPage>, AppError> {
     authorize_write(&state, &headers)?;
     let ctx = build_ctx(&state, body.db_id.as_deref(), Some(session_id(&headers))).await?;
+    ensure_scenario_engine(&ctx, "field-governance")?;
     let page =
         core_lib::ops::field_migration::diff::fetch_page(&ctx, &body.request).await?;
     Ok(Json(page))
@@ -522,6 +561,7 @@ async fn prepare_field_backfill(
         Some(plan.db_id.as_str())
     };
     let ctx = build_ctx(state, db_id, Some(session_id(headers))).await?;
+    ensure_scenario_engine(&ctx, "field-governance")?;
     if ctx.db_name != plan.db_name {
         return Err(AppError::BadRequest(format!(
             "当前连接库 {} 与计划库 {} 不一致",
@@ -834,6 +874,7 @@ pub(crate) async fn ops_field_backfill_resume(
         Some(job.db_id.as_str())
     };
     let ctx = build_ctx(&state, db_id, Some(session_id(&headers))).await?;
+    ensure_scenario_engine(&ctx, "field-governance")?;
     let policy = state.ops.policy.read().await.clone();
     policy.authorize_backfill(ctx.is_read_only, job.production_confirmed)?;
     hub.set_control(&job_id, CONTROL_RUN).await;
@@ -1061,6 +1102,11 @@ pub(crate) async fn ops_approve(
 
     // 审批前做一次实时 schema 编译校验，防止审批后结构漂移。
     let ctx = plan_ctx(&state, &plan).await?;
+    if ctx.is_postgres() {
+        return Err(AppError::BadRequest(
+            "PostgreSQL 只读方案不进入审批流程（不包含可执行动作）".into(),
+        ));
+    }
     let table = plan
         .evidence_summary
         .as_ref()
@@ -1156,6 +1202,7 @@ pub(crate) async fn ops_execute(
     }
 
     let ctx = plan_ctx(&state, &plan).await?;
+    ensure_write_engine(&ctx, "执行动作")?;
     let policy = state.ops.policy.read().await.clone();
 
     if dry_run {
@@ -1269,6 +1316,7 @@ pub(crate) async fn ops_rollback(
         )));
     }
     let ctx = plan_ctx(&state, &plan).await?;
+    ensure_write_engine(&ctx, "回滚")?;
     let policy = state.ops.policy.read().await.clone();
     let report = executor::rollback(&ctx, &plan, &req.reason, &policy, &state.ops.audit).await?;
 
@@ -1321,3 +1369,49 @@ pub(crate) async fn ops_approvals(
 
 // 明确不在 ops 链路里复用 DdlEngine / execute_ddl；编译入口只允许 ddl_compiler。
 const _: fn(&ActionSpec) = |_| {};
+
+#[cfg(test)]
+mod tests {
+    use super::{scenario_engine_decision, write_engine_decision};
+
+    #[test]
+    fn pg_allows_only_readonly_scenarios() {
+        for scenario in ["mysql-index-advisor", "perf-diagnostics", "periodic-inspection"] {
+            assert!(
+                scenario_engine_decision(true, scenario).is_ok(),
+                "PG 应放行只读场景 {scenario}"
+            );
+        }
+    }
+
+    #[test]
+    fn pg_rejects_field_governance_with_reason() {
+        let err = scenario_engine_decision(true, "field-governance").unwrap_err();
+        assert!(err.contains("level A 不含 PG 字段治理"), "{err}");
+        assert!(err.contains("写路径仍是 MySQL 方言"), "{err}");
+    }
+
+    #[test]
+    fn pg_rejects_unknown_scenario_with_supported_list() {
+        let err = scenario_engine_decision(true, "sqlite-index-advisor").unwrap_err();
+        assert!(err.contains("当前开放只读场景"), "{err}");
+    }
+
+    #[test]
+    fn mysql_family_is_not_gated() {
+        for scenario in ["field-governance", "mysql-index-advisor", "periodic-inspection"] {
+            assert!(
+                scenario_engine_decision(false, scenario).is_ok(),
+                "MySQL/MariaDB 不应被 PG 守卫拦截: {scenario}"
+            );
+        }
+    }
+
+    #[test]
+    fn pg_rejects_write_actions() {
+        let err = write_engine_decision(true, "执行动作").unwrap_err();
+        assert!(err.contains("保持只读"), "{err}");
+        assert!(err.contains("不在本轮范围"), "{err}");
+        assert!(write_engine_decision(false, "执行动作").is_ok());
+    }
+}
