@@ -16,8 +16,8 @@ use core_lib::ops::ddl_compiler;
 use core_lib::ops::executor;
 use core_lib::ops::field_migration::backfill::{self, PreparedBackfill};
 use core_lib::ops::field_migration::migration_store::{
-    BackfillConfig, MigrationJob, MigrationPhase, MigrationStatus, CONTROL_ABORT,
-    CONTROL_PAUSE, CONTROL_RUN,
+    BackfillConfig, MigrationJob, MigrationPhase, MigrationStatus, CONTROL_ABORT, CONTROL_PAUSE,
+    CONTROL_RUN,
 };
 use core_lib::ops::field_migration::types::FieldGovernanceAnalysis;
 use core_lib::ops::index_advisor::IndexAdvisorInput;
@@ -65,13 +65,12 @@ pub(crate) async fn build_ctx(
             .unwrap_or_default(),
     };
     let read_only = is_read_only_connection(state, db_id).await;
-    Ok(core_lib::ops::OpsContext::new(
-        db_client, resolved_id, db_name, read_only,
+    Ok(
+        core_lib::ops::OpsContext::new(db_client, resolved_id, db_name, read_only).with_audit(
+            Some(std::sync::Arc::new(state.ops.audit.clone())),
+            session_id,
+        ),
     )
-    .with_audit(
-        Some(std::sync::Arc::new(state.ops.audit.clone())),
-        session_id,
-    ))
 }
 
 /// 请求级会话标识：优先使用调用方提供的 x-request-id，否则生成一次请求 ID。
@@ -155,9 +154,7 @@ pub(crate) struct SessionTokenResponse {
     header: String,
 }
 
-pub(crate) async fn ops_session_token(
-    State(state): State<AppState>,
-) -> Json<SessionTokenResponse> {
+pub(crate) async fn ops_session_token(State(state): State<AppState>) -> Json<SessionTokenResponse> {
     Json(SessionTokenResponse {
         token: state.ops.local_token.token().to_string(),
         header: OPS_TOKEN_HEADER.to_string(),
@@ -186,7 +183,10 @@ pub(crate) async fn ops_update_policy(
 ) -> Result<Json<serde_json::Value>, AppError> {
     authorize_write(&state, &headers)?;
     let environment = policy.environment.trim().to_ascii_lowercase();
-    if !matches!(environment.as_str(), "dev" | "staging" | "prod" | "production") {
+    if !matches!(
+        environment.as_str(),
+        "dev" | "staging" | "prod" | "production"
+    ) {
         return Err(AppError::BadRequest(format!(
             "未知环境 {}，仅支持 dev/staging/prod",
             policy.environment
@@ -250,8 +250,7 @@ pub(crate) struct OpsAnalyzeRequest {
     pub sample_per_mille: Option<u32>,
     /// 字段治理：空串策略 preserve / to_null / block；缺省 preserve。
     #[serde(default)]
-    pub empty_string_policy:
-        Option<core_lib::ops::field_migration::types::EmptyStringPolicy>,
+    pub empty_string_policy: Option<core_lib::ops::field_migration::types::EmptyStringPolicy>,
     /// 字段治理 S3：观察期起始日期（YYYY-MM-DD），用于下线准备清单提示。
     #[serde(default)]
     pub observation_started_at: Option<String>,
@@ -413,8 +412,7 @@ pub(crate) async fn ops_field_diff_page(
     authorize_write(&state, &headers)?;
     let ctx = build_ctx(&state, body.db_id.as_deref(), Some(session_id(&headers))).await?;
     ensure_scenario_engine(&ctx, "field-governance")?;
-    let page =
-        core_lib::ops::field_migration::diff::fetch_page(&ctx, &body.request).await?;
+    let page = core_lib::ops::field_migration::diff::fetch_page(&ctx, &body.request).await?;
     Ok(Json(page))
 }
 
@@ -428,6 +426,9 @@ pub(crate) struct FieldBackfillOptions {
     pub batch_interval_ms: Option<u64>,
     #[serde(default)]
     pub max_rows_per_second: Option<u64>,
+    /// 仅 PostgreSQL：整任务单事务，失败整体回滚且不可续跑。
+    #[serde(default)]
+    pub single_transaction: Option<bool>,
     #[serde(default)]
     pub production_confirmed: Option<bool>,
     #[serde(default)]
@@ -439,12 +440,13 @@ impl FieldBackfillOptions {
         let defaults = BackfillConfig::default();
         BackfillConfig {
             batch_size: self.batch_size.unwrap_or(defaults.batch_size),
-            batch_interval_ms: self
-                .batch_interval_ms
-                .unwrap_or(defaults.batch_interval_ms),
+            batch_interval_ms: self.batch_interval_ms.unwrap_or(defaults.batch_interval_ms),
             max_rows_per_second: self
                 .max_rows_per_second
                 .unwrap_or(defaults.max_rows_per_second),
+            single_transaction: self
+                .single_transaction
+                .unwrap_or(defaults.single_transaction),
         }
     }
 
@@ -617,7 +619,9 @@ pub(crate) async fn ops_field_backfill_approve(
             .get(&job.plan_id)
             .ok_or_else(|| AppError::BadRequest(format!("计划 {} 不存在或已过期", job.plan_id)))?;
         if plan.plan_hash != job.plan_hash {
-            return Err(AppError::BadRequest("任务绑定的计划哈希已变化，禁止续跑".into()));
+            return Err(AppError::BadRequest(
+                "任务绑定的计划哈希已变化，禁止续跑".into(),
+            ));
         }
         let policy = state.ops.policy.read().await.clone();
         policy.authorize_backfill(false, job.production_confirmed)?;
@@ -654,9 +658,11 @@ pub(crate) async fn ops_field_backfill_approve(
             high_risks: Vec::new(),
         }));
     }
-    let plan_id = body.plan_id.as_deref().filter(|id| !id.trim().is_empty()).ok_or_else(|| {
-        AppError::BadRequest("缺少 plan_id（或续跑时提供 job_id）".into())
-    })?;
+    let plan_id = body
+        .plan_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("缺少 plan_id（或续跑时提供 job_id）".into()))?;
     let (plan, prepared, ctx, policy, production_confirmed) = prepare_field_backfill(
         &state,
         &headers,
@@ -973,12 +979,12 @@ pub(crate) async fn ops_analyze_stream(
                     .data(serde_json::to_string(&response.plan).unwrap_or_default()),
                 Event::default().event("done").data("{}"),
             ],
-            Err(err) => vec![Event::default()
-                .event("error")
-                .data(serde_json::to_string(&serde_json::json!({
+            Err(err) => vec![Event::default().event("error").data(
+                serde_json::to_string(&serde_json::json!({
                     "message": err.to_string()
                 }))
-                .unwrap_or_default())],
+                .unwrap_or_default(),
+            )],
         };
         futures::stream::iter(events.into_iter().map(Ok))
     })
@@ -1003,15 +1009,8 @@ pub(crate) async fn ops_slow_queries(
     Query(query): Query<SlowQueryListQuery>,
 ) -> Result<Json<SlowQueryScan>, AppError> {
     authorize_write(&state, &headers)?;
-    let ctx = build_ctx(
-        &state,
-        query.db_id.as_deref(),
-        Some(session_id(&headers)),
-    )
-    .await?;
-    let sort = query
-        .sort
-        .unwrap_or_else(|| "total_latency".to_string());
+    let ctx = build_ctx(&state, query.db_id.as_deref(), Some(session_id(&headers))).await?;
+    let sort = query.sort.unwrap_or_else(|| "total_latency".to_string());
     Ok(Json(
         perf_diagnostics::list_slow_queries(&ctx, &sort, query.limit.unwrap_or(20)).await?,
     ))
@@ -1127,7 +1126,12 @@ pub(crate) async fn ops_approve(
     let policy = state.ops.policy.read().await.clone();
     let (token, record) = {
         let mut approvals = state.ops.approvals.write().await;
-        approvals.issue(&plan, &req.action_ids, policy.approval_ttl_secs, Some("local-user".into()))?
+        approvals.issue(
+            &plan,
+            &req.action_ids,
+            policy.approval_ttl_secs,
+            Some("local-user".into()),
+        )?
     };
 
     {
@@ -1195,7 +1199,10 @@ pub(crate) async fn ops_execute(
         .ok_or_else(|| AppError::NotFound(format!("计划 {plan_id} 不存在")))?;
     let dry_run = req.dry_run.unwrap_or(false);
     let action_ids = req.action_ids.unwrap_or_else(|| {
-        plan.actions.iter().map(|action| action.action_id()).collect()
+        plan.actions
+            .iter()
+            .map(|action| action.action_id())
+            .collect()
     });
     if action_ids.is_empty() {
         return Err(AppError::BadRequest("计划没有可执行动作".into()));
@@ -1206,8 +1213,7 @@ pub(crate) async fn ops_execute(
     let policy = state.ops.policy.read().await.clone();
 
     if dry_run {
-        let report =
-            executor::dry_run(&ctx, &plan, &action_ids, &policy, &state.ops.audit).await?;
+        let report = executor::dry_run(&ctx, &plan, &action_ids, &policy, &state.ops.audit).await?;
         return Ok(Json(OpsExecuteResponse { plan, report }));
     }
 
@@ -1360,9 +1366,7 @@ pub(crate) async fn ops_audit(
     Ok(Json(serde_json::json!({ "records": records })))
 }
 
-pub(crate) async fn ops_approvals(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub(crate) async fn ops_approvals(State(state): State<AppState>) -> Json<serde_json::Value> {
     let records = state.ops.approvals.read().await.list_recent(50);
     Json(serde_json::json!({ "approvals": records }))
 }
@@ -1376,7 +1380,11 @@ mod tests {
 
     #[test]
     fn pg_allows_only_readonly_scenarios() {
-        for scenario in ["mysql-index-advisor", "perf-diagnostics", "periodic-inspection"] {
+        for scenario in [
+            "mysql-index-advisor",
+            "perf-diagnostics",
+            "periodic-inspection",
+        ] {
             assert!(
                 scenario_engine_decision(true, scenario).is_ok(),
                 "PG 应放行只读场景 {scenario}"
@@ -1399,7 +1407,11 @@ mod tests {
 
     #[test]
     fn mysql_family_is_not_gated() {
-        for scenario in ["field-governance", "mysql-index-advisor", "periodic-inspection"] {
+        for scenario in [
+            "field-governance",
+            "mysql-index-advisor",
+            "periodic-inspection",
+        ] {
             assert!(
                 scenario_engine_decision(false, scenario).is_ok(),
                 "MySQL/MariaDB 不应被 PG 守卫拦截: {scenario}"

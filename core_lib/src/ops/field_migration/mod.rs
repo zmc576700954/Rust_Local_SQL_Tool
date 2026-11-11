@@ -10,9 +10,11 @@ pub mod dependency;
 pub mod diff;
 pub mod evidence;
 pub mod migration_store;
+pub mod pg_backfill;
 pub mod pg_evidence;
 pub mod pg_risk;
 pub mod pg_scripts;
+pub mod pg_verify;
 pub mod read_only;
 pub mod retire;
 pub mod risk;
@@ -139,7 +141,11 @@ impl OpsScenario for FieldGovernanceScenario {
             .iter()
             .map(|risk| RiskFinding {
                 id: risk.id.clone(),
-                title: format!("[{}] {}", risk.level.as_str().to_ascii_uppercase(), risk.title),
+                title: format!(
+                    "[{}] {}",
+                    risk.level.as_str().to_ascii_uppercase(),
+                    risk.title
+                ),
                 detail: format!(
                     "{}（规则 {}；写步骤阻断={}；需用户确认={}）",
                     risk.detail, risk.code, risk.blocks_write, risk.requires_user_confirmation
@@ -276,12 +282,7 @@ pub async fn analyze(
     let mut collected = evidence::collect(ctx, &input, policy).await?;
     risk::evaluate(&mut collected.analysis, &input, policy);
     scripts::generate(&collected.snapshot, &mut collected.analysis, &input);
-    retire::build(
-        &mut collected.analysis,
-        &input,
-        policy,
-        &collected.snapshot,
-    );
+    retire::build(&mut collected.analysis, &input, policy, &collected.snapshot);
     Ok(collected)
 }
 
@@ -443,4 +444,3 @@ mod tests {
         assert_eq!(parsed.column.as_deref(), Some("payload"));
     }
 }
-

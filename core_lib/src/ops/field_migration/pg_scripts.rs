@@ -86,9 +86,7 @@ pub fn generate(
         &target_columns,
         analysis.empty_string_policy,
     );
-    let rollback_delete_sql = format!(
-        "DELETE FROM {destination} WHERE {pk} >= :min_pk;"
-    );
+    let rollback_delete_sql = format!("DELETE FROM {destination} WHERE {pk} >= :min_pk;");
     let rollback_drop_sql = format!("DROP TABLE IF EXISTS {destination};");
     let retire_sql = format!("ALTER TABLE {source} DROP COLUMN {source_column};");
 
@@ -214,7 +212,11 @@ fn create_table_sql_pg(
         .as_ref()
         .and_then(|target| target.collation.as_deref());
     let mut lines = Vec::new();
-    lines.push(format!("  {} {} NOT NULL", quote_ident_pg(pk_name), pk_type));
+    lines.push(format!(
+        "  {} {} NOT NULL",
+        quote_ident_pg(pk_name),
+        pk_type
+    ));
     for column in columns {
         let pg_type = mysql_to_pg_type(&column.sql_type);
         let nullability = if column.required { "NOT NULL" } else { "NULL" };
@@ -316,7 +318,10 @@ fn push_rewrite_scripts(
     }
 
     if let (Some(target), Some(source_collation)) = (
-        input.target.as_ref().and_then(|target| target.collation.as_deref()),
+        input
+            .target
+            .as_ref()
+            .and_then(|target| target.collation.as_deref()),
         profile.collation.as_deref(),
     ) {
         if !source_collation.eq_ignore_ascii_case(target) && profile.is_text_like() {
@@ -342,9 +347,7 @@ fn push_rewrite_scripts(
 
 fn is_text_pg_type(pg_type: &str) -> bool {
     let lower = pg_type.to_ascii_lowercase();
-    lower.contains("char")
-        || lower.contains("text")
-        || lower.starts_with("json")
+    lower.contains("char") || lower.contains("text") || lower.starts_with("json")
 }
 
 /// MySQL 风格类型 → PG 类型；已经是 PG 类型名时原样返回。
@@ -358,9 +361,11 @@ pub fn mysql_to_pg_type(sql_type: &str) -> String {
         .split(|ch: char| ch == '(' || ch.is_whitespace())
         .next()
         .unwrap_or("");
-    let args = trimmed
-        .find('(')
-        .and_then(|open| trimmed.rfind(')').map(|close| trimmed[open + 1..close].to_string()));
+    let args = trimmed.find('(').and_then(|open| {
+        trimmed
+            .rfind(')')
+            .map(|close| trimmed[open + 1..close].to_string())
+    });
     match base {
         "VARCHAR" | "CHARACTER" | "CHAR" => {
             let len = args.unwrap_or_else(|| "64".into());
@@ -395,10 +400,7 @@ pub fn mysql_to_pg_type(sql_type: &str) -> String {
         "JSON" | "JSONB" => "jsonb".into(),
         "BYTEA" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => "bytea".into(),
         "BOOL" | "BOOLEAN" => "boolean".into(),
-        "VARYING" => format!(
-            "character varying({})",
-            args.unwrap_or_else(|| "64".into())
-        ),
+        "VARYING" => format!("character varying({})", args.unwrap_or_else(|| "64".into())),
         _ => trimmed.to_string(),
     }
 }
@@ -416,10 +418,7 @@ fn pg_type_for_profile(profile: &ColumnProfile) -> String {
                 .max(profile.max_char_length)
                 .min(65535)
         ),
-        "bpchar" | "char" => format!(
-            "character({})",
-            profile.char_max_length.unwrap_or(64)
-        ),
+        "bpchar" | "char" => format!("character({})", profile.char_max_length.unwrap_or(64)),
         "int2" => "smallint".into(),
         "int4" => "integer".into(),
         "int8" => "bigint".into(),
@@ -532,7 +531,7 @@ fn pg_infer_json_type(types: &std::collections::BTreeMap<String, u64>) -> String
     }
 }
 
-fn json_key_expr(source_column: &str, key: &str, as_text: bool) -> String {
+pub(crate) fn json_key_expr(source_column: &str, key: &str, as_text: bool) -> String {
     let key_literal = escape_sql_string(key);
     if as_text {
         format!("CAST({source_column} AS jsonb) ->> '{key_literal}'")
@@ -571,12 +570,14 @@ fn cast_value(value: String, pg_type: &str, policy: EmptyStringPolicy) -> String
         format!("CAST({value} AS boolean)")
     } else if lower.starts_with("bytea") {
         format!("convert_to({value}, 'UTF8')")
+    } else if lower.starts_with("uuid") {
+        format!("CAST({value} AS uuid)")
     } else {
         value
     }
 }
 
-fn value_expr(
+pub(crate) fn value_expr(
     source_column: &str,
     profile: &ColumnProfile,
     column: &TargetColumn,
@@ -648,7 +649,7 @@ fn build_backfill_sql_pg(
     )
 }
 
-fn normalized_source_expr(
+pub(crate) fn normalized_source_expr(
     source_column: &str,
     profile: &ColumnProfile,
     column: &TargetColumn,
@@ -668,6 +669,8 @@ fn normalized_source_expr(
         (format!("CAST({raw} AS numeric)"), "numeric".into())
     } else if lower.contains("timestamp") {
         (format!("CAST({raw} AS {pg_type})"), "timestamptz".into())
+    } else if lower.starts_with("uuid") {
+        (format!("CAST({raw} AS uuid)"), "uuid".into())
     } else if lower.starts_with("bytea") {
         let hex = if column.source_key.is_none() && profile.data_type == "bytea" {
             format!("encode({source_column}, 'hex')")
@@ -695,7 +698,7 @@ fn build_verify_sql_pg(
             let target = format!("t.{}", quote_ident_pg(&column.name));
             let (expr, kind) = normalized_source_expr(source_column, profile, column, policy);
             match kind.as_str() {
-                "numeric" | "text" => format!("{expr} IS DISTINCT FROM {target}"),
+                "numeric" | "text" | "uuid" => format!("{expr} IS DISTINCT FROM {target}"),
                 "timestamptz" => format!(
                     "{expr} AT TIME ZONE 'UTC' IS DISTINCT FROM {target} AT TIME ZONE 'UTC'"
                 ),
@@ -706,7 +709,7 @@ fn build_verify_sql_pg(
                         .as_deref()
                         .map(|key| json_key_expr(source_column, key, false))
                         .unwrap_or_else(|| source_column.to_string());
-                    format!("{value} IS DISTINCT FROM {target}")
+                    format!("CAST({value} AS jsonb) IS DISTINCT FROM CAST({target} AS jsonb)")
                 }
                 _ => format!("{expr} IS DISTINCT FROM {target}"),
             }
@@ -775,8 +778,14 @@ mod tests {
 
     #[test]
     fn json_key_expr_uses_pg_operators() {
-        assert_eq!(json_key_expr("payload", "theme", false), "CAST(payload AS jsonb) -> 'theme'");
-        assert_eq!(json_key_expr("payload", "theme", true), "CAST(payload AS jsonb) ->> 'theme'");
+        assert_eq!(
+            json_key_expr("payload", "theme", false),
+            "CAST(payload AS jsonb) -> 'theme'"
+        );
+        assert_eq!(
+            json_key_expr("payload", "theme", true),
+            "CAST(payload AS jsonb) ->> 'theme'"
+        );
         assert!(json_guard("payload", "theme").contains("jsonb_typeof"));
     }
 

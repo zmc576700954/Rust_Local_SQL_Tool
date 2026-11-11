@@ -124,9 +124,7 @@ async fn seed(conn: &mut MySqlConnection, source: &str, rows: i64) {
     .await;
     let mut values = Vec::with_capacity(500);
     for id in 1..=rows {
-        let payload = format!(
-            r#"{{"theme":"dark","score":7,"note":"n-{id}"}}"#
-        );
+        let payload = format!(r#"{{"theme":"dark","score":7,"note":"n-{id}"}}"#);
         values.push(format!("({id}, '{}')", escape_sql_string(&payload)));
         if values.len() == 500 {
             let sql = format!(
@@ -202,16 +200,14 @@ async fn build_job(
         .collect_evidence(ctx, &input_value)
         .await
         .expect("采集证据失败");
-    let analysis: FieldGovernanceAnalysis = serde_json::from_value(
-        evidence
-            .extra
-            .clone()
-            .expect("缺少字段治理扩展证据"),
-    )
-    .expect("解析字段治理证据失败");
-    if analysis.risks.iter().any(|risk| {
-        risk.level == core_lib::ops::field_migration::types::RiskLevel::Block
-    }) {
+    let analysis: FieldGovernanceAnalysis =
+        serde_json::from_value(evidence.extra.clone().expect("缺少字段治理扩展证据"))
+            .expect("解析字段治理证据失败");
+    if analysis
+        .risks
+        .iter()
+        .any(|risk| risk.level == core_lib::ops::field_migration::types::RiskLevel::Block)
+    {
         panic!(
             "seed 数据不应出现阻断风险: {:?}",
             analysis
@@ -231,12 +227,22 @@ async fn build_job(
     backfill::new_job(&plan, &prepared, false)
 }
 
-async fn run_to_end(hub: &MigrationHub, ctx: &OpsContext, policy: &OpsPolicy, job_id: &str) -> MigrationJob {
+async fn run_to_end(
+    hub: &MigrationHub,
+    ctx: &OpsContext,
+    policy: &OpsPolicy,
+    job_id: &str,
+) -> MigrationJob {
     backfill::run_job(job_id.to_string(), ctx.clone(), hub.clone(), policy.clone()).await;
     hub.get(job_id).await.expect("任务丢失")
 }
 
-async fn wait_until<F>(hub: &MigrationHub, job_id: &str, mut predicate: F, timeout: Duration) -> MigrationJob
+async fn wait_until<F>(
+    hub: &MigrationHub,
+    job_id: &str,
+    mut predicate: F,
+    timeout: Duration,
+) -> MigrationJob
 where
     F: FnMut(&MigrationJob) -> bool,
 {
@@ -309,7 +315,9 @@ async fn backfill_100k_full_roundtrip_v1_v4_zero() {
     drop(conn);
 
     let policy = Arc::new(OpsPolicy::default());
-    let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
+    let client = DbClient::new_default(&url)
+        .await
+        .expect("创建 DbClient 失败");
     let audit_path = std::env::temp_dir().join(format!(
         "fm-s2-audit-{}-{}.jsonl",
         std::process::id(),
@@ -332,6 +340,7 @@ async fn backfill_100k_full_roundtrip_v1_v4_zero() {
             batch_size: 10_000,
             batch_interval_ms: 0,
             max_rows_per_second: 0,
+            single_transaction: false,
         },
     )
     .await;
@@ -346,7 +355,10 @@ async fn backfill_100k_full_roundtrip_v1_v4_zero() {
         job.status,
         started.elapsed().as_millis(),
         job.expected_rows,
-        job.checkpoint.as_ref().map(|c| c.completed_batches).unwrap_or(0),
+        job.checkpoint
+            .as_ref()
+            .map(|c| c.completed_batches)
+            .unwrap_or(0),
         job.checkpoint.as_ref().map(|c| c.written_rows).unwrap_or(0),
         job.checkpoint.as_ref().and_then(|c| c.last_pk.clone()),
     );
@@ -388,9 +400,11 @@ async fn backfill_interrupt_then_resume_from_checkpoint() {
     drop(conn);
 
     let policy = Arc::new(OpsPolicy::default());
-    let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
-        .with_policy(policy.clone());
+    let client = DbClient::new_default(&url)
+        .await
+        .expect("创建 DbClient 失败");
+    let ctx =
+        OpsContext::new(client, DB_ID.into(), db_name.clone(), false).with_policy(policy.clone());
     let job = build_job(
         &ctx,
         policy.as_ref(),
@@ -400,6 +414,7 @@ async fn backfill_interrupt_then_resume_from_checkpoint() {
             batch_size: 10_000,
             batch_interval_ms: 40,
             max_rows_per_second: 0,
+            single_transaction: false,
         },
     )
     .await;
@@ -439,14 +454,22 @@ async fn backfill_interrupt_then_resume_from_checkpoint() {
         "中断后: status={:?} last_error={:?} checkpoint_pk={:?}",
         interrupted.status,
         interrupted.last_error,
-        interrupted.checkpoint.as_ref().and_then(|c| c.last_pk.clone())
+        interrupted
+            .checkpoint
+            .as_ref()
+            .and_then(|c| c.last_pk.clone())
     );
     assert_eq!(interrupted.status, MigrationStatus::Interrupted);
     assert_eq!(interrupted.progress.total_batches, 10, "首发批参数被改变");
     assert_eq!(interrupted.config.batch_size, 10_000, "首发批参数被改变");
-    let checkpoint_before = interrupted.checkpoint.clone().expect("中断后缺少 checkpoint");
+    let checkpoint_before = interrupted
+        .checkpoint
+        .clone()
+        .expect("中断后缺少 checkpoint");
 
-    let resume_client = DbClient::new_default(&url).await.expect("重建 DbClient 失败");
+    let resume_client = DbClient::new_default(&url)
+        .await
+        .expect("重建 DbClient 失败");
     let resume_ctx = OpsContext::new(resume_client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
     backfill::run_job(
@@ -461,18 +484,31 @@ async fn backfill_interrupt_then_resume_from_checkpoint() {
         "续跑完成: status={:?} resume_after_pk={:?} batches={} written={}",
         resumed.status,
         resumed.progress.resume_after_pk,
-        resumed.checkpoint.as_ref().map(|c| c.completed_batches).unwrap_or(0),
-        resumed.checkpoint.as_ref().map(|c| c.written_rows).unwrap_or(0),
+        resumed
+            .checkpoint
+            .as_ref()
+            .map(|c| c.completed_batches)
+            .unwrap_or(0),
+        resumed
+            .checkpoint
+            .as_ref()
+            .map(|c| c.written_rows)
+            .unwrap_or(0),
     );
     assert_eq!(resumed.status, MigrationStatus::Completed);
     assert_eq!(resumed.progress.resume_after_pk, checkpoint_before.last_pk);
-    assert_eq!(resumed.progress.resume_skipped_batches, checkpoint_before.completed_batches);
+    assert_eq!(
+        resumed.progress.resume_skipped_batches,
+        checkpoint_before.completed_batches
+    );
     assert_eq!(resumed.progress.total_batches, 10, "续跑批参数与首发不一致");
     assert_eq!(resumed.config.batch_size, 10_000, "续跑批参数与首发不一致");
     assert_eq!(resumed.expected_rows, 100_000);
     println!(
         "续跑参数一致性: batch_size={} total_batches={} resume_skipped={}",
-        resumed.config.batch_size, resumed.progress.total_batches, resumed.progress.resume_skipped_batches
+        resumed.config.batch_size,
+        resumed.progress.total_batches,
+        resumed.progress.resume_skipped_batches
     );
 
     let [rows, v2, v3, v4] = verify_v(&pool, source, target).await;
@@ -508,9 +544,11 @@ async fn backfill_blocks_at_corrupted_completed_batch_and_reports_pks() {
     drop(conn);
 
     let policy = Arc::new(OpsPolicy::default());
-    let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
-        .with_policy(policy.clone());
+    let client = DbClient::new_default(&url)
+        .await
+        .expect("创建 DbClient 失败");
+    let ctx =
+        OpsContext::new(client, DB_ID.into(), db_name.clone(), false).with_policy(policy.clone());
     let job = build_job(
         &ctx,
         policy.as_ref(),
@@ -520,6 +558,7 @@ async fn backfill_blocks_at_corrupted_completed_batch_and_reports_pks() {
             batch_size: 1_000,
             batch_interval_ms: 40,
             max_rows_per_second: 0,
+            single_transaction: false,
         },
     )
     .await;
@@ -563,7 +602,9 @@ async fn backfill_blocks_at_corrupted_completed_batch_and_reports_pks() {
     .await
     .expect("改坏目标数据失败");
 
-    let resume_client = DbClient::new_default(&url).await.expect("重建 DbClient 失败");
+    let resume_client = DbClient::new_default(&url)
+        .await
+        .expect("重建 DbClient 失败");
     let resume_ctx = OpsContext::new(resume_client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
     backfill::run_job(
@@ -587,17 +628,32 @@ async fn backfill_blocks_at_corrupted_completed_batch_and_reports_pks() {
         blocking.message
     );
     assert_eq!(blocked.status, MigrationStatus::Blocked);
-    assert!(blocking.phase.starts_with("final_recheck"), "phase={}", blocking.phase);
+    assert!(
+        blocking.phase.starts_with("final_recheck"),
+        "phase={}",
+        blocking.phase
+    );
     assert_eq!(blocking.batch_no, 1);
     assert!(blocking.total_diffs >= 1);
-    assert!(blocking.pks.iter().any(|pk| pk == "1"), "差异主键未定位到 1: {:?}", blocking.pks);
+    assert!(
+        blocking.pks.iter().any(|pk| pk == "1"),
+        "差异主键未定位到 1: {:?}",
+        blocking.pks
+    );
     let target_rows = count(&pool, &format!("SELECT COUNT(*) FROM {target}")).await;
     println!(
         "阻断后目标行数: {target_rows}，checkpoint_batches={}",
-        blocked.checkpoint.as_ref().map(|c| c.completed_batches).unwrap_or(0)
+        blocked
+            .checkpoint
+            .as_ref()
+            .map(|c| c.completed_batches)
+            .unwrap_or(0)
     );
     assert_eq!(target_rows, 20_000);
-    assert_eq!(blocked.checkpoint.as_ref().map(|c| c.completed_batches), Some(20));
+    assert_eq!(
+        blocked.checkpoint.as_ref().map(|c| c.completed_batches),
+        Some(20)
+    );
 
     drop(ctx);
     close_pool(pool).await;
@@ -620,9 +676,11 @@ async fn backfill_replays_committed_but_uncheckpointed_batch_idempotently() {
     drop(conn);
 
     let policy = Arc::new(OpsPolicy::default());
-    let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
-        .with_policy(policy.clone());
+    let client = DbClient::new_default(&url)
+        .await
+        .expect("创建 DbClient 失败");
+    let ctx =
+        OpsContext::new(client, DB_ID.into(), db_name.clone(), false).with_policy(policy.clone());
     let job = build_job(
         &ctx,
         policy.as_ref(),
@@ -632,6 +690,7 @@ async fn backfill_replays_committed_but_uncheckpointed_batch_idempotently() {
             batch_size: 1_000,
             batch_interval_ms: 40,
             max_rows_per_second: 0,
+            single_transaction: false,
         },
     )
     .await;
@@ -660,10 +719,15 @@ async fn backfill_replays_committed_but_uncheckpointed_batch_idempotently() {
     let _ = handle.await.expect("任务线程异常");
     let interrupted = hub.get(&job_id).await.unwrap();
     assert_eq!(interrupted.status, MigrationStatus::Interrupted);
-    let checkpoint_pk = interrupted.checkpoint.as_ref().and_then(|c| c.last_pk.clone()).unwrap();
+    let checkpoint_pk = interrupted
+        .checkpoint
+        .as_ref()
+        .and_then(|c| c.last_pk.clone())
+        .unwrap();
     println!(
         "窗口模拟前: checkpoint_batches={} checkpoint_pk={:?}",
-        interrupted.checkpoint.as_ref().unwrap().completed_batches, checkpoint_pk
+        interrupted.checkpoint.as_ref().unwrap().completed_batches,
+        checkpoint_pk
     );
 
     // 模拟「第 3 批 commit 成功但 checkpoint 未落盘」：把第 3 批数据提前写入目标。
@@ -683,7 +747,9 @@ async fn backfill_replays_committed_but_uncheckpointed_batch_idempotently() {
     println!("窗口模拟后: 目标已有 {target_rows} 行（checkpoint 仍为 2 批）");
     assert_eq!(target_rows, 3_000);
 
-    let resume_client = DbClient::new_default(&url).await.expect("重建 DbClient 失败");
+    let resume_client = DbClient::new_default(&url)
+        .await
+        .expect("重建 DbClient 失败");
     let resume_ctx = OpsContext::new(resume_client, DB_ID.into(), db_name.clone(), false)
         .with_policy(policy.clone());
     backfill::run_job(
@@ -697,12 +763,26 @@ async fn backfill_replays_committed_but_uncheckpointed_batch_idempotently() {
     println!(
         "窗口续跑完成: status={:?} checkpoint_batches={} written={}",
         resumed.status,
-        resumed.checkpoint.as_ref().map(|c| c.completed_batches).unwrap_or(0),
-        resumed.checkpoint.as_ref().map(|c| c.written_rows).unwrap_or(0)
+        resumed
+            .checkpoint
+            .as_ref()
+            .map(|c| c.completed_batches)
+            .unwrap_or(0),
+        resumed
+            .checkpoint
+            .as_ref()
+            .map(|c| c.written_rows)
+            .unwrap_or(0)
     );
     assert_eq!(resumed.status, MigrationStatus::Completed);
-    assert_eq!(resumed.checkpoint.as_ref().map(|c| c.completed_batches), Some(5));
-    assert_eq!(resumed.checkpoint.as_ref().map(|c| c.written_rows), Some(5_000));
+    assert_eq!(
+        resumed.checkpoint.as_ref().map(|c| c.completed_batches),
+        Some(5)
+    );
+    assert_eq!(
+        resumed.checkpoint.as_ref().map(|c| c.written_rows),
+        Some(5_000)
+    );
     let batch3 = resumed
         .recent_batches
         .iter()
@@ -742,9 +822,11 @@ async fn backfill_rate_limit_pause_and_abort() {
     drop(conn);
 
     let policy = Arc::new(OpsPolicy::default());
-    let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
-        .with_policy(policy.clone());
+    let client = DbClient::new_default(&url)
+        .await
+        .expect("创建 DbClient 失败");
+    let ctx =
+        OpsContext::new(client, DB_ID.into(), db_name.clone(), false).with_policy(policy.clone());
 
     // 不限速基线。
     let fast_job = build_job(
@@ -756,6 +838,7 @@ async fn backfill_rate_limit_pause_and_abort() {
             batch_size: 1_000,
             batch_interval_ms: 0,
             max_rows_per_second: 0,
+            single_transaction: false,
         },
     )
     .await;
@@ -778,6 +861,7 @@ async fn backfill_rate_limit_pause_and_abort() {
             batch_size: 1_000,
             batch_interval_ms: 0,
             max_rows_per_second: 1_000,
+            single_transaction: false,
         },
     )
     .await;
@@ -814,14 +898,21 @@ async fn backfill_rate_limit_pause_and_abort() {
     println!(
         "暂停: status={:?} checkpoint_batches={}",
         paused.status,
-        paused.checkpoint.as_ref().map(|c| c.completed_batches).unwrap_or(0)
+        paused
+            .checkpoint
+            .as_ref()
+            .map(|c| c.completed_batches)
+            .unwrap_or(0)
     );
     let paused_checkpoint = paused.checkpoint.clone().unwrap();
     tokio::time::sleep(Duration::from_millis(1_000)).await;
     let still_paused = slow_hub.get(&slow_id).await.unwrap();
     assert_eq!(still_paused.status, MigrationStatus::Paused);
     assert_eq!(
-        still_paused.checkpoint.as_ref().map(|c| c.completed_batches),
+        still_paused
+            .checkpoint
+            .as_ref()
+            .map(|c| c.completed_batches),
         Some(paused_checkpoint.completed_batches),
         "暂停期间 checkpoint 不应推进"
     );
@@ -857,6 +948,7 @@ async fn backfill_rate_limit_pause_and_abort() {
             batch_size: 1_000,
             batch_interval_ms: 100,
             max_rows_per_second: 0,
+            single_transaction: false,
         },
     )
     .await;
@@ -887,7 +979,11 @@ async fn backfill_rate_limit_pause_and_abort() {
     println!(
         "中止: status={:?} batches={}",
         aborted.status,
-        aborted.checkpoint.as_ref().map(|c| c.completed_batches).unwrap_or(0)
+        aborted
+            .checkpoint
+            .as_ref()
+            .map(|c| c.completed_batches)
+            .unwrap_or(0)
     );
     assert_eq!(aborted.status, MigrationStatus::Aborted);
 

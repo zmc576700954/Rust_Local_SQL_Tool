@@ -22,9 +22,9 @@ use crate::ops::types::{hash_json, now, AuditRecord, OpsPlan};
 use crate::sql::util::{escape_sql_string, quote_ident_mysql};
 
 use super::migration_store::{
-    BatchRecord, BatchVerify, BackfillConfig, BackfillSpec, BlockingDetail, Checkpoint,
-    DiffDetail, MigrationHub, MigrationJob, MigrationPhase, MigrationStatus, MigrationStore,
-    PkKind, CONTROL_ABORT, CONTROL_PAUSE,
+    default_engine_mysql, BackfillConfig, BackfillExecution, BackfillSpec, BatchRecord,
+    BatchVerify, BlockingDetail, Checkpoint, DiffDetail, MigrationHub, MigrationJob,
+    MigrationPhase, MigrationStatus, MigrationStore, PkKind, CONTROL_ABORT, CONTROL_PAUSE,
 };
 use super::read_only::fetch_read_only;
 use super::scripts;
@@ -41,6 +41,8 @@ pub struct PreparedBackfill {
     pub config: BackfillConfig,
     pub migration_hash: String,
     pub high_risks: Vec<FieldRisk>,
+    /// PG 专用执行语义；MySQL 为 None。
+    pub execution: Option<BackfillExecution>,
 }
 
 #[derive(Serialize)]
@@ -70,6 +72,7 @@ pub fn prepare(
             analysis.profile_mode
         )));
     }
+    let is_pg = analysis.environment.engine_family == "postgresql";
     let column = analysis
         .column
         .clone()
@@ -95,14 +98,10 @@ pub fn prepare(
         )));
     }
     if !analysis.dependencies.scan_complete {
-        return Err(OpsError::Validation(
-            "依赖扫描未完成，禁止自动回填".into(),
-        ));
+        return Err(OpsError::Validation("依赖扫描未完成，禁止自动回填".into()));
     }
     if !analysis.dependencies.source_triggers.is_empty() {
-        return Err(OpsError::Validation(
-            "源表存在触发器，禁止自动回填".into(),
-        ));
+        return Err(OpsError::Validation("源表存在触发器，禁止自动回填".into()));
     }
     let pk_column = analysis
         .dependencies
@@ -115,11 +114,13 @@ pub fn prepare(
             "源表主键不是单列，禁止自动回填".into(),
         ));
     }
-    if let Some(engine) = analysis.environment.engine.as_deref() {
-        if !engine.eq_ignore_ascii_case("innodb") {
-            return Err(OpsError::Validation(format!(
-                "源表引擎为 {engine}，只有 InnoDB 支持安全分批回填"
-            )));
+    if !is_pg {
+        if let Some(engine) = analysis.environment.engine.as_deref() {
+            if !engine.eq_ignore_ascii_case("innodb") {
+                return Err(OpsError::Validation(format!(
+                    "源表引擎为 {engine}，只有 InnoDB 支持安全分批回填"
+                )));
+            }
         }
     }
     if analysis.environment.partitioned {
@@ -171,12 +172,17 @@ pub fn prepare(
         .iter()
         .any(|column| column.name.eq_ignore_ascii_case(&pk_column))
     {
-        return Err(OpsError::Validation(
-            "目标列映射不能覆盖主键列".into(),
-        ));
+        return Err(OpsError::Validation("目标列映射不能覆盖主键列".into()));
     }
 
     let config = normalize_config(requested, policy);
+    if config.single_transaction && !is_pg {
+        return Err(OpsError::Validation("单事务模式仅支持 PostgreSQL".into()));
+    }
+    let source_data_type = analysis
+        .selected_profile()
+        .map(|profile| profile.data_type.clone())
+        .unwrap_or_default();
     let spec = BackfillSpec {
         source_table: analysis.table.clone(),
         source_column: column,
@@ -187,7 +193,19 @@ pub fn prepare(
         target_columns: analysis.target_columns.clone(),
         empty_string_policy: empty_policy,
         create_table_sql,
+        schema: analysis.environment.schema.clone(),
+        source_data_type,
     };
+    let execution = is_pg.then(|| BackfillExecution {
+        atomic: config.single_transaction,
+        rollback_scope: if config.single_transaction {
+            "job".to_string()
+        } else {
+            "batch".to_string()
+        },
+        resumable: !config.single_transaction,
+        validation_mode: "snapshot".to_string(),
+    });
     let migration_hash = hash_json(&MigrationHashView {
         plan_id: &plan.plan_id,
         plan_hash: &plan.plan_hash,
@@ -206,6 +224,7 @@ pub fn prepare(
         config,
         migration_hash,
         high_risks,
+        execution,
     })
 }
 
@@ -215,6 +234,7 @@ fn normalize_config(requested: BackfillConfig, policy: &OpsPolicy) -> BackfillCo
         batch_size: requested.batch_size.clamp(1, max_batch),
         batch_interval_ms: requested.batch_interval_ms.min(MAX_BATCH_INTERVAL_MS),
         max_rows_per_second: requested.max_rows_per_second.min(MAX_ROWS_PER_SECOND),
+        single_transaction: requested.single_transaction,
     }
 }
 
@@ -235,6 +255,9 @@ pub fn new_job(
         db_fingerprint: plan.db_fingerprint.clone(),
         spec: prepared.spec.clone(),
         config: prepared.config.clone(),
+        // 首次运行时按连接绑定；旧文件反序列化缺省为 mysql。
+        engine: String::new(),
+        execution: prepared.execution.clone(),
         status: MigrationStatus::Pending,
         phase: MigrationPhase::Pending,
         production_confirmed,
@@ -258,7 +281,11 @@ pub fn new_job(
 /// 后台任务入口。所有可恢复/不可恢复错误最终都会落成任务状态。
 pub async fn run_job(job_id: String, ctx: OpsContext, hub: MigrationHub, policy: OpsPolicy) {
     hub.mark_active(&job_id).await;
-    let result = run_inner(&job_id, &ctx, &hub, &policy).await;
+    let result = if ctx.is_postgres() {
+        super::pg_backfill::run_inner(&job_id, &ctx, &hub, &policy).await
+    } else {
+        run_inner(&job_id, &ctx, &hub, &policy).await
+    };
     if let Err(err) = result {
         let aborted = hub.control_value(&job_id).await == CONTROL_ABORT;
         let message = err.to_string();
@@ -399,9 +426,10 @@ async fn run_inner(
     // ── preflight：目标表（只允许 CREATE） ─────────────────
     let mut target_snapshot = load_snapshot_public(ctx, &spec.target_table).await?;
     if target_snapshot.columns.is_empty() {
-        let create_sql = spec.create_table_sql.clone().ok_or_else(|| {
-            OpsError::Validation("目标表不存在且没有建表脚本，无法继续".into())
-        })?;
+        let create_sql = spec
+            .create_table_sql
+            .clone()
+            .ok_or_else(|| OpsError::Validation("目标表不存在且没有建表脚本，无法继续".into()))?;
         validate_create_statement(&create_sql)?;
         execute_create(ctx, &create_sql).await?;
         job = hub
@@ -455,9 +483,7 @@ async fn run_inner(
                 ctx,
                 hub,
                 job_id,
-                &format!(
-                    "目标表已存在且包含 {target_rows} 行，但本任务没有 checkpoint，拒绝覆盖"
-                ),
+                &format!("目标表已存在且包含 {target_rows} 行，但本任务没有 checkpoint，拒绝覆盖"),
                 "preflight:target_not_empty",
             )
             .await;
@@ -503,9 +529,8 @@ async fn run_inner(
                 .as_ref()
                 .map(|checkpoint| checkpoint.completed_batches)
                 .unwrap_or(0);
-            job.progress.remaining_rows = job
-                .expected_rows
-                .saturating_sub(job.progress.success_rows);
+            job.progress.remaining_rows =
+                job.expected_rows.saturating_sub(job.progress.success_rows);
         })
         .await?;
 
@@ -689,10 +714,8 @@ async fn run_inner(
             return Ok(());
         }
 
-        let already_complete = pre.source_rows == pre.target_rows
-            && pre.v2 == 0
-            && pre.v3 == 0
-            && pre.v4 == 0;
+        let already_complete =
+            pre.source_rows == pre.target_rows && pre.v2 == 0 && pre.v3 == 0 && pre.v4 == 0;
         let mut written_rows = 0u64;
         if !already_complete {
             execute_batch(
@@ -786,6 +809,13 @@ async fn run_inner(
                     written_rows: success_rows,
                     verified: true,
                     verify: Some(verify.clone()),
+                    engine: if job.engine.is_empty() {
+                        default_engine_mysql()
+                    } else {
+                        job.engine.clone()
+                    },
+                    pk_kind: job.spec.pk_kind,
+                    target_fingerprint: None,
                     updated_at: now(),
                 });
                 job.phase = MigrationPhase::Backfilling;
@@ -896,6 +926,13 @@ async fn run_inner(
                 written_rows: job.expected_rows,
                 verified: true,
                 verify: None,
+                engine: if job.engine.is_empty() {
+                    default_engine_mysql()
+                } else {
+                    job.engine.clone()
+                },
+                pk_kind: job.spec.pk_kind,
+                target_fingerprint: None,
                 updated_at: now(),
             });
             checkpoint.completed_batches = job.progress.total_batches;
@@ -982,14 +1019,19 @@ async fn execute_batch(
     Ok(())
 }
 
-async fn execute_create(ctx: &OpsContext, sql: &str) -> Result<(), OpsError> {
-    let pool = ctx.db_client.mysql_pool()?;
+pub(crate) async fn execute_create(ctx: &OpsContext, sql: &str) -> Result<(), OpsError> {
     let statement = sql.trim().trim_end_matches(';');
-    sqlx::query(statement).execute(pool).await?;
+    if ctx.is_postgres() {
+        let pool = ctx.db_client.pool.pg()?;
+        sqlx::query(statement).execute(pool).await?;
+    } else {
+        let pool = ctx.db_client.mysql_pool()?;
+        sqlx::query(statement).execute(pool).await?;
+    }
     Ok(())
 }
 
-fn validate_create_statement(sql: &str) -> Result<(), OpsError> {
+pub(crate) fn validate_create_statement(sql: &str) -> Result<(), OpsError> {
     if classify_blocked_sql(sql).is_some() {
         return Err(OpsError::Validation(
             "建表脚本命中安全拦截（只允许 CREATE TABLE）".into(),
@@ -1070,6 +1112,7 @@ async fn verify_range(
         v2,
         v3,
         v4,
+        validation_mode: String::new(),
     })
 }
 
@@ -1083,7 +1126,16 @@ async fn locate_first_failed_batch(
     pk: &str,
     pk_kind: PkKind,
     batch_size: u64,
-) -> Result<Option<(u64, Option<String>, Option<String>, BatchVerify, Vec<DiffDetail>)>, OpsError> {
+) -> Result<
+    Option<(
+        u64,
+        Option<String>,
+        Option<String>,
+        BatchVerify,
+        Vec<DiffDetail>,
+    )>,
+    OpsError,
+> {
     let mut last_literal: Option<String> = None;
     let mut last_pk: Option<String> = None;
     let mut batch_no = 0u64;
@@ -1120,7 +1172,13 @@ async fn locate_first_failed_batch(
                 false,
             )
             .await?;
-            return Ok(Some((batch_no, last_pk.clone(), Some(end_pk), verify, diffs)));
+            return Ok(Some((
+                batch_no,
+                last_pk.clone(),
+                Some(end_pk),
+                verify,
+                diffs,
+            )));
         }
         last_pk = Some(end_pk);
         last_literal = Some(end_literal);
@@ -1179,6 +1237,7 @@ async fn verify_full(
         v2,
         v3,
         v4,
+        validation_mode: String::new(),
     })
 }
 
@@ -1444,7 +1503,7 @@ async fn collect_page(
 
 // ── 阻断 / 审计 ────────────────────────────────────────────
 
-async fn block_on_verify(
+pub(crate) async fn block_on_verify(
     ctx: &OpsContext,
     hub: &MigrationHub,
     job_id: &str,
@@ -1467,7 +1526,13 @@ async fn block_on_verify(
         .unwrap_or_else(|| prefix.to_string());
     let message = format!(
         "批次 {} 校验未通过：V1 源/目标 {}/{}，V2/V3/V4={}/{}/{}；差异合计 {}",
-        batch_no, verify.source_rows, verify.target_rows, verify.v2, verify.v3, verify.v4, total_diffs
+        batch_no,
+        verify.source_rows,
+        verify.target_rows,
+        verify.v2,
+        verify.v3,
+        verify.v4,
+        total_diffs
     );
     let job = hub
         .update(job_id, |job| {
@@ -1480,9 +1545,8 @@ async fn block_on_verify(
             } else {
                 total_diffs
             };
-            job.progress.remaining_rows = job
-                .expected_rows
-                .saturating_sub(job.progress.success_rows);
+            job.progress.remaining_rows =
+                job.expected_rows.saturating_sub(job.progress.success_rows);
             job.progress.current_batch = batch_no;
             job.blocking = Some(BlockingDetail {
                 batch_no,
@@ -1517,7 +1581,7 @@ async fn block_on_verify(
     Ok(())
 }
 
-async fn block_message(
+pub(crate) async fn block_message(
     ctx: &OpsContext,
     hub: &MigrationHub,
     job_id: &str,
@@ -1554,7 +1618,7 @@ async fn block_message(
     Ok(())
 }
 
-fn append_audit(
+pub(crate) fn append_audit(
     ctx: &OpsContext,
     event: &str,
     outcome: &str,
@@ -1576,7 +1640,7 @@ fn append_audit(
 
 // ── 控制 / 限速 ────────────────────────────────────────────
 
-async fn wait_for_control(hub: &MigrationHub, job_id: &str) -> Result<bool, OpsError> {
+pub(crate) async fn wait_for_control(hub: &MigrationHub, job_id: &str) -> Result<bool, OpsError> {
     loop {
         match hub.control_value(job_id).await {
             CONTROL_ABORT => return Ok(false),
@@ -1609,7 +1673,7 @@ async fn wait_for_control(hub: &MigrationHub, job_id: &str) -> Result<bool, OpsE
     }
 }
 
-async fn wait_rate_limit(
+pub(crate) async fn wait_rate_limit(
     config: &BackfillConfig,
     first_write_at: &mut Option<Instant>,
     written_total: u64,
@@ -1663,20 +1727,20 @@ fn pk_literal(kind: PkKind, value: &str) -> Result<String, OpsError> {
             .parse::<i128>()
             .map(|number| number.to_string())
             .map_err(|_| {
-                OpsError::Validation(format!(
-                    "主键值 {value} 不是整数，按主键区间分批不安全"
-                ))
+                OpsError::Validation(format!("主键值 {value} 不是整数，按主键区间分批不安全"))
             }),
         PkKind::Text => Ok(format!("'{}'", escape_sql_string(value))),
+        // PG 原生类型主键走参数绑定，不会进入 MySQL 字面量拼接路径。
+        PkKind::Numeric | PkKind::Uuid => Err(OpsError::Validation(format!(
+            "主键类型 {kind:?} 只支持 PostgreSQL 类型化绑定，MySQL 路径不可用"
+        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::types::{
-        EvidenceSummary, PlanStatus, RollbackPlan, TableSnapshot,
-    };
+    use crate::ops::types::{EvidenceSummary, PlanStatus, RollbackPlan, TableSnapshot};
     use crate::sql::util::quote_ident_mysql;
 
     use super::super::schema::TargetColumn;
@@ -1820,6 +1884,7 @@ mod tests {
             batch_size: 1_000_000,
             batch_interval_ms: 10,
             max_rows_per_second: 999_999,
+            single_transaction: false,
         };
         let first = prepare(&plan, &analysis, &policy, config.clone()).unwrap();
         assert_eq!(first.config.batch_size, MAX_BATCH_SIZE);
@@ -1862,14 +1927,8 @@ mod tests {
     fn pk_literals_are_typed_and_escaped() {
         assert_eq!(pk_literal(PkKind::Integer, "42").unwrap(), "42");
         assert!(pk_literal(PkKind::Integer, "abc").is_err());
-        assert_eq!(
-            pk_literal(PkKind::Text, "a'b").unwrap(),
-            "'a''b'"
-        );
-        assert_eq!(
-            pk_kind_from_type("bigint unsigned"),
-            PkKind::Integer
-        );
+        assert_eq!(pk_literal(PkKind::Text, "a'b").unwrap(), "'a''b'");
+        assert_eq!(pk_kind_from_type("bigint unsigned"), PkKind::Integer);
         assert_eq!(pk_kind_from_type("varchar(64)"), PkKind::Text);
     }
 

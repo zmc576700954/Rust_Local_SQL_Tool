@@ -17,12 +17,19 @@ use crate::ops::types::now;
 use super::schema::TargetColumn;
 use super::types::EmptyStringPolicy;
 
-/// 主键比较方式。整数主键直接写十进制字面量；文本主键按 MySQL 排序规则比较。
+/// 主键比较方式。MySQL 只使用 `Integer` / `Text`；PG 另外支持 `Numeric` / `Uuid`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PkKind {
     Integer,
+    Numeric,
     Text,
+    Uuid,
+}
+
+/// 旧任务/checkpoint 都来自 MySQL；缺省按 mysql 处理，PG 续跑看到该值会拒绝。
+pub fn default_engine_mysql() -> String {
+    "mysql".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +87,9 @@ pub struct BackfillConfig {
     pub batch_interval_ms: u64,
     /// 可选的行/秒上限；0 表示不限制。
     pub max_rows_per_second: u64,
+    /// 单事务模式：仅在 PG 生效；整任务一个事务，失败整体回滚且不可续跑。
+    #[serde(default)]
+    pub single_transaction: bool,
 }
 
 impl Default for BackfillConfig {
@@ -88,6 +98,7 @@ impl Default for BackfillConfig {
             batch_size: 1000,
             batch_interval_ms: 0,
             max_rows_per_second: 0,
+            single_transaction: false,
         }
     }
 }
@@ -107,6 +118,12 @@ pub struct BackfillSpec {
     /// L2 建表脚本；仅在目标表不存在时执行一次（CREATE TABLE IF NOT EXISTS）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_table_sql: Option<String>,
+    /// PG schema；MySQL 为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// 源列 data_type（PG 表达式重建用）；MySQL 可为空。
+    #[serde(default)]
+    pub source_data_type: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,14 +133,14 @@ pub struct BatchVerify {
     pub v2: u64,
     pub v3: u64,
     pub v4: u64,
+    /// PG 同库校验写 "snapshot"；MySQL 保持空串。
+    #[serde(default)]
+    pub validation_mode: String,
 }
 
 impl BatchVerify {
     pub fn passed(&self) -> bool {
-        self.source_rows == self.target_rows
-            && self.v2 == 0
-            && self.v3 == 0
-            && self.v4 == 0
+        self.source_rows == self.target_rows && self.v2 == 0 && self.v3 == 0 && self.v4 == 0
     }
 }
 
@@ -139,6 +156,15 @@ pub struct Checkpoint {
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<BatchVerify>,
+    /// 产出该 checkpoint 的引擎；旧文件缺省为 mysql。
+    #[serde(default = "default_engine_mysql")]
+    pub engine: String,
+    /// 主键比较方式；续跑时不一致即拒绝。
+    #[serde(default)]
+    pub pk_kind: Option<PkKind>,
+    /// 目标表结构指纹；续跑时用于确认目标未被替换。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_fingerprint: Option<String>,
     pub updated_at: i64,
 }
 
@@ -215,6 +241,42 @@ pub struct MigrationProgress {
     pub connection_id: Option<u64>,
 }
 
+/// PG 回填的执行语义；MySQL 任务为 None，不改变既有 JSON 结构。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackfillExecution {
+    #[serde(default)]
+    pub atomic: bool,
+    #[serde(default = "default_rollback_scope")]
+    pub rollback_scope: String,
+    #[serde(default = "default_resumable")]
+    pub resumable: bool,
+    #[serde(default = "default_validation_mode")]
+    pub validation_mode: String,
+}
+
+fn default_rollback_scope() -> String {
+    "batch".to_string()
+}
+
+fn default_resumable() -> bool {
+    true
+}
+
+fn default_validation_mode() -> String {
+    "per_statement".to_string()
+}
+
+impl Default for BackfillExecution {
+    fn default() -> Self {
+        Self {
+            atomic: false,
+            rollback_scope: default_rollback_scope(),
+            resumable: default_resumable(),
+            validation_mode: default_validation_mode(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationJob {
     pub job_id: String,
@@ -229,6 +291,12 @@ pub struct MigrationJob {
     pub db_fingerprint: String,
     pub spec: BackfillSpec,
     pub config: BackfillConfig,
+    /// 执行引擎；新任务首次运行绑定，旧文件缺省 mysql。
+    #[serde(default = "default_engine_mysql")]
+    pub engine: String,
+    /// 仅 PG 任务填写。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<BackfillExecution>,
     pub status: MigrationStatus,
     pub phase: MigrationPhase,
     /// 生产环境是否已显式确认（dev/staging 默认 false 即可）。
@@ -268,7 +336,10 @@ pub struct MigrationJob {
 
 impl MigrationJob {
     pub fn is_active_status(&self) -> bool {
-        matches!(self.status, MigrationStatus::Pending | MigrationStatus::Running)
+        matches!(
+            self.status,
+            MigrationStatus::Pending | MigrationStatus::Running
+        )
     }
 }
 
@@ -494,6 +565,8 @@ mod tests {
             db_id: "db".into(),
             db_name: "app".into(),
             db_fingerprint: "fp".into(),
+            engine: String::new(),
+            execution: None,
             spec: BackfillSpec {
                 source_table: "orders".into(),
                 source_column: "payload".into(),
@@ -503,6 +576,8 @@ mod tests {
                 target_columns: Vec::new(),
                 empty_string_policy: EmptyStringPolicy::Preserve,
                 create_table_sql: None,
+                schema: None,
+                source_data_type: String::new(),
             },
             config: BackfillConfig::default(),
             status: MigrationStatus::Running,
@@ -534,6 +609,7 @@ mod tests {
             batch_size: 10_000,
             batch_interval_ms: 40,
             max_rows_per_second: 1_000,
+            single_transaction: false,
         };
         {
             let mut store = MigrationStore::new(Some(path.clone()));
@@ -546,6 +622,9 @@ mod tests {
                 written_rows: 20_000,
                 verified: true,
                 verify: None,
+                engine: default_engine_mysql(),
+                pk_kind: None,
+                target_fingerprint: None,
                 updated_at: now(),
             });
             store.insert(saved).unwrap();
