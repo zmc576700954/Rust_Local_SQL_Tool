@@ -343,16 +343,221 @@ impl MigrationJob {
     }
 }
 
+// ── S3：SET NOT NULL 任务 ──────────────────────────────────
+
+/// `SET NOT NULL` 阶段机；每阶段入口幂等，续跑从当前阶段继续。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotNullPhase {
+    Preflight,
+    Scan,
+    AddCheck,
+    Validate,
+    SetNotNull,
+    DropCheck,
+    Verify,
+    Done,
+}
+
+impl NotNullPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::Scan => "scan",
+            Self::AddCheck => "add_check",
+            Self::Validate => "validate",
+            Self::SetNotNull => "set_not_null",
+            Self::DropCheck => "drop_check",
+            Self::Verify => "verify",
+            Self::Done => "done",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NotNullScanProgress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pk: Option<String>,
+    #[serde(default)]
+    pub scanned_rows: u64,
+    #[serde(default)]
+    pub null_count: u64,
+    #[serde(default)]
+    pub null_samples: Vec<String>,
+    #[serde(default)]
+    pub pk_kind: Option<PkKind>,
+}
+
+/// DDL 阶段不整体回滚（逐阶段幂等续跑），因此 rollback_scope 固定为 `phase`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotNullExecution {
+    #[serde(default)]
+    pub atomic: bool,
+    #[serde(default = "default_phase_scope")]
+    pub rollback_scope: String,
+    #[serde(default = "default_resumable")]
+    pub resumable: bool,
+}
+
+fn default_phase_scope() -> String {
+    "phase".to_string()
+}
+
+impl Default for NotNullExecution {
+    fn default() -> Self {
+        Self {
+            atomic: false,
+            rollback_scope: default_phase_scope(),
+            resumable: default_resumable(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotNullJob {
+    pub job_id: String,
+    pub plan_id: String,
+    pub db_id: String,
+    pub db_name: String,
+    pub db_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table: String,
+    pub column: String,
+    /// 固定为 `fm_not_null_<column>`，与 S1 脚本同名。
+    pub constraint_name: String,
+    /// 表/列/约束名指纹；续跑不一致即拒绝。
+    pub spec_hash: String,
+    #[serde(default = "default_engine_mysql")]
+    pub engine: String,
+    pub status: MigrationStatus,
+    pub phase: NotNullPhase,
+    #[serde(default)]
+    pub scan: NotNullScanProgress,
+    /// 扫描批大小/间隔/限速；复用 S2 的 `BackfillConfig` 与限速逻辑。
+    #[serde(default)]
+    pub config: BackfillConfig,
+    #[serde(default)]
+    pub execution: NotNullExecution,
+    #[serde(default)]
+    pub production_confirmed: bool,
+    #[serde(default)]
+    pub run_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking: Option<BlockingDetail>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+// ── S3：CONCURRENTLY 索引任务 ──────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table: String,
+    pub index_name: String,
+    /// 仅普通列（有序）；不支持表达式/部分索引/INCLUDE/opclass。
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexPhase {
+    Preflight,
+    Building,
+    Verifying,
+    Done,
+}
+
+impl IndexPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::Building => "building",
+            Self::Verifying => "verifying",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// `pg_stat_progress_create_index` 的最近一次快照；轮询是 best-effort。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexProgress {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub blocks_done: u64,
+    #[serde(default)]
+    pub blocks_total: u64,
+    #[serde(default)]
+    pub tuples_done: u64,
+    #[serde(default)]
+    pub tuples_total: u64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexJob {
+    pub job_id: String,
+    pub plan_id: String,
+    pub db_id: String,
+    pub db_name: String,
+    pub db_fingerprint: String,
+    pub spec: IndexSpec,
+    pub spec_hash: String,
+    #[serde(default = "default_engine_mysql")]
+    pub engine: String,
+    pub status: MigrationStatus,
+    pub phase: IndexPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<IndexProgress>,
+    #[serde(default)]
+    pub production_confirmed: bool,
+    #[serde(default)]
+    pub run_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking: Option<BlockingDetail>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 const RECENT_BATCH_LIMIT: usize = 80;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct MigrationFile {
     jobs: HashMap<String, MigrationJob>,
+    /// 空映射不序列化：无 PG 任务的存量 store 文件字节不变。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    notnull_jobs: HashMap<String, NotNullJob>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    index_jobs: HashMap<String, IndexJob>,
 }
 
 #[derive(Debug)]
 pub struct MigrationStore {
     jobs: HashMap<String, MigrationJob>,
+    notnull_jobs: HashMap<String, NotNullJob>,
+    index_jobs: HashMap<String, IndexJob>,
     path: Option<PathBuf>,
 }
 
@@ -360,6 +565,8 @@ impl MigrationStore {
     pub fn new(path: Option<PathBuf>) -> Self {
         let mut store = Self {
             jobs: HashMap::new(),
+            notnull_jobs: HashMap::new(),
+            index_jobs: HashMap::new(),
             path,
         };
         store.load();
@@ -379,6 +586,8 @@ impl MigrationStore {
         };
         if let Ok(file) = serde_json::from_str::<MigrationFile>(&raw) {
             self.jobs = file.jobs;
+            self.notnull_jobs = file.notnull_jobs;
+            self.index_jobs = file.index_jobs;
         }
     }
 
@@ -391,6 +600,8 @@ impl MigrationStore {
         }
         let file = MigrationFile {
             jobs: self.jobs.clone(),
+            notnull_jobs: self.notnull_jobs.clone(),
+            index_jobs: self.index_jobs.clone(),
         };
         let raw = serde_json::to_string_pretty(&file)?;
         let tmp = path.with_extension("tmp");
@@ -407,6 +618,22 @@ impl MigrationStore {
                 job.phase = MigrationPhase::Interrupted;
                 job.updated_at = now();
                 job.last_error = Some("进程重启：任务从 checkpoint 续跑".into());
+                changed = true;
+            }
+        }
+        for job in self.notnull_jobs.values_mut() {
+            if job.status == MigrationStatus::Running {
+                job.status = MigrationStatus::Interrupted;
+                job.updated_at = now();
+                job.last_error = Some("进程重启：任务从当前阶段续跑".into());
+                changed = true;
+            }
+        }
+        for job in self.index_jobs.values_mut() {
+            if job.status == MigrationStatus::Running {
+                job.status = MigrationStatus::Interrupted;
+                job.updated_at = now();
+                job.last_error = Some("进程重启：任务可重新执行".into());
                 changed = true;
             }
         }
@@ -465,6 +692,82 @@ impl MigrationStore {
             job.recent_batches.drain(0..excess);
         }
     }
+
+    // ── S3 任务 ──────────────────────────────────────────
+
+    pub fn insert_notnull(&mut self, job: NotNullJob) -> Result<(), OpsError> {
+        if self.notnull_jobs.contains_key(&job.job_id) {
+            return Err(OpsError::Validation(format!(
+                "SET NOT NULL 任务 {} 已存在",
+                job.job_id
+            )));
+        }
+        self.notnull_jobs.insert(job.job_id.clone(), job);
+        self.save()
+    }
+
+    pub fn notnull(&self, job_id: &str) -> Option<&NotNullJob> {
+        self.notnull_jobs.get(job_id)
+    }
+
+    pub fn update_notnull<F>(&mut self, job_id: &str, f: F) -> Result<NotNullJob, OpsError>
+    where
+        F: FnOnce(&mut NotNullJob),
+    {
+        let job = self
+            .notnull_jobs
+            .get_mut(job_id)
+            .ok_or_else(|| OpsError::NotFound(format!("SET NOT NULL 任务 {job_id} 不存在")))?;
+        f(job);
+        job.updated_at = now();
+        let snapshot = job.clone();
+        self.save()?;
+        Ok(snapshot)
+    }
+
+    pub fn list_notnull(&self, limit: usize) -> Vec<NotNullJob> {
+        let mut jobs: Vec<_> = self.notnull_jobs.values().cloned().collect();
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
+        jobs.truncate(limit);
+        jobs
+    }
+
+    pub fn insert_index(&mut self, job: IndexJob) -> Result<(), OpsError> {
+        if self.index_jobs.contains_key(&job.job_id) {
+            return Err(OpsError::Validation(format!(
+                "索引任务 {} 已存在",
+                job.job_id
+            )));
+        }
+        self.index_jobs.insert(job.job_id.clone(), job);
+        self.save()
+    }
+
+    pub fn index(&self, job_id: &str) -> Option<&IndexJob> {
+        self.index_jobs.get(job_id)
+    }
+
+    pub fn update_index<F>(&mut self, job_id: &str, f: F) -> Result<IndexJob, OpsError>
+    where
+        F: FnOnce(&mut IndexJob),
+    {
+        let job = self
+            .index_jobs
+            .get_mut(job_id)
+            .ok_or_else(|| OpsError::NotFound(format!("索引任务 {job_id} 不存在")))?;
+        f(job);
+        job.updated_at = now();
+        let snapshot = job.clone();
+        self.save()?;
+        Ok(snapshot)
+    }
+
+    pub fn list_index(&self, limit: usize) -> Vec<IndexJob> {
+        let mut jobs: Vec<_> = self.index_jobs.values().cloned().collect();
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
+        jobs.truncate(limit);
+        jobs
+    }
 }
 
 // ── 控制信号 ───────────────────────────────────────────────
@@ -516,6 +819,54 @@ impl MigrationHub {
 
     pub async fn list(&self, plan_id: Option<&str>, limit: usize) -> Vec<MigrationJob> {
         self.store.read().await.list(plan_id, limit)
+    }
+
+    pub async fn insert_notnull(&self, job: NotNullJob) -> Result<(), OpsError> {
+        self.store.write().await.insert_notnull(job)
+    }
+
+    pub async fn get_notnull(&self, job_id: &str) -> Result<NotNullJob, OpsError> {
+        self.store
+            .read()
+            .await
+            .notnull(job_id)
+            .cloned()
+            .ok_or_else(|| OpsError::NotFound(format!("SET NOT NULL 任务 {job_id} 不存在")))
+    }
+
+    pub async fn update_notnull<F>(&self, job_id: &str, f: F) -> Result<NotNullJob, OpsError>
+    where
+        F: FnOnce(&mut NotNullJob),
+    {
+        self.store.write().await.update_notnull(job_id, f)
+    }
+
+    pub async fn list_notnull(&self, limit: usize) -> Vec<NotNullJob> {
+        self.store.read().await.list_notnull(limit)
+    }
+
+    pub async fn insert_index(&self, job: IndexJob) -> Result<(), OpsError> {
+        self.store.write().await.insert_index(job)
+    }
+
+    pub async fn get_index(&self, job_id: &str) -> Result<IndexJob, OpsError> {
+        self.store
+            .read()
+            .await
+            .index(job_id)
+            .cloned()
+            .ok_or_else(|| OpsError::NotFound(format!("索引任务 {job_id} 不存在")))
+    }
+
+    pub async fn update_index<F>(&self, job_id: &str, f: F) -> Result<IndexJob, OpsError>
+    where
+        F: FnOnce(&mut IndexJob),
+    {
+        self.store.write().await.update_index(job_id, f)
+    }
+
+    pub async fn list_index(&self, limit: usize) -> Vec<IndexJob> {
+        self.store.read().await.list_index(limit)
     }
 
     /// 取得（必要时创建）任务控制信号。
@@ -696,5 +1047,114 @@ mod tests {
             j.recent_batches.last().unwrap().batch_no,
             (RECENT_BATCH_LIMIT + 9) as u64
         );
+    }
+
+    fn notnull_job(id: &str) -> NotNullJob {
+        NotNullJob {
+            job_id: id.into(),
+            plan_id: "p1".into(),
+            db_id: "db".into(),
+            db_name: "app".into(),
+            db_fingerprint: "fp".into(),
+            schema: Some("public".into()),
+            table: "orders".into(),
+            column: "payload".into(),
+            constraint_name: "fm_not_null_payload".into(),
+            spec_hash: "sh".into(),
+            engine: String::new(),
+            status: MigrationStatus::Running,
+            phase: NotNullPhase::Scan,
+            scan: NotNullScanProgress::default(),
+            config: BackfillConfig::default(),
+            execution: NotNullExecution::default(),
+            production_confirmed: false,
+            run_count: 1,
+            blocking: None,
+            notes: Vec::new(),
+            created_at: now(),
+            updated_at: now(),
+            started_at: now(),
+            finished_at: None,
+            last_error: None,
+        }
+    }
+
+    fn index_job(id: &str) -> IndexJob {
+        IndexJob {
+            job_id: id.into(),
+            plan_id: "p1".into(),
+            db_id: "db".into(),
+            db_name: "app".into(),
+            db_fingerprint: "fp".into(),
+            spec: IndexSpec {
+                schema: Some("public".into()),
+                table: "orders".into(),
+                index_name: "idx_orders_payload".into(),
+                columns: vec!["payload".into()],
+                unique: false,
+            },
+            spec_hash: "ih".into(),
+            engine: String::new(),
+            status: MigrationStatus::Running,
+            phase: IndexPhase::Building,
+            progress: None,
+            production_confirmed: false,
+            run_count: 1,
+            blocking: None,
+            notes: Vec::new(),
+            created_at: now(),
+            updated_at: now(),
+            started_at: now(),
+            finished_at: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn s3_jobs_round_trip_and_running_marks_interrupted() {
+        let dir = std::env::temp_dir().join(format!("fm-store-s3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jobs.json");
+        {
+            let mut store = MigrationStore::new(Some(path.clone()));
+            store.insert_notnull(notnull_job("n1")).unwrap();
+            store.insert_index(index_job("i1")).unwrap();
+        }
+        let mut store = MigrationStore::new(Some(path));
+        // 重启后 running 视为 interrupted，且两类任务都保留。
+        assert_eq!(
+            store.notnull("n1").unwrap().status,
+            MigrationStatus::Interrupted
+        );
+        assert_eq!(store.notnull("n1").unwrap().phase, NotNullPhase::Scan);
+        assert_eq!(
+            store.index("i1").unwrap().status,
+            MigrationStatus::Interrupted
+        );
+        assert_eq!(store.index("i1").unwrap().spec.columns, vec!["payload"]);
+        store
+            .update_index("i1", |job| job.notes.push("retry".into()))
+            .unwrap();
+        assert_eq!(store.index("i1").unwrap().notes, vec!["retry"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_store_file_without_s3_maps_loads() {
+        let dir = std::env::temp_dir().join(format!("fm-store-legacy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jobs.json");
+        // 老文件只有 jobs 字段，没有 notnull_jobs/index_jobs。
+        std::fs::write(&path, r#"{"jobs":{}}"#).unwrap();
+        let store = MigrationStore::new(Some(path.clone()));
+        assert!(store.notnull("n1").is_none());
+        assert!(store.index("i1").is_none());
+        // 无 S3 任务时保存不得新增空映射（MySQL 存量文件字节不变）。
+        let mut store = store;
+        store.insert(job("j9")).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("notnull_jobs"));
+        assert!(!raw.contains("index_jobs"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

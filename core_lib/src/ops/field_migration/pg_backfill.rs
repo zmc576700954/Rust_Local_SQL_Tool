@@ -1234,7 +1234,7 @@ async fn collect_full_diffs(
 
 // ── 快照/类型/索引查询 ─────────────────────────────────────
 
-fn pk_kind_from_column_type(column_type: &str) -> Result<PkKind, OpsError> {
+pub(crate) fn pk_kind_from_column_type(column_type: &str) -> Result<PkKind, OpsError> {
     let lower = column_type.trim().to_ascii_lowercase();
     if lower.starts_with("bigint") || lower.starts_with("integer") || lower.starts_with("smallint")
     {
@@ -1257,7 +1257,7 @@ fn pk_kind_from_column_type(column_type: &str) -> Result<PkKind, OpsError> {
     }
 }
 
-async fn pk_collation_deterministic(
+pub(crate) async fn pk_collation_deterministic(
     ctx: &OpsContext,
     schema: &str,
     table: &str,
@@ -1323,7 +1323,7 @@ pub fn pg_timeout_statements(policy: &OpsPolicy) -> Vec<String> {
     ]
 }
 
-async fn load_snapshot(
+pub(crate) async fn load_snapshot(
     ctx: &OpsContext,
     schema: &str,
     table: &str,

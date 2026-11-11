@@ -16,10 +16,11 @@ use core_lib::ops::ddl_compiler;
 use core_lib::ops::executor;
 use core_lib::ops::field_migration::backfill::{self, PreparedBackfill};
 use core_lib::ops::field_migration::migration_store::{
-    BackfillConfig, MigrationJob, MigrationPhase, MigrationStatus, CONTROL_ABORT, CONTROL_PAUSE,
-    CONTROL_RUN,
+    BackfillConfig, IndexJob, MigrationJob, MigrationPhase, MigrationStatus, NotNullJob,
+    CONTROL_ABORT, CONTROL_PAUSE, CONTROL_RUN,
 };
 use core_lib::ops::field_migration::types::FieldGovernanceAnalysis;
+use core_lib::ops::field_migration::{pg_index, pg_notnull};
 use core_lib::ops::index_advisor::IndexAdvisorInput;
 use core_lib::ops::local_token::HEADER as OPS_TOKEN_HEADER;
 use core_lib::ops::perf_diagnostics::{self, SlowQueryScan};
@@ -110,12 +111,10 @@ fn scenario_engine_decision(is_postgres: bool, scenario_id: &str) -> Result<(), 
     }
     match scenario_id {
         "mysql-index-advisor" | "perf-diagnostics" | "periodic-inspection" => Ok(()),
-        "field-governance" => Err(
-            "PostgreSQL 不提供字段治理：写路径仍是 MySQL 方言，尚未重写；level A 不含 PG 字段治理。请切换到 MySQL/MariaDB 连接。"
-                .into(),
-        ),
+        // S3 起 PG 字段治理（证据/风险/脚本 + 回填/DDL 执行器）已打通。
+        "field-governance" => Ok(()),
         other => Err(format!(
-            "PostgreSQL 暂不支持场景 {other}；当前开放只读场景：巡检、性能诊断、索引优化（只读分析）。"
+            "PostgreSQL 暂不支持场景 {other}；当前开放：巡检、性能诊断、索引优化（只读分析）、字段治理。"
         )),
     }
 }
@@ -802,6 +801,233 @@ pub(crate) async fn ops_field_backfill_list(
     Ok(Json(FieldBackfillListResponse { jobs }))
 }
 
+// ── S3：PG SET NOT NULL / CONCURRENTLY 索引 ──────────────
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FieldNotNullBody {
+    #[serde(default)]
+    pub db_id: Option<String>,
+    #[serde(default)]
+    pub schema: Option<String>,
+    pub table: String,
+    pub column: String,
+    #[serde(default)]
+    pub production_confirmed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FieldIndexBody {
+    #[serde(default)]
+    pub db_id: Option<String>,
+    #[serde(default)]
+    pub schema: Option<String>,
+    pub table: String,
+    pub index_name: String,
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub unique: Option<bool>,
+    #[serde(default)]
+    pub production_confirmed: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FieldDdlListQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FieldNotNullListResponse {
+    pub jobs: Vec<NotNullJob>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FieldIndexListResponse {
+    pub jobs: Vec<IndexJob>,
+}
+
+pub(crate) async fn ops_field_notnull_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FieldNotNullBody>,
+) -> Result<Json<NotNullJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let ctx = build_ctx(&state, body.db_id.as_deref(), Some(session_id(&headers))).await?;
+    ensure_scenario_engine(&ctx, "field-governance")?;
+    let policy = state.ops.policy.read().await.clone();
+    let production_confirmed = body.production_confirmed.unwrap_or(false);
+    policy.authorize_backfill(ctx.is_read_only, production_confirmed)?;
+    let job = pg_notnull::new_job(
+        &ctx,
+        &state.ops.migrations,
+        pg_notnull::NotNullRequest {
+            schema: body.schema,
+            table: body.table,
+            column: body.column,
+            production_confirmed,
+        },
+    )
+    .await?;
+    audit_event(
+        &state,
+        "field_migration.notnull.created",
+        "ok",
+        serde_json::json!({ "job_id": job.job_id, "table": job.table, "column": job.column }),
+    );
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_notnull_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<Json<NotNullJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let hub = state.ops.migrations.clone();
+    let job = hub.get_notnull(&job_id).await?;
+    if hub.is_active(&job_id).await {
+        return Err(AppError::BadRequest(format!("任务 {job_id} 正在运行")));
+    }
+    let ctx = build_ctx(&state, Some(&job.db_id), Some(session_id(&headers))).await?;
+    ensure_scenario_engine(&ctx, "field-governance")?;
+    let policy = state.ops.policy.read().await.clone();
+    policy.authorize_backfill(ctx.is_read_only, job.production_confirmed)?;
+    hub.set_control(&job_id, CONTROL_RUN).await;
+    hub.mark_active(&job_id).await;
+    let spawn_hub = hub.clone();
+    let spawn_id = job_id.clone();
+    tokio::spawn(async move {
+        if let Err(err) = pg_notnull::run_job(&spawn_id, &ctx, &spawn_hub, &policy).await {
+            let _ = spawn_hub
+                .update_notnull(&spawn_id, |job| {
+                    job.status = MigrationStatus::Interrupted;
+                    job.last_error = Some(err.to_string());
+                })
+                .await;
+        }
+        spawn_hub.mark_inactive(&spawn_id).await;
+    });
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_notnull_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<NotNullJob>, AppError> {
+    let hub = state.ops.migrations.clone();
+    let mut job = hub.get_notnull(&job_id).await?;
+    if job.status == MigrationStatus::Running && !hub.is_active(&job_id).await {
+        job = hub
+            .update_notnull(&job_id, |job| {
+                job.status = MigrationStatus::Interrupted;
+                job.last_error = Some("后台任务已停止，可从当前阶段续跑".into());
+            })
+            .await?;
+    }
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_notnull_list(
+    State(state): State<AppState>,
+    Query(query): Query<FieldDdlListQuery>,
+) -> Result<Json<FieldNotNullListResponse>, AppError> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let jobs = state.ops.migrations.list_notnull(limit).await;
+    Ok(Json(FieldNotNullListResponse { jobs }))
+}
+
+pub(crate) async fn ops_field_index_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FieldIndexBody>,
+) -> Result<Json<IndexJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let ctx = build_ctx(&state, body.db_id.as_deref(), Some(session_id(&headers))).await?;
+    ensure_scenario_engine(&ctx, "field-governance")?;
+    let policy = state.ops.policy.read().await.clone();
+    let production_confirmed = body.production_confirmed.unwrap_or(false);
+    policy.authorize_backfill(ctx.is_read_only, production_confirmed)?;
+    let job = pg_index::new_job(
+        &ctx,
+        &state.ops.migrations,
+        pg_index::IndexRequest {
+            schema: body.schema,
+            table: body.table,
+            index_name: body.index_name,
+            columns: body.columns,
+            unique: body.unique.unwrap_or(false),
+            production_confirmed,
+        },
+    )
+    .await?;
+    audit_event(
+        &state,
+        "field_migration.index.created",
+        "ok",
+        serde_json::json!({ "job_id": job.job_id, "index": job.spec.index_name, "table": job.spec.table }),
+    );
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_index_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<Json<IndexJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let hub = state.ops.migrations.clone();
+    let job = hub.get_index(&job_id).await?;
+    if hub.is_active(&job_id).await {
+        return Err(AppError::BadRequest(format!("任务 {job_id} 正在运行")));
+    }
+    let ctx = build_ctx(&state, Some(&job.db_id), Some(session_id(&headers))).await?;
+    ensure_scenario_engine(&ctx, "field-governance")?;
+    let policy = state.ops.policy.read().await.clone();
+    policy.authorize_backfill(ctx.is_read_only, job.production_confirmed)?;
+    hub.set_control(&job_id, CONTROL_RUN).await;
+    hub.mark_active(&job_id).await;
+    let spawn_hub = hub.clone();
+    let spawn_id = job_id.clone();
+    tokio::spawn(async move {
+        if let Err(err) = pg_index::run_job(&spawn_id, &ctx, &spawn_hub, &policy).await {
+            let _ = spawn_hub
+                .update_index(&spawn_id, |job| {
+                    job.status = MigrationStatus::Interrupted;
+                    job.last_error = Some(err.to_string());
+                })
+                .await;
+        }
+        spawn_hub.mark_inactive(&spawn_id).await;
+    });
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_index_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<IndexJob>, AppError> {
+    let hub = state.ops.migrations.clone();
+    let mut job = hub.get_index(&job_id).await?;
+    if job.status == MigrationStatus::Running && !hub.is_active(&job_id).await {
+        job = hub
+            .update_index(&job_id, |job| {
+                job.status = MigrationStatus::Interrupted;
+                job.last_error = Some("后台任务已停止，可重新执行".into());
+            })
+            .await?;
+    }
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_index_list(
+    State(state): State<AppState>,
+    Query(query): Query<FieldDdlListQuery>,
+) -> Result<Json<FieldIndexListResponse>, AppError> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let jobs = state.ops.migrations.list_index(limit).await;
+    Ok(Json(FieldIndexListResponse { jobs }))
+}
+
 pub(crate) async fn ops_field_backfill_pause(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1393,16 +1619,15 @@ mod tests {
     }
 
     #[test]
-    fn pg_rejects_field_governance_with_reason() {
-        let err = scenario_engine_decision(true, "field-governance").unwrap_err();
-        assert!(err.contains("level A 不含 PG 字段治理"), "{err}");
-        assert!(err.contains("写路径仍是 MySQL 方言"), "{err}");
+    fn pg_allows_field_governance_after_s3() {
+        // S3 spec §6：字段治理能力位增加 postgresql，PG 连接不再被场景门控拦截。
+        assert!(scenario_engine_decision(true, "field-governance").is_ok());
     }
 
     #[test]
     fn pg_rejects_unknown_scenario_with_supported_list() {
         let err = scenario_engine_decision(true, "sqlite-index-advisor").unwrap_err();
-        assert!(err.contains("当前开放只读场景"), "{err}");
+        assert!(err.contains("当前开放"), "{err}");
     }
 
     #[test]

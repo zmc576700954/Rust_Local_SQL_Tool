@@ -1395,6 +1395,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(ops_handlers::ops_field_backfill_abort),
         )
         .route(
+            "/ops/field-governance/notnull",
+            get(ops_handlers::ops_field_notnull_list).post(ops_handlers::ops_field_notnull_create),
+        )
+        .route(
+            "/ops/field-governance/notnull/:job_id",
+            get(ops_handlers::ops_field_notnull_status),
+        )
+        .route(
+            "/ops/field-governance/notnull/:job_id/run",
+            post(ops_handlers::ops_field_notnull_run),
+        )
+        .route(
+            "/ops/field-governance/index",
+            get(ops_handlers::ops_field_index_list).post(ops_handlers::ops_field_index_create),
+        )
+        .route(
+            "/ops/field-governance/index/:job_id",
+            get(ops_handlers::ops_field_index_status),
+        )
+        .route(
+            "/ops/field-governance/index/:job_id/run",
+            post(ops_handlers::ops_field_index_run),
+        )
+        .route(
             "/ops/slow-queries",
             get(ops_handlers::ops_slow_queries),
         )
@@ -3865,6 +3889,30 @@ mod tests {
             .route(
                 "/ops/field-governance/backfill/:job_id/abort",
                 post(ops_handlers::ops_field_backfill_abort),
+            )
+            .route(
+                "/ops/field-governance/notnull",
+                get(ops_handlers::ops_field_notnull_list).post(ops_handlers::ops_field_notnull_create),
+            )
+            .route(
+                "/ops/field-governance/notnull/:job_id",
+                get(ops_handlers::ops_field_notnull_status),
+            )
+            .route(
+                "/ops/field-governance/notnull/:job_id/run",
+                post(ops_handlers::ops_field_notnull_run),
+            )
+            .route(
+                "/ops/field-governance/index",
+                get(ops_handlers::ops_field_index_list).post(ops_handlers::ops_field_index_create),
+            )
+            .route(
+                "/ops/field-governance/index/:job_id",
+                get(ops_handlers::ops_field_index_status),
+            )
+            .route(
+                "/ops/field-governance/index/:job_id/run",
+                post(ops_handlers::ops_field_index_run),
             )
             .route(
                 "/ops/plans/:plan_id/approve",

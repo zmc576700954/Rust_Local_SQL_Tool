@@ -12,6 +12,8 @@ pub mod evidence;
 pub mod migration_store;
 pub mod pg_backfill;
 pub mod pg_evidence;
+pub mod pg_index;
+pub mod pg_notnull;
 pub mod pg_risk;
 pub mod pg_scripts;
 pub mod pg_verify;
@@ -50,7 +52,7 @@ impl FieldGovernanceScenario {
                 description: "采集 E01-E14 证据、生成三档风险报告与 dry-run 脚本包；\
                     不建表、不写数据、不删列。"
                     .into(),
-                engines: vec!["mysql".into(), "mariadb".into()],
+                engines: vec!["mysql".into(), "mariadb".into(), "postgresql".into()],
                 status: ScenarioStatus::Enabled,
                 risk_ceiling: crate::ops::types::RiskClass::L0,
                 allowed_actions: vec![],
@@ -434,6 +436,13 @@ mod tests {
         assert_eq!(descriptor.status, ScenarioStatus::Enabled);
         assert_eq!(descriptor.risk_ceiling, crate::ops::types::RiskClass::L0);
         assert!(descriptor.allowed_actions.is_empty());
+        // S3 起 PG 连接也进入字段治理入口；MySQL/MariaDB 不变。
+        assert!(descriptor.engines.iter().any(|engine| engine == "mysql"));
+        assert!(descriptor.engines.iter().any(|engine| engine == "mariadb"));
+        assert!(descriptor
+            .engines
+            .iter()
+            .any(|engine| engine == "postgresql"));
     }
 
     #[test]
