@@ -74,7 +74,11 @@ async fn admin_exec(pool: &PgPool, sql: &str) {
 }
 
 async fn create_database(pool: &PgPool, db: &str) {
-    admin_exec(pool, &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)")).await;
+    admin_exec(
+        pool,
+        &format!("DROP DATABASE IF EXISTS \"{db}\" WITH (FORCE)"),
+    )
+    .await;
     admin_exec(pool, &format!("CREATE DATABASE \"{db}\"")).await;
 }
 
@@ -108,7 +112,11 @@ async fn exec(pool: &PgPool, sql: &str) {
 }
 
 async fn setup(pool: &PgPool) {
-    exec(pool, "CREATE TABLE fm_users (id bigint PRIMARY KEY NOT NULL)").await;
+    exec(
+        pool,
+        "CREATE TABLE fm_users (id bigint PRIMARY KEY NOT NULL)",
+    )
+    .await;
     exec(
         pool,
         "CREATE TABLE fm_orders (\
@@ -131,7 +139,11 @@ async fn setup(pool: &PgPool) {
          FOREIGN KEY (user_id) REFERENCES fm_users (id)",
     )
     .await;
-    exec(pool, "INSERT INTO fm_users (id) SELECT generate_series(1, 6)").await;
+    exec(
+        pool,
+        "INSERT INTO fm_users (id) SELECT generate_series(1, 6)",
+    )
+    .await;
     exec(
         pool,
         "INSERT INTO fm_orders (user_id, payload, payload_text, score, blob_col, created_at) VALUES \
@@ -148,7 +160,11 @@ async fn setup(pool: &PgPool) {
         "UPDATE fm_orders SET payload_text = repeat('x', 60) WHERE id = 2",
     )
     .await;
-    exec(pool, "CREATE VIEW fm_orders_v AS SELECT id, payload FROM fm_orders").await;
+    exec(
+        pool,
+        "CREATE VIEW fm_orders_v AS SELECT id, payload FROM fm_orders",
+    )
+    .await;
     exec(pool, "ANALYZE fm_orders").await;
 
     exec(
@@ -238,7 +254,10 @@ fn evidence_item(analysis: &FieldGovernanceAnalysis, id: &str) -> serde_json::Va
 }
 
 fn print_evidence(analysis: &FieldGovernanceAnalysis) {
-    println!("\n=== 真实采集：{}.{} ===", analysis.db_name, analysis.table);
+    println!(
+        "\n=== 真实采集：{}.{} ===",
+        analysis.db_name, analysis.table
+    );
     for item in &analysis.evidence {
         println!(
             "{} {} status={} mode={} :: {}",
@@ -305,9 +324,11 @@ async fn field_governance_real_pg_evidence_risk_and_scripts() {
         field_profile_max_bytes: 20 * 1024 * 1024 * 1024,
         ..Default::default()
     });
-    let client = DbClient::new_default(&url).await.expect("创建 DbClient 失败");
-    let ctx = OpsContext::new(client, DB_ID.into(), db_name.clone(), false)
-        .with_policy(policy.clone());
+    let client = DbClient::new_default(&url)
+        .await
+        .expect("创建 DbClient 失败");
+    let ctx =
+        OpsContext::new(client, DB_ID.into(), db_name.clone(), false).with_policy(policy.clone());
 
     // ── 1) jsonb 列：顶层类型 / 类型漂移 / 生成列 / 声明 ──────────
     let json_analysis = analyze(
@@ -334,12 +355,23 @@ async fn field_governance_real_pg_evidence_risk_and_scripts() {
     assert_eq!(json_analysis.columns[0].json_invalid_rows, 0);
     assert_eq!(json_analysis.columns[0].json_object_rows, 4);
     assert_eq!(json_analysis.columns[0].null_rows, 2);
-    assert_eq!(json_analysis.columns[0].pg_input_check.as_deref(), Some("not_applicable"));
+    assert_eq!(
+        json_analysis.columns[0].pg_input_check.as_deref(),
+        Some("not_applicable")
+    );
     assert_risk(&json_analysis, "E08_NULL_PRESENT", RiskLevel::High);
     assert_risk(&json_analysis, "E05_GENERATED_COLUMN", RiskLevel::Block);
-    assert_risk(&json_analysis, "E11_TYPE_DRIFT@payload:age", RiskLevel::Block);
+    assert_risk(
+        &json_analysis,
+        "E11_TYPE_DRIFT@payload:age",
+        RiskLevel::Block,
+    );
     assert_risk(&json_analysis, "SEM_DECL_UNEXPECTED_KEY", RiskLevel::Block);
-    assert_risk(&json_analysis, "SEM_DECL_REQUIRED_KEY_MISSING", RiskLevel::Block);
+    assert_risk(
+        &json_analysis,
+        "SEM_DECL_REQUIRED_KEY_MISSING",
+        RiskLevel::Block,
+    );
     assert!(!json_analysis.scripts.is_empty(), "jsonb 列应生成脚本包");
     for script in &json_analysis.scripts {
         assert!(!script.executable, "脚本绝不能标记为可执行");
@@ -379,9 +411,13 @@ async fn field_governance_real_pg_evidence_risk_and_scripts() {
     assert!(e02_na.iter().any(|item| item == "TABLE_COLLATION"));
     assert!(e02_na.iter().any(|item| item == "ENGINE"));
     let e07 = evidence_item(&json_analysis, "E07");
-    assert!(not_applicable_items(&e07).iter().any(|item| item == "UPDATE_TIME"));
+    assert!(not_applicable_items(&e07)
+        .iter()
+        .any(|item| item == "UPDATE_TIME"));
     let e14 = evidence_item(&json_analysis, "E14");
-    assert!(not_applicable_items(&e14).iter().any(|item| item == "INNODB_TRX"));
+    assert!(not_applicable_items(&e14)
+        .iter()
+        .any(|item| item == "INNODB_TRX"));
     assert_eq!(e14["details"]["pg_authid_readable"], true);
     assert!(e14["details"]["no_password_roles"].is_number());
 
@@ -431,14 +467,25 @@ async fn field_governance_real_pg_evidence_risk_and_scripts() {
             "PG<16 必须降级为客户端采样"
         );
         assert!(
-            text_analysis.gaps.iter().any(|gap| gap.evidence_id == "E09"),
+            text_analysis
+                .gaps
+                .iter()
+                .any(|gap| gap.evidence_id == "E09"),
             "PG<16 必须记录 E09 gap"
         );
     }
     assert_risk(&text_analysis, "E09_INVALID_JSON", RiskLevel::Block);
     assert_risk(&text_analysis, "E08_EMPTY_STRING", RiskLevel::High);
-    assert_risk(&text_analysis, "E01_TARGET_LENGTH_TOO_SMALL", RiskLevel::Block);
-    assert_risk(&text_analysis, "E03_PRIMARY_OR_UNIQUE@payload_text", RiskLevel::Block);
+    assert_risk(
+        &text_analysis,
+        "E01_TARGET_LENGTH_TOO_SMALL",
+        RiskLevel::Block,
+    );
+    assert_risk(
+        &text_analysis,
+        "E03_PRIMARY_OR_UNIQUE@payload_text",
+        RiskLevel::Block,
+    );
     assert_risk(&text_analysis, "E13_TRIM_DIRTY", RiskLevel::High);
     assert_risk(&text_analysis, "SEM_DECL_NULL_CONFLICT", RiskLevel::Block);
     assert_risk(&text_analysis, "E01_PG_TYPE_REWRITE", RiskLevel::Block);
@@ -564,7 +611,10 @@ async fn field_governance_real_pg_evidence_risk_and_scripts() {
         },
     )
     .await;
-    println!("\n=== 整表盘点 === analyzed={:?}", inventory.analyzed_columns);
+    println!(
+        "\n=== 整表盘点 === analyzed={:?}",
+        inventory.analyzed_columns
+    );
     assert_eq!(inventory.analyzed_columns.len(), 8);
     assert!(inventory.scripts.is_empty(), "整表盘点不应生成脚本");
     assert_risk(&inventory, "E04_FOREIGN_KEY@user_id", RiskLevel::Block);
@@ -604,7 +654,9 @@ async fn field_governance_real_pg_evidence_risk_and_scripts() {
     .await;
     print_evidence(&partitioned);
     assert!(partitioned.environment.partitioned);
-    assert_risk(&partitioned, "E02_PARTITIONED", RiskLevel::Block);
+    // 断言依据 specs/pg-field-governance-s5/spec.md §7.1：S5 起 PG 源分区表可与父表
+    // keyset 分页对接，风险由 Block 降为 High（MySQL 仍 Block，见 risk.rs 分支）。
+    assert_risk(&partitioned, "E02_PARTITIONED", RiskLevel::High);
 
     let composite = analyze(
         &ctx,
@@ -616,7 +668,19 @@ async fn field_governance_real_pg_evidence_risk_and_scripts() {
         },
     )
     .await;
-    assert_risk(&composite, "E14_NO_SINGLE_PK", RiskLevel::Block);
+    // 断言依据 specs/pg-field-governance-s5/spec.md §5：S5 起 PG 复合主键走行比较
+    // keyset 分页，`E14_NO_SINGLE_PK` 不再产生；MySQL 复合主键仍是 Block。
+    assert_eq!(
+        risk_level(&composite, "E14_NO_SINGLE_PK"),
+        None,
+        "PG 复合主键不应再触发无单列主键阻断: {:?}",
+        composite
+            .risks
+            .iter()
+            .map(|risk| (&risk.code, risk.level))
+            .collect::<Vec<_>>()
+    );
+    assert!(composite.dependencies.primary_key_columns.len() > 1);
 
     let collated = analyze(
         &ctx,
@@ -630,7 +694,11 @@ async fn field_governance_real_pg_evidence_risk_and_scripts() {
     .await;
     print_evidence(&collated);
     assert!(collated.environment.nondeterministic_collation);
-    assert_risk(&collated, "E13_PG_NONDETERMINISTIC_COLLATION", RiskLevel::Block);
+    assert_risk(
+        &collated,
+        "E13_PG_NONDETERMINISTIC_COLLATION",
+        RiskLevel::Block,
+    );
 
     // ── 8) build_plan：无写动作 ────────────────────────────────
     let registry = ScenarioRegistry::builtin();
@@ -665,9 +733,21 @@ async fn field_governance_real_pg_evidence_risk_and_scripts() {
         &format!("CREATE ROLE \"{role}\" LOGIN PASSWORD 'reader_pw' NOSUPERUSER"),
     )
     .await;
-    admin_exec(&admin_pool, &format!("GRANT CONNECT ON DATABASE \"{db_name}\" TO \"{role}\"")).await;
-    exec(&pool, &format!("GRANT USAGE ON SCHEMA public TO \"{role}\"")).await;
-    exec(&pool, &format!("GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{role}\"")).await;
+    admin_exec(
+        &admin_pool,
+        &format!("GRANT CONNECT ON DATABASE \"{db_name}\" TO \"{role}\""),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!("GRANT USAGE ON SCHEMA public TO \"{role}\""),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!("GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{role}\""),
+    )
+    .await;
     let reader_url = with_credentials(&base_url, &role, "reader_pw");
     let reader_url = with_database(&reader_url, &db_name);
     let reader_client = DbClient::new_default(&reader_url)

@@ -114,7 +114,9 @@ fn spec_for(source: &str, target: &str, source_type: &str, target_sql_type: &str
         source_column: "v".into(),
         target_table: target.into(),
         pk_column: "id".into(),
+        pk_columns: Vec::new(),
         pk_kind: Some(PkKind::Integer),
+        pk_kinds: Vec::new(),
         target_columns: vec![TargetColumn {
             name: "v".into(),
             source_key: None,
@@ -421,7 +423,7 @@ async fn snapshot_consistency() {
     // verify_range 内部走快照并回写 validation_mode。
     let ctx = make_ctx(&url, &db_name).await;
     let spec = spec_for("v_src", "v_tgt", "text", "text");
-    let verify = pg_verify::verify_range(&ctx, &spec, None, Some("2"))
+    let verify = pg_verify::verify_range(&ctx, &spec, None, Some(&["2".to_string()]))
         .await
         .expect("范围校验失败");
     assert_eq!(verify.validation_mode, "snapshot");
@@ -473,8 +475,9 @@ async fn diff_pages() {
         assert_eq!(total, 3, "{phase} 总数不符");
 
         // 以 page=2 走 keyset 分页：总数正确、无重复、顺序递增。
+        // S5 起 keyset 边界统一为键向量（单列即长度为 1 的向量），断言语义不变。
         let mut collected: Vec<String> = Vec::new();
-        let mut last: Option<String> = None;
+        let mut last: Option<Vec<String>> = None;
         loop {
             let page = pg_verify::diff_page(&ctx, &spec, phase, last.as_deref(), None, 2)
                 .await
@@ -484,11 +487,11 @@ async fn diff_pages() {
             }
             if let Some(previous) = &last {
                 assert!(
-                    page.first().unwrap() > previous,
-                    "{phase} 分页必须严格递增: {page:?} after {previous}"
+                    page.first().unwrap() > &previous[0],
+                    "{phase} 分页必须严格递增: {page:?} after {previous:?}"
                 );
             }
-            last = page.last().cloned();
+            last = page.last().map(|value| vec![value.clone()]);
             collected.extend(page);
         }
         let mut dedup = collected.clone();

@@ -445,7 +445,10 @@ async fn name_too_long_blocks() {
 }
 
 #[tokio::test]
-async fn partitioned_table_blocks() {
+async fn partitioned_index_recipe() {
+    // S5 行为变更依据：分区表从 BLOCK 改为官方配方执行
+    // （ON ONLY 父表占位 → 逐分区 CONCURRENTLY → ATTACH），
+    // PG 不支持对分区父表直接 CREATE INDEX CONCURRENTLY。
     let Some(base_url) = env_url() else { return };
     let (db, admin) = isolated_database(&base_url, "it_ix_part").await;
     let url = with_database(&base_url, &db);
@@ -454,6 +457,21 @@ async fn partitioned_table_blocks() {
         &pool,
         "CREATE TABLE parted (id bigint NOT NULL, code text, PRIMARY KEY (id)) \
          PARTITION BY RANGE (id)",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE parted_p1 PARTITION OF parted FOR VALUES FROM (1) TO (1000)",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE parted_p2 PARTITION OF parted FOR VALUES FROM (1000) TO (2000)",
+    )
+    .await;
+    exec(
+        &pool,
+        "INSERT INTO parted SELECT g, 'v' || g FROM generate_series(1, 1500) g",
     )
     .await;
 
@@ -465,13 +483,37 @@ async fn partitioned_table_blocks() {
         .await
         .expect("执行失败");
 
-    let blocked = hub.get_index(&job.job_id).await.unwrap();
-    assert_eq!(blocked.status, MigrationStatus::Blocked);
-    assert_eq!(
-        blocked.blocking.as_ref().unwrap().phase,
-        "preflight:partitioned"
+    let done = hub.get_index(&job.job_id).await.expect("任务不可见");
+    println!(
+        "分区索引: status={:?} last_error={:?}",
+        done.status, done.last_error
     );
-    assert_eq!(index_state(&pool, "idx_parted_code").await, None);
+    assert_eq!(done.status, MigrationStatus::Completed);
+    assert!(
+        index_state(&pool, "idx_parted_code").await.is_some(),
+        "父索引必须存在"
+    );
+
+    // 全部分区索引有效且已 ATTACH 到父索引。
+    let attached: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_inherits i \
+         JOIN pg_class parent ON parent.oid = i.inhparent \
+         JOIN pg_class child ON child.oid = i.inhrelid \
+         JOIN pg_index ix ON ix.indexrelid = child.oid \
+         WHERE parent.relname = 'idx_parted_code' \
+           AND child.relname LIKE 'idx_parted_code_p_%' AND ix.indisvalid",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(attached, 2, "两个分区索引都应有效并已 attach");
+
+    // 重跑幂等：不重复建、不报错。
+    pg_index::run_job(&job.job_id, &ctx, &hub, &policy)
+        .await
+        .expect("重跑失败");
+    let rerun = hub.get_index(&job.job_id).await.unwrap();
+    assert_eq!(rerun.status, MigrationStatus::Completed);
 
     cleanup_database(&admin, &db).await;
 }

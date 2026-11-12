@@ -242,7 +242,19 @@ async fn build_job(
 /// 直接构造任务（目标表预创建场景）。E14 目标已存在是 Block 级风险，
 /// 这些用例本来就到不了 prepare；手工构造等价于 prepare 产出的 spec。
 fn manual_job(db_name: &str, source: &str, target: &str, config: BackfillConfig) -> MigrationJob {
+    manual_job_with_pk(db_name, source, target, Vec::new(), config)
+}
+
+/// 复合主键场景的手工任务：spec.pk_columns 显式给出（目标表预建，E14 无法走 prepare）。
+fn manual_job_with_pk(
+    db_name: &str,
+    source: &str,
+    target: &str,
+    pk_columns: Vec<String>,
+    config: BackfillConfig,
+) -> MigrationJob {
     let single = config.single_transaction;
+    let pk_column = pk_columns.first().cloned().unwrap_or_else(|| "id".into());
     MigrationJob {
         job_id: format!("pg-s2-{}", unique_suffix()),
         plan_id: "pg-s2-manual".into(),
@@ -256,8 +268,10 @@ fn manual_job(db_name: &str, source: &str, target: &str, config: BackfillConfig)
             source_table: source.into(),
             source_column: "payload".into(),
             target_table: target.into(),
-            pk_column: "id".into(),
+            pk_column,
+            pk_columns,
             pk_kind: None,
+            pk_kinds: Vec::new(),
             target_columns: vec![
                 TargetColumn {
                     name: "theme".into(),
@@ -393,7 +407,7 @@ async fn backfill_batches_commit_and_resume() {
         |job| {
             job.checkpoint
                 .as_ref()
-                .map(|checkpoint| checkpoint.completed_batches >= 2)
+                .map(|checkpoint| checkpoint.completed_batches >= 1)
                 .unwrap_or(false)
         },
         Duration::from_secs(180),
@@ -467,8 +481,10 @@ async fn backfill_batches_commit_and_resume() {
     .await;
     let resumed = hub.get(&job_id).await.unwrap();
     println!(
-        "续跑完成: status={:?} resume_after_pk={:?} batches={}",
+        "续跑完成: status={:?} blocking={:?} err={:?} resume_after_pk={:?} batches={}",
         resumed.status,
+        resumed.blocking.as_ref().map(|b| b.phase.clone()),
+        resumed.last_error,
         resumed.progress.resume_after_pk,
         resumed
             .checkpoint
@@ -1256,6 +1272,509 @@ async fn single_transaction_failure_rolls_back_job() {
     );
     let target_rows = count(&pool, &format!("SELECT COUNT(*) FROM {target}")).await;
     assert_eq!(target_rows, 0, "拒绝续跑后不得写入目标表");
+
+    drop(ctx);
+    pool.close().await;
+    cleanup_database(&admin_pool, &db_name).await;
+}
+
+// ── S5：复合主键 / 分区源 / 部分唯一索引 ─────────────────────────
+
+/// 复合主键端到端：S1 脚本建多列主键目标表，执行器走 tuple keyset 分批。
+/// 依据 specs/pg-field-governance-s5/spec.md §5（行比较 keyset + 复合 ON CONFLICT）。
+#[tokio::test]
+async fn composite_pk_backfill() {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_PG_URL") else {
+        eprintln!("跳过 S5 PG 真库验证：未设置 FIELD_MIGRATION_PG_URL");
+        return;
+    };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s5_cpk").await;
+    let url = with_database(&base_url, &db_name);
+    let pool = PgPool::connect(&url).await.expect("连接 PG 失败");
+    let source = "fm_s5_cpk_source";
+    let target = "fm_s5_cpk_target";
+    exec(
+        &pool,
+        &format!(
+            "CREATE TABLE {source} (tenant_id bigint NOT NULL, seq integer NOT NULL, \
+             payload jsonb, PRIMARY KEY (tenant_id, seq))"
+        ),
+    )
+    .await;
+    // 故意让 tenant_id 与 seq 交错，验证 keyset 按 (tenant_id, seq) 字典序而不是 seq 单列。
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO {source} \
+             SELECT (g % 7) + 1, g, \
+                    jsonb_build_object('theme', 'dark', 'score', g, 'note', 'n-' || g) \
+             FROM generate_series(1, 5000) AS g"
+        ),
+    )
+    .await;
+    exec(&pool, &format!("ANALYZE {source}")).await;
+
+    let policy = test_policy();
+    let ctx = make_ctx(&url, &db_name, &policy).await;
+    let job = build_job(
+        &ctx,
+        policy.as_ref(),
+        source,
+        target,
+        BackfillConfig {
+            batch_size: 700,
+            batch_interval_ms: 0,
+            max_rows_per_second: 0,
+            single_transaction: false,
+        },
+    )
+    .await;
+    assert_eq!(
+        job.spec.pk_columns,
+        vec!["tenant_id".to_string(), "seq".to_string()],
+        "复合主键必须写入 spec.pk_columns"
+    );
+    assert_eq!(job.spec.pk_column, "tenant_id", "首列作为展示用主键名");
+    let create_sql = job
+        .spec
+        .create_table_sql
+        .as_deref()
+        .expect("PG 任务必须带建表脚本");
+    assert!(
+        create_sql.contains("PRIMARY KEY (\"tenant_id\", \"seq\")"),
+        "建表脚本必须是多列主键: {create_sql}"
+    );
+
+    let job_id = job.job_id.clone();
+    let hub = MigrationHub::for_test();
+    hub.insert(job).await.unwrap();
+
+    let job = run_to_end(&hub, &ctx, policy.as_ref(), &job_id).await;
+    println!(
+        "复合主键回填: status={:?} last_error={:?} batches={}",
+        job.status,
+        job.last_error,
+        job.checkpoint
+            .as_ref()
+            .map(|c| c.completed_batches)
+            .unwrap_or(0)
+    );
+    assert_eq!(job.status, MigrationStatus::Completed);
+    let target_rows = count(&pool, &format!("SELECT COUNT(*) FROM {target}")).await;
+    assert_eq!(target_rows, 5_000, "目标表行数必须与源表一致");
+    let checkpoint = job.checkpoint.as_ref().expect("完成后必须有 checkpoint");
+    let last_pks = checkpoint
+        .last_pks
+        .as_ref()
+        .expect("复合主键必须记 last_pks");
+    assert_eq!(last_pks.len(), 2, "last_pks 必须等长于主键列");
+    assert_eq!(checkpoint.pk_kinds.len(), 2, "checkpoint 必须记两列类型");
+    let verify = checkpoint.verify.clone().expect("完成后缺少校验记录");
+    assert!(verify.passed(), "V1–V4 必须全部通过: {verify:?}");
+
+    drop(ctx);
+    pool.close().await;
+    cleanup_database(&admin_pool, &db_name).await;
+}
+
+/// 复合主键含文本列：行比较内文本列统一 `COLLATE "C"`，与 ORDER BY 一致。
+/// 依据 specs/pg-field-governance-s5/spec.md §5.2。
+#[tokio::test]
+async fn composite_pk_text_collate() {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_PG_URL") else {
+        eprintln!("跳过 S5 PG 真库验证：未设置 FIELD_MIGRATION_PG_URL");
+        return;
+    };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s5_cpkt").await;
+    let url = with_database(&base_url, &db_name);
+    let pool = PgPool::connect(&url).await.expect("连接 PG 失败");
+    let source = "fm_s5_cpkt_source";
+    let target = "fm_s5_cpkt_target";
+    exec(
+        &pool,
+        &format!(
+            "CREATE TABLE {source} (region text COLLATE \"C\" NOT NULL, seq integer NOT NULL, \
+             payload jsonb, PRIMARY KEY (region, seq))"
+        ),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO {source} \
+             SELECT 'r-' || lpad(((g % 5) + 1)::text, 2, '0'), g, \
+                    jsonb_build_object('theme', 'light', 'score', g, 'note', 'n-' || g) \
+             FROM generate_series(1, 2000) AS g"
+        ),
+    )
+    .await;
+    exec(&pool, &format!("ANALYZE {source}")).await;
+
+    let policy = test_policy();
+    let ctx = make_ctx(&url, &db_name, &policy).await;
+    let job = build_job(
+        &ctx,
+        policy.as_ref(),
+        source,
+        target,
+        BackfillConfig {
+            batch_size: 300,
+            batch_interval_ms: 0,
+            max_rows_per_second: 0,
+            single_transaction: false,
+        },
+    )
+    .await;
+    let job_id = job.job_id.clone();
+    let hub = MigrationHub::for_test();
+    hub.insert(job).await.unwrap();
+
+    let job = run_to_end(&hub, &ctx, policy.as_ref(), &job_id).await;
+    println!(
+        "复合文本主键回填: status={:?} last_error={:?}",
+        job.status, job.last_error
+    );
+    assert_eq!(job.status, MigrationStatus::Completed);
+    let target_rows = count(&pool, &format!("SELECT COUNT(*) FROM {target}")).await;
+    assert_eq!(target_rows, 2_000);
+    let verify = job
+        .checkpoint
+        .as_ref()
+        .and_then(|c| c.verify.clone())
+        .expect("完成后缺少校验记录");
+    assert!(
+        verify.passed(),
+        "文本列必须按 COLLATE \"C\" 比较: {verify:?}"
+    );
+
+    drop(ctx);
+    pool.close().await;
+    cleanup_database(&admin_pool, &db_name).await;
+}
+
+/// 源表为分区表：S5 起经父表 keyset 透明分页，风险由 Block 降为 High。
+/// 依据 specs/pg-field-governance-s5/spec.md §7.1。
+#[tokio::test]
+async fn partitioned_source_backfill() {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_PG_URL") else {
+        eprintln!("跳过 S5 PG 真库验证：未设置 FIELD_MIGRATION_PG_URL");
+        return;
+    };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s5_psrc").await;
+    let url = with_database(&base_url, &db_name);
+    let pool = PgPool::connect(&url).await.expect("连接 PG 失败");
+    let source = "fm_s5_psrc_source";
+    let target = "fm_s5_psrc_target";
+    exec(
+        &pool,
+        &format!(
+            "CREATE TABLE {source} (id bigint NOT NULL, payload jsonb, PRIMARY KEY (id)) \
+             PARTITION BY RANGE (id)"
+        ),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!("CREATE TABLE {source}_p1 PARTITION OF {source} FOR VALUES FROM (0) TO (2000)"),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!("CREATE TABLE {source}_p2 PARTITION OF {source} FOR VALUES FROM (2000) TO (9000)"),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO {source} \
+             SELECT g, jsonb_build_object('theme', 'dark', 'score', g, 'note', 'n-' || g) \
+             FROM generate_series(1, 4000) AS g"
+        ),
+    )
+    .await;
+    exec(&pool, &format!("ANALYZE {source}")).await;
+
+    let policy = test_policy();
+    let ctx = make_ctx(&url, &db_name, &policy).await;
+    let job = build_job(
+        &ctx,
+        policy.as_ref(),
+        source,
+        target,
+        BackfillConfig {
+            batch_size: 500,
+            batch_interval_ms: 0,
+            max_rows_per_second: 0,
+            single_transaction: false,
+        },
+    )
+    .await;
+    let job_id = job.job_id.clone();
+    let hub = MigrationHub::for_test();
+    hub.insert(job).await.unwrap();
+
+    let job = run_to_end(&hub, &ctx, policy.as_ref(), &job_id).await;
+    println!(
+        "分区源回填: status={:?} last_error={:?}",
+        job.status, job.last_error
+    );
+    assert_eq!(job.status, MigrationStatus::Completed);
+    let target_rows = count(&pool, &format!("SELECT COUNT(*) FROM {target}")).await;
+    assert_eq!(target_rows, 4_000, "分区源必须被完整覆盖");
+    let verify = job
+        .checkpoint
+        .as_ref()
+        .and_then(|c| c.verify.clone())
+        .expect("完成后缺少校验记录");
+    assert!(verify.passed(), "分区源校验必须通过: {verify:?}");
+
+    drop(ctx);
+    pool.close().await;
+    cleanup_database(&admin_pool, &db_name).await;
+}
+
+/// 复合主键中断续跑：tuple checkpoint 必须让后续批次严格接上，不重不漏。
+/// 中断用 CHECK 约束确定性制造（第 3 批失败 → Interrupted 可续跑），
+/// 不依赖「抢在任务完成前 kill 连接」的时序，避免并发测试下 flaky。
+/// 依据 specs/pg-field-governance-s5/spec.md §5.3。
+#[tokio::test]
+async fn composite_pk_resume() {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_PG_URL") else {
+        eprintln!("跳过 S5 PG 真库验证：未设置 FIELD_MIGRATION_PG_URL");
+        return;
+    };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s5_cpkr").await;
+    let url = with_database(&base_url, &db_name);
+    let pool = PgPool::connect(&url).await.expect("连接 PG 失败");
+    let source = "fm_s5_cpkr_source";
+    let target = "fm_s5_cpkr_target";
+    exec(
+        &pool,
+        &format!(
+            "CREATE TABLE {source} (tenant_id bigint NOT NULL, seq integer NOT NULL, \
+             payload jsonb, PRIMARY KEY (tenant_id, seq))"
+        ),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!(
+            "INSERT INTO {source} \
+             SELECT ((g - 1) / 1000) + 1, g, \
+                    jsonb_build_object('theme', 'dark', 'score', g, 'note', 'n-' || g) \
+             FROM generate_series(1, 2000) AS g"
+        ),
+    )
+    .await;
+    // 目标表预建：复合主键（ON CONFLICT 目标）+ 一条会在第 3 批（seq 601–900）触发的 CHECK。
+    exec(
+        &pool,
+        &format!(
+            "CREATE TABLE {target} (tenant_id bigint NOT NULL, seq integer NOT NULL, \
+             theme text, score bigint, note text, PRIMARY KEY (tenant_id, seq), \
+             CONSTRAINT fm_chk_seq CHECK (seq < 900))"
+        ),
+    )
+    .await;
+
+    let policy = test_policy();
+    let ctx = make_ctx(&url, &db_name, &policy).await;
+    let job = manual_job_with_pk(
+        &db_name,
+        source,
+        target,
+        vec!["tenant_id".into(), "seq".into()],
+        BackfillConfig {
+            batch_size: 300,
+            batch_interval_ms: 0,
+            max_rows_per_second: 0,
+            single_transaction: false,
+        },
+    );
+    let job_id = job.job_id.clone();
+    let hub = MigrationHub::for_test();
+    hub.insert(job).await.unwrap();
+
+    let failed = run_to_end(&hub, &ctx, policy.as_ref(), &job_id).await;
+    println!(
+        "复合主键中断: status={:?} last_error={:?}",
+        failed.status, failed.last_error
+    );
+    assert_eq!(failed.status, MigrationStatus::Interrupted);
+    let checkpoint = failed.checkpoint.clone().expect("中断后缺少 checkpoint");
+    let last_pks = checkpoint
+        .last_pks
+        .clone()
+        .expect("复合主键中断后必须记 last_pks");
+    assert_eq!(last_pks.len(), 2, "last_pks 必须两列");
+    // 租户分段与 seq 单调对齐：排序后第 2 批结束于 (tenant_id=1, seq=600)。
+    assert_eq!(last_pks, vec!["1".to_string(), "600".to_string()]);
+    assert_eq!(checkpoint.pk_kinds.len(), 2, "checkpoint.pk_kinds 必须两列");
+    let written_before = count(&pool, &format!("SELECT COUNT(*) FROM {target}")).await;
+    assert_eq!(written_before, 600, "失败批必须整批回滚");
+    assert_eq!(written_before as u64, checkpoint.written_rows);
+
+    // 删除约束后换新连接续跑。
+    exec(
+        &pool,
+        &format!("ALTER TABLE {target} DROP CONSTRAINT fm_chk_seq"),
+    )
+    .await;
+    let resume_ctx = make_ctx(&url, &db_name, &policy).await;
+    let job = run_to_end(&hub, &resume_ctx, policy.as_ref(), &job_id).await;
+    println!(
+        "复合主键续跑: status={:?} last_error={:?} batches={}",
+        job.status,
+        job.last_error,
+        job.checkpoint
+            .as_ref()
+            .map(|c| c.completed_batches)
+            .unwrap_or(0)
+    );
+    assert_eq!(job.status, MigrationStatus::Completed);
+    let target_rows = count(&pool, &format!("SELECT COUNT(*) FROM {target}")).await;
+    assert_eq!(target_rows, 2_000, "续跑必须不重不漏");
+    let verify = job
+        .checkpoint
+        .as_ref()
+        .and_then(|c| c.verify.clone())
+        .expect("完成后缺少校验记录");
+    assert!(verify.passed(), "续跑后 V1–V4 必须通过: {verify:?}");
+
+    drop(ctx);
+    drop(resume_ctx);
+    pool.close().await;
+    cleanup_database(&admin_pool, &db_name).await;
+}
+
+/// 部分唯一索引作为 ON CONFLICT 目标：谓词必须原样进入 `ON CONFLICT ... WHERE`。
+/// 依据 specs/pg-field-governance-s5/spec.md §6。
+#[tokio::test]
+async fn partial_unique_index_conflict_target() {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_PG_URL") else {
+        eprintln!("跳过 S5 PG 真库验证：未设置 FIELD_MIGRATION_PG_URL");
+        return;
+    };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s5_pidx").await;
+    let url = with_database(&base_url, &db_name);
+    let pool = PgPool::connect(&url).await.expect("连接 PG 失败");
+    let source = "fm_s5_pidx_source";
+    let target = "fm_s5_pidx_target";
+    seed_jsonb(&pool, source, 1_000).await;
+    // 目标表没有主键，只有部分唯一索引（谓词 id > 0 覆盖全部数据）。
+    exec(
+        &pool,
+        &format!("CREATE TABLE {target} (id bigint, theme text, score bigint, note text)"),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!("CREATE UNIQUE INDEX uk_{target}_id ON {target} (id) WHERE id > 0"),
+    )
+    .await;
+
+    let policy = test_policy();
+    let ctx = make_ctx(&url, &db_name, &policy).await;
+    let job = manual_job(
+        &db_name,
+        source,
+        target,
+        BackfillConfig {
+            batch_size: 300,
+            batch_interval_ms: 0,
+            max_rows_per_second: 0,
+            single_transaction: false,
+        },
+    );
+    let job_id = job.job_id.clone();
+    let hub = MigrationHub::for_test();
+    hub.insert(job).await.unwrap();
+
+    let job = run_to_end(&hub, &ctx, policy.as_ref(), &job_id).await;
+    println!(
+        "部分唯一索引: status={:?} last_error={:?}",
+        job.status, job.last_error
+    );
+    assert_eq!(
+        job.status,
+        MigrationStatus::Completed,
+        "部分唯一索引必须能作为冲突目标: {:?}",
+        job.last_error
+    );
+    let target_rows = count(&pool, &format!("SELECT COUNT(*) FROM {target}")).await;
+    assert_eq!(target_rows, 1_000);
+    let verify = job
+        .checkpoint
+        .as_ref()
+        .and_then(|c| c.verify.clone())
+        .expect("完成后缺少校验记录");
+    assert!(verify.passed(), "部分索引路径仍须通过 V1–V4: {verify:?}");
+    // 若没有把部分索引的谓词带进 `ON CONFLICT ... WHERE`，PG 会报 42P10
+    // （no unique or exclusion constraint matching），任务根本到不了 Completed。
+
+    drop(ctx);
+    pool.close().await;
+    cleanup_database(&admin_pool, &db_name).await;
+}
+
+/// 目标表为分区表：PG 全版本不支持分区表 `ON CONFLICT DO UPDATE`，必须 BLOCK。
+/// 依据 specs/pg-field-governance-s5/spec.md §7.1（已知缺口，维持手工路径）。
+#[tokio::test]
+async fn partitioned_target_blocked() {
+    let Ok(base_url) = std::env::var("FIELD_MIGRATION_PG_URL") else {
+        eprintln!("跳过 S5 PG 真库验证：未设置 FIELD_MIGRATION_PG_URL");
+        return;
+    };
+    let (db_name, admin_pool) = isolated_database(&base_url, "it_s5_ptgt").await;
+    let url = with_database(&base_url, &db_name);
+    let pool = PgPool::connect(&url).await.expect("连接 PG 失败");
+    let source = "fm_s5_ptgt_source";
+    let target = "fm_s5_ptgt_target";
+    seed_jsonb(&pool, source, 500).await;
+    exec(
+        &pool,
+        &format!(
+            "CREATE TABLE {target} (id bigint NOT NULL, theme text, score bigint, note text, \
+             PRIMARY KEY (id)) PARTITION BY RANGE (id)"
+        ),
+    )
+    .await;
+    exec(
+        &pool,
+        &format!("CREATE TABLE {target}_p1 PARTITION OF {target} FOR VALUES FROM (0) TO (1000)"),
+    )
+    .await;
+
+    let policy = test_policy();
+    let ctx = make_ctx(&url, &db_name, &policy).await;
+    let job = manual_job(
+        &db_name,
+        source,
+        target,
+        BackfillConfig {
+            batch_size: 100,
+            batch_interval_ms: 0,
+            max_rows_per_second: 0,
+            single_transaction: false,
+        },
+    );
+    let job_id = job.job_id.clone();
+    let hub = MigrationHub::for_test();
+    hub.insert(job).await.unwrap();
+
+    let job = run_to_end(&hub, &ctx, policy.as_ref(), &job_id).await;
+    println!(
+        "分区目标: status={:?} blocking={:?}",
+        job.status,
+        job.blocking.as_ref().map(|b| b.phase.clone())
+    );
+    assert_eq!(job.status, MigrationStatus::Blocked);
+    assert_eq!(
+        job.blocking.as_ref().map(|b| b.phase.as_str()),
+        Some("preflight:partitioned_target")
+    );
+    let target_rows = count(&pool, &format!("SELECT COUNT(*) FROM {target}")).await;
+    assert_eq!(target_rows, 0, "阻断后不得写入分区目标表");
 
     drop(ctx);
     pool.close().await;

@@ -43,17 +43,33 @@ pub fn generate(
     let schema = analysis.environment.schema.clone();
     let source = qualified(schema.as_deref(), &analysis.table);
     let destination = qualified(schema.as_deref(), &analysis.target_table);
-    let pk_name = input
-        .target
-        .as_ref()
-        .and_then(|target| target.pk_column.clone())
-        .or_else(|| analysis.dependencies.single_column_pk.clone())
-        .unwrap_or_else(|| "id".into());
-    let pk_type = snapshot
-        .find_column(&pk_name)
-        .map(|column| column.column_type.clone())
-        .unwrap_or_else(|| "bigint".into());
-    let pk = quote_ident_pg(&pk_name);
+    // S5：复合主键由证据探测，用户不可用 pk_column 覆盖（无法表达多列）；
+    // 单列路径沿用「显式 pk_column 优先」的旧语义，SQL 逐字不变。
+    let mut pk_columns = analysis.dependencies.primary_key_columns.clone();
+    if pk_columns.len() <= 1 {
+        let single = input
+            .target
+            .as_ref()
+            .and_then(|target| target.pk_column.clone())
+            .or_else(|| analysis.dependencies.single_column_pk.clone())
+            .unwrap_or_else(|| "id".into());
+        pk_columns = vec![single];
+    }
+    // 目标主键沿用源列名（S2/S5 只支持同名映射），类型取源表快照。
+    let pk_columns: Vec<(String, String)> = pk_columns
+        .iter()
+        .map(|name| {
+            let column_type = snapshot
+                .find_column(name)
+                .map(|column| column.column_type.clone())
+                .unwrap_or_else(|| "bigint".into());
+            (name.clone(), column_type)
+        })
+        .collect();
+    let pk_names: Vec<String> = pk_columns
+        .iter()
+        .map(|(name, _)| quote_ident_pg(name))
+        .collect();
     let source_column = quote_ident_pg(&profile.column);
 
     let target_columns = pg_target_columns(input, &profile);
@@ -63,15 +79,14 @@ pub fn generate(
     let create_sql = create_table_sql_pg(
         schema.as_deref(),
         &analysis.target_table,
-        &pk_name,
-        &pk_type,
+        &pk_columns,
         &target_columns,
         input,
     );
     let backfill_sql = build_backfill_sql_pg(
         &source,
         &destination,
-        &pk,
+        &pk_names,
         &source_column,
         &profile,
         &target_columns,
@@ -80,13 +95,28 @@ pub fn generate(
     let verify_sql = build_verify_sql_pg(
         &source,
         &destination,
-        &pk,
+        &pk_names,
         &source_column,
         &profile,
         &target_columns,
         analysis.empty_string_policy,
     );
-    let rollback_delete_sql = format!("DELETE FROM {destination} WHERE {pk} >= :min_pk;");
+    let rollback_delete_sql = if pk_names.len() > 1 {
+        let placeholders = pk_names
+            .iter()
+            .map(|name| format!(":min_{}", name.trim_matches('"')))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "DELETE FROM {destination} WHERE ({}) >= ({placeholders});",
+            pk_names.join(", ")
+        )
+    } else {
+        format!(
+            "DELETE FROM {destination} WHERE {} >= :min_pk;",
+            pk_names[0]
+        )
+    };
     let rollback_drop_sql = format!("DROP TABLE IF EXISTS {destination};");
     let retire_sql = format!("ALTER TABLE {source} DROP COLUMN {source_column};");
 
@@ -201,8 +231,7 @@ fn qualified(schema: Option<&str>, table: &str) -> String {
 fn create_table_sql_pg(
     schema: Option<&str>,
     target_table: &str,
-    pk_name: &str,
-    pk_type: &str,
+    pk_columns: &[(String, String)],
     columns: &[TargetColumn],
     input: &FieldGovernanceInput,
 ) -> String {
@@ -212,11 +241,9 @@ fn create_table_sql_pg(
         .as_ref()
         .and_then(|target| target.collation.as_deref());
     let mut lines = Vec::new();
-    lines.push(format!(
-        "  {} {} NOT NULL",
-        quote_ident_pg(pk_name),
-        pk_type
-    ));
+    for (name, sql_type) in pk_columns {
+        lines.push(format!("  {} {} NOT NULL", quote_ident_pg(name), sql_type));
+    }
     for column in columns {
         let pg_type = mysql_to_pg_type(&column.sql_type);
         let nullability = if column.required { "NOT NULL" } else { "NULL" };
@@ -233,7 +260,12 @@ fn create_table_sql_pg(
             nullability
         ));
     }
-    lines.push(format!("  PRIMARY KEY ({})", quote_ident_pg(pk_name)));
+    let pk_list = pk_columns
+        .iter()
+        .map(|(name, _)| quote_ident_pg(name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    lines.push(format!("  PRIMARY KEY ({pk_list})"));
     format!(
         "CREATE TABLE IF NOT EXISTS {destination} (\n{}\n);",
         lines.join(",\n")
@@ -619,14 +651,14 @@ pub(crate) fn value_expr(
 fn build_backfill_sql_pg(
     source: &str,
     destination: &str,
-    pk: &str,
+    pk: &[String],
     source_column: &str,
     profile: &ColumnProfile,
     columns: &[TargetColumn],
     policy: EmptyStringPolicy,
 ) -> String {
-    let mut targets = vec![pk.to_string()];
-    let mut values = vec![pk.to_string()];
+    let mut targets = pk.to_vec();
+    let mut values = pk.to_vec();
     for column in columns {
         targets.push(quote_ident_pg(&column.name));
         values.push(value_expr(source_column, profile, column, policy));
@@ -642,11 +674,48 @@ fn build_backfill_sql_pg(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let pk_list = pk.join(", ");
+    // 单列与复合都走行比较：`(a) > (:last_a)` 合法，但单列仍输出 S2 的逐字形态。
+    let (lower, upper, conflict) = if pk.len() > 1 {
+        let tuple = format!("({pk_list})");
+        let last = placeholder_tuple(pk, "last");
+        let end = placeholder_tuple(pk, "end");
+        (
+            format!("{tuple} > {last}"),
+            format!("{tuple} <= {end}"),
+            pk_list.clone(),
+        )
+    } else {
+        let key = &pk[0];
+        (
+            format!("{key} > :last_pk"),
+            format!("{key} <= :end_pk"),
+            key.clone(),
+        )
+    };
     format!(
-        "INSERT INTO {destination} ({})\nSELECT {}\nFROM {source}\nWHERE {pk} > :last_pk AND {pk} <= :end_pk\nORDER BY {pk}\nLIMIT :batch_size\nON CONFLICT ({pk}) DO UPDATE SET {updates};",
+        "INSERT INTO {destination} ({})\nSELECT {}\nFROM {source}\nWHERE {lower} AND {upper}\nORDER BY {pk_list}\nLIMIT :batch_size\nON CONFLICT ({conflict}) DO UPDATE SET {updates};",
         targets.join(", "),
         values.join(",\n       ")
     )
+}
+
+/// 复合主键的命名占位符元组：`(:last_a, :last_b)`；标识符去引号做占位符名。
+fn placeholder_tuple(pk: &[String], prefix: &str) -> String {
+    let inner = pk
+        .iter()
+        .map(|name| format!(":{prefix}_{}", name.trim_matches('"')))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("({inner})")
+}
+
+/// 多列等值连接：`t.a = s.a AND t.b = s.b`；单列输出与 S2 一致。
+fn key_join(left: &str, right: &str, pk: &[String]) -> String {
+    pk.iter()
+        .map(|name| format!("{left}.{name} = {right}.{name}"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 pub(crate) fn normalized_source_expr(
@@ -686,7 +755,7 @@ pub(crate) fn normalized_source_expr(
 fn build_verify_sql_pg(
     source: &str,
     destination: &str,
-    pk: &str,
+    pk: &[String],
     source_column: &str,
     profile: &ColumnProfile,
     columns: &[TargetColumn],
@@ -721,6 +790,9 @@ fn build_verify_sql_pg(
         .map(|column| quote_ident_pg(&column.name))
         .collect::<Vec<_>>()
         .join(", ");
+    // 单列时 key_join 产出 `t.id = s.id`，与 S2 逐字一致。
+    let key_ts = key_join("t", "s", pk);
+    let key_st = key_join("s", "t", pk);
     format!(
         "-- V1 行数\n\
          SELECT 'V1_row_count' AS check_name, \
@@ -730,16 +802,16 @@ fn build_verify_sql_pg(
          -- V2 缺失主键\n\
          SELECT 'V2_missing_pk', COUNT(*)::text, '' \
          FROM {source} s \
-         WHERE NOT EXISTS (SELECT 1 FROM {destination} t WHERE t.{pk} = s.{pk})\n\
+         WHERE NOT EXISTS (SELECT 1 FROM {destination} t WHERE {key_ts})\n\
          UNION ALL\n\
          -- V3 多余主键\n\
          SELECT 'V3_extra_pk', COUNT(*)::text, '' \
          FROM {destination} t \
-         WHERE NOT EXISTS (SELECT 1 FROM {source} s WHERE s.{pk} = t.{pk})\n\
+         WHERE NOT EXISTS (SELECT 1 FROM {source} s WHERE {key_st})\n\
          UNION ALL\n\
          -- V4 规范化逐行比对（{projected}）\n\
          SELECT 'V4_value_mismatch', COUNT(*)::text, '' \
-         FROM {source} s JOIN {destination} t ON t.{pk} = s.{pk} \
+         FROM {source} s JOIN {destination} t ON {key_ts} \
          WHERE {mismatch_conditions};"
     )
 }
@@ -808,5 +880,84 @@ mod tests {
             normalized_source_expr("created_at", &profile, &column, EmptyStringPolicy::Preserve);
         assert_eq!(kind, "timestamptz");
         assert!(expr.contains("timestamp with time zone"));
+    }
+
+    /// S5：复合主键时三段模板 SQL 必须整体切到行比较 / 多列 JOIN。
+    /// 依据 specs/pg-field-governance-s5/spec.md §5.2——若建表仍写单列主键，
+    /// 执行器的 `ON CONFLICT (a, b)` 找不到对应唯一约束，任务必然在建表后失败。
+    #[test]
+    fn composite_pk_scripts_use_row_comparison() {
+        let pk = vec!["\"tenant_id\"".to_string(), "\"seq\"".to_string()];
+        let profile = ColumnProfile {
+            column: "payload".into(),
+            data_type: "jsonb".into(),
+            ..Default::default()
+        };
+        let columns = vec![TargetColumn {
+            name: "theme".into(),
+            source_key: Some("theme".into()),
+            sql_type: "text".into(),
+            nullable: true,
+            required: false,
+            note: None,
+        }];
+        let pk_columns = vec![
+            ("tenant_id".to_string(), "bigint".to_string()),
+            ("seq".to_string(), "integer".to_string()),
+        ];
+        let input = FieldGovernanceInput::default();
+
+        let create =
+            create_table_sql_pg(Some("public"), "orders_ext", &pk_columns, &columns, &input);
+        assert!(
+            create.contains("PRIMARY KEY (\"tenant_id\", \"seq\")"),
+            "建表必须是多列主键: {create}"
+        );
+        assert!(create.contains("\"tenant_id\" bigint NOT NULL"), "{create}");
+        assert!(create.contains("\"seq\" integer NOT NULL"), "{create}");
+
+        let backfill = build_backfill_sql_pg(
+            "public.src",
+            "public.dst",
+            &pk,
+            "payload",
+            &profile,
+            &columns,
+            EmptyStringPolicy::Preserve,
+        );
+        assert!(
+            backfill.contains("(\"tenant_id\", \"seq\") > (:last_tenant_id, :last_seq)"),
+            "下界必须是行比较: {backfill}"
+        );
+        assert!(
+            backfill.contains("(\"tenant_id\", \"seq\") <= (:end_tenant_id, :end_seq)"),
+            "上界必须是行比较: {backfill}"
+        );
+        assert!(
+            backfill.contains("ORDER BY \"tenant_id\", \"seq\""),
+            "排序必须按全部键列: {backfill}"
+        );
+        assert!(
+            backfill.contains("ON CONFLICT (\"tenant_id\", \"seq\")"),
+            "冲突目标必须是复合列: {backfill}"
+        );
+        assert!(
+            !backfill.contains(":last_pk"),
+            "复合主键不得残留单键占位符: {backfill}"
+        );
+
+        let verify = build_verify_sql_pg(
+            "public.src",
+            "public.dst",
+            &pk,
+            "payload",
+            &profile,
+            &columns,
+            EmptyStringPolicy::Preserve,
+        );
+        assert!(
+            verify.contains("t.\"tenant_id\" = s.\"tenant_id\" AND t.\"seq\" = s.\"seq\""),
+            "V2/V3/V4 必须等多列: {verify}"
+        );
     }
 }

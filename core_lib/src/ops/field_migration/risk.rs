@@ -27,13 +27,11 @@ pub fn evaluate(
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if !engine.is_empty()
-        && !engine.contains("innodb")
-        && !analysis
-            .environment
-            .engine_family
-            .eq_ignore_ascii_case("postgresql")
-    {
+    let is_pg_family = analysis
+        .environment
+        .engine_family
+        .eq_ignore_ascii_case("postgresql");
+    if !engine.is_empty() && !engine.contains("innodb") && !is_pg_family {
         builder.push(
             "E02_NOT_INNODB",
             RiskLevel::Block,
@@ -44,7 +42,20 @@ pub fn evaluate(
             true,
         );
     }
-    if analysis.environment.partitioned {
+    // S5：PG 源分区表可与父表 keyset 分页对接（spec §7.1），Block 降为 High；
+    // MySQL 保持 Block（行为零变化）。目标表由 S1 建普通表，不涉及分区目标。
+    if analysis.environment.partitioned && is_pg_family {
+        builder.push(
+            "E02_PARTITIONED",
+            RiskLevel::High,
+            "源表是分区表（PG）",
+            "回填经父表 keyset 分页，跨分区全局有序；DDL 锁覆盖父表与全部子分区，下线前须确认分区数。"
+                .into(),
+            vec!["E02".into()],
+            false,
+            true,
+        );
+    } else if analysis.environment.partitioned {
         builder.push(
             "E02_PARTITIONED",
             RiskLevel::Block,
@@ -72,8 +83,7 @@ pub fn evaluate(
             true,
             true,
         );
-    } else if analysis.row_count > 200_000
-        || analysis.data_length.unwrap_or(0) > 512 * 1024 * 1024
+    } else if analysis.row_count > 200_000 || analysis.data_length.unwrap_or(0) > 512 * 1024 * 1024
     {
         builder.push(
             "E07_LARGE_HIGH",
@@ -101,10 +111,7 @@ pub fn evaluate(
         );
     }
     if !analysis.environment.version_supports_json
-        && analysis
-            .columns
-            .iter()
-            .any(|column| column.is_text_like())
+        && analysis.columns.iter().any(|column| column.is_text_like())
     {
         builder.push(
             "E14_VERSION_NO_JSON",
@@ -133,7 +140,12 @@ pub fn evaluate(
             true,
         );
     }
-    if analysis.dependencies.single_column_pk.is_none() {
+    // S5：PG 已支持复合主键 keyset 分页，该阻断只保留给 MySQL（单列主键仍是硬前提）。
+    // 依据 specs/pg-field-governance-s5/spec.md §5——MySQL 路径行为零变化，
+    // 故 engine_family 为空（旧 MySQL 证据）或非 postgresql 时仍按 Block 处理。
+    // 无主键（primary_key_columns 为空）在 PG 同样阻断：没有分页键就无法保证覆盖性。
+    let pg_composite_pk = is_pg_family && analysis.dependencies.primary_key_columns.len() > 1;
+    if analysis.dependencies.single_column_pk.is_none() && !pg_composite_pk {
         builder.push(
             "E14_NO_SINGLE_PK",
             RiskLevel::Block,
@@ -191,7 +203,10 @@ pub fn evaluate(
             "EVIDENCE_GAP",
             RiskLevel::Block,
             "存在未采集/未验证证据",
-            format!("{} 项证据缺口，按「不可判定 = 阻断」处理。", analysis.gaps.len()),
+            format!(
+                "{} 项证据缺口，按「不可判定 = 阻断」处理。",
+                analysis.gaps.len()
+            ),
             analysis
                 .gaps
                 .iter()
@@ -225,14 +240,12 @@ pub fn evaluate(
         super::pg_risk::evaluate(&mut builder, analysis, input);
     }
 
-    builder
-        .risks
-        .sort_by(|a, b| {
-            b.level
-                .cmp(&a.level)
-                .then_with(|| a.code.cmp(&b.code))
-                .then_with(|| a.id.cmp(&b.id))
-        });
+    builder.risks.sort_by(|a, b| {
+        b.level
+            .cmp(&a.level)
+            .then_with(|| a.code.cmp(&b.code))
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let block = builder
         .risks
         .iter()
@@ -273,7 +286,11 @@ fn evaluate_empty_string_policy(
     input: &FieldGovernanceInput,
 ) {
     let policy = input.empty_string_policy();
-    let empty_rows: u64 = analysis.columns.iter().map(|column| column.empty_rows).sum();
+    let empty_rows: u64 = analysis
+        .columns
+        .iter()
+        .map(|column| column.empty_rows)
+        .sum();
     let (level, title, detail, blocks_write, requires_confirmation) = match policy {
         super::types::EmptyStringPolicy::Preserve => (
             RiskLevel::Info,
@@ -343,9 +360,20 @@ fn evaluate_column(
     // E01：类型无法安全解析。
     if matches!(
         column.data_type.as_str(),
-        "blob" | "tinyblob" | "mediumblob" | "longblob" | "binary" | "varbinary" | "geometry"
-            | "point" | "linestring" | "polygon" | "multipoint" | "multilinestring"
-            | "multipolygon" | "geometrycollection"
+        "blob"
+            | "tinyblob"
+            | "mediumblob"
+            | "longblob"
+            | "binary"
+            | "varbinary"
+            | "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
     ) {
         builder.push(
             &format!("E01_UNPARSEABLE_TYPE{suffix}"),
@@ -403,7 +431,12 @@ fn evaluate_column(
         .indexes
         .iter()
         .filter(|index| !index.primary && index.unique)
-        .filter(|index| index.columns.iter().any(|c| c.eq_ignore_ascii_case(&column.column)))
+        .filter(|index| {
+            index
+                .columns
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(&column.column))
+        })
         .map(|index| index.name.clone())
         .collect();
     if in_primary || !unique_indexes.is_empty() {
@@ -425,7 +458,12 @@ fn evaluate_column(
         .indexes
         .iter()
         .filter(|index| !index.unique)
-        .filter(|index| index.columns.iter().any(|c| c.eq_ignore_ascii_case(&column.column)))
+        .filter(|index| {
+            index
+                .columns
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(&column.column))
+        })
         .map(|index| index.name.clone())
         .collect();
     if !secondary_indexes.is_empty() {
@@ -464,7 +502,10 @@ fn evaluate_column(
             &format!("E04_FOREIGN_KEY{suffix}"),
             RiskLevel::Block,
             "列参与外键",
-            format!("column={} fk={:?}；约束/孤儿/级联行为不可自动保证。", column.column, fk),
+            format!(
+                "column={} fk={:?}；约束/孤儿/级联行为不可自动保证。",
+                column.column, fk
+            ),
             vec!["E04".into()],
             true,
             true,
@@ -484,7 +525,10 @@ fn evaluate_column(
             &format!("E05_GENERATED_COLUMN{suffix}"),
             RiskLevel::Block,
             "存在生成列依赖该列",
-            format!("column={} generated_columns={:?}；表达式必须人工改写。", column.column, generated),
+            format!(
+                "column={} generated_columns={:?}；表达式必须人工改写。",
+                column.column, generated
+            ),
             vec!["E05".into()],
             true,
             true,
@@ -509,7 +553,10 @@ fn evaluate_column(
             &format!("E06_OBJECT_DEPENDENCY{suffix}"),
             RiskLevel::Block,
             "视图/触发器/例程文本引用该列",
-            format!("column={} objects={:?}；需人工修改依赖对象。", column.column, objects),
+            format!(
+                "column={} objects={:?}；需人工修改依赖对象。",
+                column.column, objects
+            ),
             vec!["E06".into()],
             true,
             true,
@@ -522,7 +569,10 @@ fn evaluate_column(
             &format!("E08_NULL_PRESENT{suffix}"),
             RiskLevel::High,
             "存在 NULL 行",
-            format!("column={} null_rows={}；需确认 NULL 语义（SQL NULL vs JSON null）。", column.column, column.null_rows),
+            format!(
+                "column={} null_rows={}；需确认 NULL 语义（SQL NULL vs JSON null）。",
+                column.column, column.null_rows
+            ),
             vec!["E08".into()],
             false,
             true,
@@ -533,7 +583,10 @@ fn evaluate_column(
             &format!("E08_NULL_TO_NOT_NULL{suffix}"),
             RiskLevel::Block,
             "源列有 NULL 但目标列 NOT NULL",
-            format!("column={} null_rows={}；未声明填充规则，无法决定替代值。", column.column, column.null_rows),
+            format!(
+                "column={} null_rows={}；未声明填充规则，无法决定替代值。",
+                column.column, column.null_rows
+            ),
             vec!["E08".into()],
             true,
             true,
@@ -544,7 +597,10 @@ fn evaluate_column(
             &format!("E08_EMPTY_STRING{suffix}"),
             RiskLevel::High,
             "存在空串行",
-            format!("column={} empty_rows={}；空串与 JSON null/{{}} 语义不同，必须选策略。", column.column, column.empty_rows),
+            format!(
+                "column={} empty_rows={}；空串与 JSON null/{{}} 语义不同，必须选策略。",
+                column.column, column.empty_rows
+            ),
             vec!["E08".into()],
             false,
             true,
@@ -555,7 +611,11 @@ fn evaluate_column(
                 &format!("E08_EMPTY_STRING_OVER_20PCT{suffix}"),
                 RiskLevel::Block,
                 "空串占比过高",
-                format!("column={} empty_ratio={:.1}% > 20%；数据语义过度模糊。", column.column, ratio * 100.0),
+                format!(
+                    "column={} empty_ratio={:.1}% > 20%；数据语义过度模糊。",
+                    column.column,
+                    ratio * 100.0
+                ),
                 vec!["E08".into()],
                 true,
                 true,
@@ -652,7 +712,10 @@ fn evaluate_column(
             &format!("E12_CONTROL_CHARS{suffix}"),
             RiskLevel::High,
             "存在控制字符",
-            format!("column={} control_rows={}；下游文本/索引/日志可能异常。", column.column, column.control_char_rows),
+            format!(
+                "column={} control_rows={}；下游文本/索引/日志可能异常。",
+                column.column, column.control_char_rows
+            ),
             vec!["E12".into()],
             false,
             true,
@@ -677,7 +740,10 @@ fn evaluate_column(
             &format!("E13_BINARY_CHARSET{suffix}"),
             RiskLevel::Block,
             "文本列字符集缺失或为 binary",
-            format!("column={} charset={:?}；文本语义不可判定。", column.column, column.charset),
+            format!(
+                "column={} charset={:?}；文本语义不可判定。",
+                column.column, column.charset
+            ),
             vec!["E13".into()],
             true,
             true,
@@ -706,8 +772,7 @@ fn evaluate_column(
             true,
         );
     }
-    if column.rows_profiled > 0
-        && column.untrimmed_rows as f64 / column.rows_profiled as f64 > 0.05
+    if column.rows_profiled > 0 && column.untrimmed_rows as f64 / column.rows_profiled as f64 > 0.05
     {
         builder.push(
             &format!("E13_TRIM_DIRTY{suffix}"),
@@ -731,7 +796,10 @@ fn evaluate_column(
                 &format!("E13_COLLATION_MISMATCH{suffix}"),
                 RiskLevel::High,
                 "目标排序规则与源列不同",
-                format!("column={} source_collation={} target_collation={}。", column.column, source, target),
+                format!(
+                    "column={} source_collation={} target_collation={}。",
+                    column.column, source, target
+                ),
                 vec!["E13".into()],
                 false,
                 true,
@@ -760,14 +828,18 @@ fn evaluate_declaration(
         return;
     };
 
-    if let (Some(subject), Some(selected)) = (declaration.column.as_deref(), analysis.column.as_deref())
+    if let (Some(subject), Some(selected)) =
+        (declaration.column.as_deref(), analysis.column.as_deref())
     {
         if !subject.eq_ignore_ascii_case(selected) {
             builder.push(
                 "SEM_DECL_SUBJECT_MISMATCH",
                 RiskLevel::High,
                 "声明对象与证据不一致",
-                format!("declaration={} subject={subject} analyzed_column={selected}", declaration.id),
+                format!(
+                    "declaration={} subject={subject} analyzed_column={selected}",
+                    declaration.id
+                ),
                 vec!["SEM-DECL".into()],
                 false,
                 true,
@@ -932,7 +1004,10 @@ fn evaluate_declaration(
                 "SEM_DECL_UNIQUENESS_OK",
                 RiskLevel::Info,
                 "声明唯一性验证通过",
-                format!("declaration={} unique_keys={:?}。", declaration.id, declaration.unique_keys),
+                format!(
+                    "declaration={} unique_keys={:?}。",
+                    declaration.id, declaration.unique_keys
+                ),
                 vec!["SEM-DECL".into()],
                 false,
                 false,
@@ -941,7 +1016,10 @@ fn evaluate_declaration(
                 "SEM_DECL_UNIQUENESS_UNVERIFIED",
                 RiskLevel::Block,
                 "声明唯一性未验证",
-                format!("declaration={} unique_keys={:?}；缺少验证证据。", declaration.id, declaration.unique_keys),
+                format!(
+                    "declaration={} unique_keys={:?}；缺少验证证据。",
+                    declaration.id, declaration.unique_keys
+                ),
                 vec!["SEM-DECL".into()],
                 true,
                 true,
@@ -955,7 +1033,10 @@ fn evaluate_declaration(
                 "SEM_DECL_EMPTY_INVALID_CONFLICT",
                 RiskLevel::High,
                 "声明空串非法但数据中存在空串",
-                format!("declaration={} empty_rows={}。", declaration.id, column.empty_rows),
+                format!(
+                    "declaration={} empty_rows={}。",
+                    declaration.id, column.empty_rows
+                ),
                 vec!["SEM-DECL".into(), "E08".into()],
                 false,
                 true,
@@ -965,7 +1046,10 @@ fn evaluate_declaration(
                 "SEM_DECL_EMPTY_POLICY",
                 RiskLevel::Info,
                 "已声明空串语义",
-                format!("declaration={} empty_string_means={means}。", declaration.id),
+                format!(
+                    "declaration={} empty_string_means={means}。",
+                    declaration.id
+                ),
                 vec!["SEM-DECL".into()],
                 false,
                 false,
@@ -1121,9 +1205,9 @@ impl Builder {
 mod tests {
     use super::*;
     use crate::ops::field_migration::types::{
-        sample_column, ColumnMapping, DeclarationEvidence, DependencyEvidence,
-        EnvironmentEvidence, FieldGovernanceAnalysis, IndexReference, SemanticDeclarationInput,
-        TargetSpec, normalize_declarations,
+        normalize_declarations, sample_column, ColumnMapping, DeclarationEvidence,
+        DependencyEvidence, EnvironmentEvidence, FieldGovernanceAnalysis, IndexReference,
+        SemanticDeclarationInput, TargetSpec,
     };
     use crate::ops::policy::OpsPolicy;
 

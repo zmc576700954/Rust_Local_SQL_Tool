@@ -16,9 +16,9 @@ use crate::ops::registry::{
     OpsContext, OpsScenario, PlanIdentity, ScenarioDescriptor, ScenarioStatus,
 };
 use crate::ops::types::{
-    ActionSpec, ColumnSnapshot, EvidencePack, EvidenceSummary, ExplainSample, Finding,
-    IndexColumn, IndexDefinition, IndexUsage, OpsPlan, PlanStatus, RiskClass, RiskFinding,
-    RollbackPlan, Severity, TableSnapshot, TableStats, ValidationCheck, ValidationStatus,
+    ActionSpec, ColumnSnapshot, EvidencePack, EvidenceSummary, ExplainSample, Finding, IndexColumn,
+    IndexDefinition, IndexUsage, OpsPlan, PlanStatus, RiskClass, RiskFinding, RollbackPlan,
+    Severity, TableSnapshot, TableStats, ValidationCheck, ValidationStatus,
 };
 use crate::sql::util::{escape_sql_string, quote_ident_mysql, validate_identifier};
 
@@ -277,12 +277,14 @@ async fn load_snapshot(ctx: &OpsContext, table: &str) -> Result<TableSnapshot, O
         let Some(name) = str_value(row, "index_name") else {
             continue;
         };
-        let entry = grouped.entry(name.clone()).or_insert_with(|| IndexDefinition {
-            name: name.clone(),
-            unique: false,
-            index_type: str_value(row, "index_type").unwrap_or_else(|| "BTREE".into()),
-            columns: vec![],
-        });
+        let entry = grouped
+            .entry(name.clone())
+            .or_insert_with(|| IndexDefinition {
+                name: name.clone(),
+                unique: false,
+                index_type: str_value(row, "index_type").unwrap_or_else(|| "BTREE".into()),
+                columns: vec![],
+            });
         entry.unique = int_value(row, "non_unique")
             .map(|v| v == 0)
             .unwrap_or(false);
@@ -304,7 +306,9 @@ async fn load_snapshot(ctx: &OpsContext, table: &str) -> Result<TableSnapshot, O
         quote_ident_mysql(table)
     );
     let create_table_sql = match fetch_rows(ctx, &show_sql).await {
-        Ok(rows) => rows.first().and_then(|row| row.get("create table").cloned()),
+        Ok(rows) => rows
+            .first()
+            .and_then(|row| row.get("create table").cloned()),
         Err(_) => None,
     };
 
@@ -413,6 +417,7 @@ async fn load_snapshot_pg(ctx: &OpsContext, table: &str) -> Result<TableSnapshot
          LEFT JOIN pg_collation co ON co.oid = a.attcollation \
          WHERE n.nspname = current_schema() AND c.relname = '{tbl}' \
            AND a.attnum > 0 AND NOT a.attisdropped \
+           AND d.datname = current_database() \
          ORDER BY a.attnum"
     );
     let rows = pg_rows::fetch_rows(ctx, &columns_sql).await?;
@@ -452,14 +457,16 @@ async fn load_snapshot_pg(ctx: &OpsContext, table: &str) -> Result<TableSnapshot
         let Some(name) = str_value(row, "index_name") else {
             continue;
         };
-        let entry = grouped.entry(name.clone()).or_insert_with(|| IndexDefinition {
-            name: name.clone(),
-            unique: false,
-            index_type: str_value(row, "index_type")
-                .unwrap_or_else(|| "btree".into())
-                .to_ascii_uppercase(),
-            columns: vec![],
-        });
+        let entry = grouped
+            .entry(name.clone())
+            .or_insert_with(|| IndexDefinition {
+                name: name.clone(),
+                unique: false,
+                index_type: str_value(row, "index_type")
+                    .unwrap_or_else(|| "btree".into())
+                    .to_ascii_uppercase(),
+                columns: vec![],
+            });
         entry.unique = matches!(
             str_value(row, "is_unique").as_deref(),
             Some("true") | Some("t")
@@ -499,7 +506,8 @@ async fn load_table_stats_pg(ctx: &OpsContext, table: &str) -> Result<TableStats
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          CROSS JOIN pg_database d \
          LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid \
-         WHERE n.nspname = current_schema() AND c.relname = '{tbl}'"
+         WHERE n.nspname = current_schema() AND c.relname = '{tbl}' \
+           AND d.datname = current_database()"
     );
     let rows = pg_rows::fetch_rows(ctx, &sql).await?;
     let Some(row) = rows.first() else {
@@ -533,15 +541,15 @@ async fn explain_sql_pg(
     )))
 }
 
-async fn load_index_usage_pg(
-    ctx: &OpsContext,
-    table: &str,
-) -> Result<Vec<IndexUsage>, OpsError> {
-    let track_counts = pg_rows::fetch_rows(ctx, "SELECT current_setting('track_counts') AS track_counts")
-        .await?
-        .first()
-        .and_then(|row| str_value(row, "track_counts"))
-        .unwrap_or_else(|| "off".into());
+async fn load_index_usage_pg(ctx: &OpsContext, table: &str) -> Result<Vec<IndexUsage>, OpsError> {
+    let track_counts = pg_rows::fetch_rows(
+        ctx,
+        "SELECT current_setting('track_counts') AS track_counts",
+    )
+    .await?
+    .first()
+    .and_then(|row| str_value(row, "track_counts"))
+    .unwrap_or_else(|| "off".into());
     if !track_counts.eq_ignore_ascii_case("on") {
         return Err(OpsError::Validation(
             "track_counts=off：pg_stat_user_indexes 不累计索引扫描，索引使用统计不可用".into(),
@@ -600,7 +608,10 @@ pub fn build_plan(
             .collect::<Vec<_>>()
             .join("; "),
         severity: Severity::Info,
-        evidence_refs: vec!["schema:information_schema.COLUMNS".into(), "schema:information_schema.STATISTICS".into()],
+        evidence_refs: vec![
+            "schema:information_schema.COLUMNS".into(),
+            "schema:information_schema.STATISTICS".into(),
+        ],
         confidence: 1.0,
     });
 
@@ -783,7 +794,12 @@ pub fn build_plan(
     let rollback_actions: Vec<ActionSpec> = actions
         .iter()
         .filter_map(|action| match action {
-            ActionSpec::CreateIndex { table, name, columns, .. } => Some(ActionSpec::DropIndex {
+            ActionSpec::CreateIndex {
+                table,
+                name,
+                columns,
+                ..
+            } => Some(ActionSpec::DropIndex {
                 table: table.clone(),
                 name: name.clone(),
                 expected_definition: Some(format!("INDEX ({})", columns.join(","))),
@@ -842,7 +858,11 @@ pub fn build_plan(
             column_count: snapshot.columns.len(),
             index_count: snapshot.indexes.len(),
             row_estimate: evidence.stats.table_rows,
-            explain_findings: evidence.explain.iter().map(ExplainSample::summary).collect(),
+            explain_findings: evidence
+                .explain
+                .iter()
+                .map(ExplainSample::summary)
+                .collect(),
         }),
         execution: None,
     };
@@ -890,10 +910,7 @@ fn build_read_only_plan(
             .collect::<Vec<_>>()
             .join("; "),
         severity: Severity::Info,
-        evidence_refs: vec![
-            "schema:pg_attribute".into(),
-            "schema:pg_index".into(),
-        ],
+        evidence_refs: vec!["schema:pg_attribute".into(), "schema:pg_index".into()],
         confidence: 1.0,
     });
 
@@ -970,7 +987,11 @@ fn build_read_only_plan(
             column_count: snapshot.columns.len(),
             index_count: snapshot.indexes.len(),
             row_estimate: evidence.stats.table_rows,
-            explain_findings: evidence.explain.iter().map(ExplainSample::summary).collect(),
+            explain_findings: evidence
+                .explain
+                .iter()
+                .map(ExplainSample::summary)
+                .collect(),
         }),
         execution: None,
     };
@@ -984,10 +1005,20 @@ pub(crate) fn extract_candidate_columns(sql: &str, snapshot: &TableSnapshot) -> 
     for (start, stops) in [
         (
             " where ",
-            vec![" order by ", " group by ", " limit ", " having ", " union ", " ;"],
+            vec![
+                " order by ",
+                " group by ",
+                " limit ",
+                " having ",
+                " union ",
+                " ;",
+            ],
         ),
         (" order by ", vec![" limit ", " ;", " union "]),
-        (" group by ", vec![" having ", " order by ", " limit ", " ;"]),
+        (
+            " group by ",
+            vec![" having ", " order by ", " limit ", " ;"],
+        ),
     ] {
         let Some(pos) = padded.find(start) else {
             continue;
@@ -1009,10 +1040,7 @@ pub(crate) fn extract_candidate_columns(sql: &str, snapshot: &TableSnapshot) -> 
                 .iter()
                 .find(|c| c.name.eq_ignore_ascii_case(token))
             {
-                if !columns
-                    .iter()
-                    .any(|c| c.eq_ignore_ascii_case(&column.name))
-                {
+                if !columns.iter().any(|c| c.eq_ignore_ascii_case(&column.name)) {
                     columns.push(column.name.clone());
                 }
             }
@@ -1027,7 +1055,13 @@ fn make_index_name(table: &str, columns: &[String], existing: &HashSet<String>) 
     let mut base = format!("idx_{}_{}", table, columns.join("_")).to_ascii_lowercase();
     base = base
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if base.len() > 60 {
         base.truncate(60);
@@ -1092,7 +1126,11 @@ mod tests {
         ];
         for (sql, expected) in cases {
             let cols = extract_candidate_columns(sql, &snapshot());
-            assert_eq!(cols, expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "sql={sql}");
+            assert_eq!(
+                cols,
+                expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "sql={sql}"
+            );
         }
     }
 
@@ -1184,8 +1222,16 @@ mod tests {
             unique: false,
             index_type: "BTREE".into(),
             columns: vec![
-                IndexColumn { name: "user_id".into(), seq: 1, cardinality: None },
-                IndexColumn { name: "status".into(), seq: 2, cardinality: None },
+                IndexColumn {
+                    name: "user_id".into(),
+                    seq: 1,
+                    cardinality: None,
+                },
+                IndexColumn {
+                    name: "status".into(),
+                    seq: 2,
+                    cardinality: None,
+                },
             ],
         });
         let evidence = EvidencePack {
@@ -1220,7 +1266,9 @@ mod tests {
             &evidence,
             IndexAdvisorInput {
                 table: "orders".into(),
-                workload_sql: vec!["SELECT * FROM orders WHERE user_id = 1 AND status = 'paid'".into()],
+                workload_sql: vec![
+                    "SELECT * FROM orders WHERE user_id = 1 AND status = 'paid'".into()
+                ],
                 ..Default::default()
             },
             &crate::ops::policy::OpsPolicy::default(),

@@ -685,18 +685,14 @@ async fn text_pk_scan_uses_c_collation() {
 }
 
 #[tokio::test]
-async fn missing_pk_or_partitioned_blocks() {
+async fn missing_pk_blocks() {
+    // S5 行为变更依据：分区表已支持（父表 DDL + 逐分区 VALIDATE），
+    // 本用例只保留「无单列主键」阻断；分区路径见 partitioned_table_notnull。
     let Some(base_url) = env_url() else { return };
     let (db, admin) = isolated_database(&base_url, "it_nn_block").await;
     let url = with_database(&base_url, &db);
     let pool = PgPool::connect(&url).await.expect("连接失败");
     exec(&pool, "CREATE TABLE no_pk (payload text)").await;
-    exec(
-        &pool,
-        "CREATE TABLE parted (id bigint NOT NULL, payload text, PRIMARY KEY (id)) \
-         PARTITION BY RANGE (id)",
-    )
-    .await;
 
     let ctx = ctx_for(&url, &db).await;
     let hub = MigrationHub::new(None);
@@ -727,7 +723,41 @@ async fn missing_pk_or_partitioned_blocks() {
     assert_eq!(blocked.blocking.as_ref().unwrap().phase, "preflight:pk");
     assert!(nullable(&pool, "no_pk", "payload").await);
 
-    let parted = pg_notnull::new_job(
+    cleanup_database(&admin, &db).await;
+}
+
+#[tokio::test]
+async fn partitioned_table_notnull() {
+    let Some(base_url) = env_url() else { return };
+    let (db, admin) = isolated_database(&base_url, "it_nn_part").await;
+    let url = with_database(&base_url, &db);
+    let pool = PgPool::connect(&url).await.expect("连接失败");
+    exec(
+        &pool,
+        "CREATE TABLE parted (id bigint NOT NULL, payload text, PRIMARY KEY (id)) \
+         PARTITION BY RANGE (id)",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE parted_p1 PARTITION OF parted FOR VALUES FROM (1) TO (1000)",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE parted_p2 PARTITION OF parted FOR VALUES FROM (1000) TO (2000)",
+    )
+    .await;
+    exec(
+        &pool,
+        "INSERT INTO parted SELECT g, 'v' || g FROM generate_series(1, 1500) g",
+    )
+    .await;
+
+    let ctx = ctx_for(&url, &db).await;
+    let hub = MigrationHub::new(None);
+    let policy = OpsPolicy::default();
+    let job = pg_notnull::new_job(
         &ctx,
         &hub,
         pg_notnull::NotNullRequest {
@@ -739,21 +769,24 @@ async fn missing_pk_or_partitioned_blocks() {
     )
     .await
     .unwrap();
-    pg_notnull::run_job(&parted.job_id, &ctx, &hub, &policy)
+    pg_notnull::run_job(&job.job_id, &ctx, &hub, &policy)
         .await
         .expect("执行失败");
-    let blocked = hub.get_notnull(&parted.job_id).await.unwrap();
-    assert_eq!(
-        blocked.status,
-        MigrationStatus::Blocked,
-        "err={:?}",
-        blocked.last_error
+
+    let done = hub.get_notnull(&job.job_id).await.unwrap();
+    println!(
+        "分区 SET NOT NULL: status={:?} notes={:?} err={:?}",
+        done.status, done.notes, done.last_error
     );
-    assert_eq!(
-        blocked.blocking.as_ref().unwrap().phase,
-        "preflight:partitioned"
+    assert_eq!(done.status, MigrationStatus::Completed);
+    assert!(!nullable(&pool, "parted", "payload").await);
+    // 逐分区 VALIDATE 的痕迹（父表最终 VALIDATE 是所有分区验证后的瞬时操作）。
+    assert!(
+        done.notes.iter().any(|note| note.contains("parted_p1"))
+            && done.notes.iter().any(|note| note.contains("parted_p2")),
+        "notes 必须记录逐分区验证: {:?}",
+        done.notes
     );
-    assert!(!constraint_exists(&pool, "parted", "fm_not_null_payload").await);
 
     cleanup_database(&admin, &db).await;
 }

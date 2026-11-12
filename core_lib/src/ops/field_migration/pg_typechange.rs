@@ -18,8 +18,9 @@ use crate::ops::types::{hash_json, now, AuditRecord};
 use crate::sql::util::quote_ident_pg;
 
 use super::migration_store::{
-    BlockingDetail, MigrationHub, MigrationStatus, TypeChangeClass, TypeChangeExecution,
-    TypeChangeJob, TypeChangePhase, TypeChangeVerify, CONTROL_ABORT, CONTROL_PAUSE,
+    BlockingDetail, FkCounterpartSpec, FkPlanEntry, MigrationHub, MigrationStatus, TypeChangeClass,
+    TypeChangeExecution, TypeChangeJob, TypeChangePhase, TypeChangeVerify, CONTROL_ABORT,
+    CONTROL_PAUSE,
 };
 use super::pg_backfill::exec_ddl_raw;
 use super::pg_evidence::normalize_pg_type;
@@ -35,6 +36,10 @@ pub struct TypeChangeRequest {
     pub target_type: String,
     pub allow_rewrite: bool,
     pub production_confirmed: bool,
+    /// freeform USING 表达式（S5）；提供即按 Rewrite 开闸并纳入指纹。
+    pub using_expr: Option<String>,
+    /// FK 拆装编排的对端列（S5）；空 = 无 FK 编排。
+    pub fk_counterparts: Vec<FkCounterpartSpec>,
 }
 
 // ── B 组：类型解析与分类（纯函数） ────────────────────────
@@ -192,13 +197,23 @@ pub fn canonical_type(raw: &str) -> Option<String> {
 
 // ── C 组：执行器 ─────────────────────────────────────────
 
-pub fn spec_hash(schema: &str, table: &str, column: &str, source: &str, target: &str) -> String {
+pub fn spec_hash(
+    schema: &str,
+    table: &str,
+    column: &str,
+    source: &str,
+    target: &str,
+    using_expr: Option<&str>,
+    fk_plan: &[FkPlanEntry],
+) -> String {
     hash_json(&json!({
         "schema": schema,
         "table": table,
         "column": column,
         "source_type": source,
         "target_type": target,
+        "using_expr": using_expr,
+        "fk_plan": fk_plan,
     }))
 }
 
@@ -231,6 +246,24 @@ pub async fn new_job(
             req.target_type
         )));
     }
+    // freeform USING 的本地门：长度与单语句约束（解析干跑在 preflight）。
+    let using_expr = req
+        .using_expr
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(expr) = using_expr.as_ref() {
+        if expr.len() > 2000 {
+            return Err(OpsError::Validation(
+                "USING 表达式过长（上限 2000 字符）".into(),
+            ));
+        }
+        if expr.contains(';') {
+            return Err(OpsError::Validation(
+                "USING 表达式必须为单条表达式（不允许分号）".into(),
+            ));
+        }
+    }
     let schema = req
         .schema
         .clone()
@@ -249,6 +282,8 @@ pub async fn new_job(
         // 首跑 preflight 记录真实列类型后再算指纹。
         source_type: String::new(),
         target_type: req.target_type.trim().to_string(),
+        using_expr,
+        fk_counterparts: req.fk_counterparts.clone(),
         spec_hash: String::new(),
         engine: String::new(),
         status: MigrationStatus::Pending,
@@ -258,6 +293,7 @@ pub async fn new_job(
         production_confirmed: req.production_confirmed,
         execution: TypeChangeExecution::default(),
         verify: TypeChangeVerify::default(),
+        fk_plan: Vec::new(),
         run_count: 0,
         blocking: None,
         notes: Vec::new(),
@@ -274,12 +310,93 @@ pub async fn new_job(
 /// `ALTER TABLE ... ALTER COLUMN ... TYPE ...`；列/表加引号，目标串来自
 /// `render_target` 的解析产物（base 另经 `::regtype` 验证，typmod 只含数字）。
 pub fn build_alter_sql(schema: &str, table: &str, column: &str, target: &str) -> String {
+    build_alter_sql_with_using(schema, table, column, target, None)
+}
+
+/// 自定义 `USING` 版本：表达式由调用方保证已过 `preflight:bad_using_expr` 干跑。
+pub fn build_alter_sql_with_using(
+    schema: &str,
+    table: &str,
+    column: &str,
+    target: &str,
+    using_expr: Option<&str>,
+) -> String {
     let quoted = quote_ident_pg(column);
+    let using = match using_expr {
+        Some(expr) => expr.to_string(),
+        None => format!("{quoted}::{target}"),
+    };
     format!(
-        "ALTER TABLE {} ALTER COLUMN {} TYPE {target} USING {quoted}::{target}",
+        "ALTER TABLE {} ALTER COLUMN {} TYPE {target} USING {using}",
         qualified(Some(schema), table),
         quoted
     )
+}
+
+/// USING 解析干跑（门 1）：只做解析/计划，不执行、不评估数据。
+async fn dry_run_using(
+    ctx: &OpsContext,
+    schema: &str,
+    table: &str,
+    expr: &str,
+) -> Result<(), OpsError> {
+    let sql = format!(
+        "SELECT ({expr}) FROM {} LIMIT 0",
+        qualified(Some(schema), table)
+    );
+    let pool = ctx.db_client.pool.pg()?;
+    sqlx::query(&sql).fetch_all(pool).await?;
+    Ok(())
+}
+
+/// 分区叶子数量（递归 `pg_inherits`）；非分区表返回 0。
+async fn partition_count(ctx: &OpsContext, schema: &str, table: &str) -> Result<u64, OpsError> {
+    let rows = sqlx::query(
+        "WITH RECURSIVE tree AS ( \
+             SELECT c.oid, c.relkind FROM pg_class c WHERE c.oid = to_regclass($1) \
+             UNION ALL \
+             SELECT child.oid, child.relkind FROM pg_inherits i \
+             JOIN pg_class child ON child.oid = i.inhrelid \
+             JOIN tree parent ON parent.oid = i.inhparent \
+         ) \
+         SELECT COUNT(*)::text AS count FROM tree WHERE relkind = 'r'",
+    )
+    .bind(qualified(Some(schema), table))
+    .fetch_one(ctx.db_client.pool.pg()?)
+    .await?;
+    let rows = convert_pg_rows(&[rows]);
+    Ok(rows
+        .first()
+        .and_then(|row| row.get("count"))
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0))
+}
+
+/// 列是否属于分区键（`pg_partitioned_table.partattrs`）。
+async fn is_partition_key(
+    ctx: &OpsContext,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<bool, OpsError> {
+    let rows = sqlx::query(
+        "SELECT COUNT(*)::text AS count \
+         FROM pg_partitioned_table pt \
+         JOIN generate_series(0, pt.partnatts - 1) AS k(ord) ON true \
+         JOIN pg_attribute a ON a.attrelid = pt.partrelid AND a.attnum = pt.partattrs[k.ord] \
+         WHERE pt.partrelid = to_regclass($1) AND a.attname = $2",
+    )
+    .bind(qualified(Some(schema), table))
+    .bind(column)
+    .fetch_one(ctx.db_client.pool.pg()?)
+    .await?;
+    let rows = convert_pg_rows(&[rows]);
+    Ok(rows
+        .first()
+        .and_then(|row| row.get("count"))
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+        > 0)
 }
 
 pub async fn run_job(
@@ -363,27 +480,55 @@ pub async fn run_job(
 
     // ── Preflight ──────────────────────────────────────
     let schema = sanitize_schema(job.schema.as_deref());
-    let qualified = qualified(Some(&schema), &job.table);
+    let qualified_table = qualified(Some(&schema), &job.table);
 
-    // 1) 表存在且是普通表（分区表/视图/外表不在 S4 范围）。
+    // 1) 表存在且是普通表或分区父表（S5：分区父表单语句级联全部分区）。
     let relkind = table_relkind(ctx, &schema, &job.table).await?;
     let Some(relkind) = relkind else {
         return block_typechange(
             ctx,
             hub,
             job_id,
-            &format!("表 {qualified} 不存在"),
+            &format!("表 {qualified_table} 不存在"),
             "preflight:missing_table",
         )
         .await;
     };
-    if relkind != "r" {
+    if relkind != "r" && relkind != "p" {
         let reason = match relkind.as_str() {
-            "p" => "分区表改类型不在 S4 支持范围（S5 候选）",
             "v" | "m" => "视图不支持改类型",
-            _ => "仅支持普通表（relkind='r'）",
+            _ => "仅支持普通表或分区父表（relkind='r'/'p'）",
         };
         return block_typechange(ctx, hub, job_id, reason, "preflight:unsupported_relation").await;
+    }
+    if relkind == "p" {
+        // PG 硬限制：分区键列的类型不可修改（会破坏分区路由与分区边界表达式）。
+        // 实测报错 `cannot alter column ... because it is part of the partition key`，
+        // 必须在写之前拦下，否则任务跑到 Applying 才失败。
+        if is_partition_key(ctx, &schema, &job.table, &job.column).await? {
+            return block_typechange(
+                ctx,
+                hub,
+                job_id,
+                &format!(
+                    "列 {} 是分区键：PostgreSQL 不允许修改分区键列的类型；\
+                     需新建表 + 全量搬迁 + 切换分区方案",
+                    job.column
+                ),
+                "preflight:partition_key",
+            )
+            .await;
+        }
+        let partitions = partition_count(ctx, &schema, &job.table).await?;
+        let job = hub
+            .update_typechange(job_id, |job| {
+                job.notes.push(format!(
+                    "分区父表：ALTER TYPE 单语句级联 {partitions} 个分区，\
+                     锁范围 = 父表 + 全部分区 ACCESS EXCLUSIVE，重写成本按全部分区总量计"
+                ));
+            })
+            .await?;
+        let _ = &job;
     }
 
     // 2) 目标类型本地解析 + 库内 ::regtype 验证。
@@ -416,41 +561,95 @@ pub async fn run_job(
             ctx,
             hub,
             job_id,
-            &format!("表 {qualified} 缺少列 {}", job.column),
+            &format!("表 {qualified_table} 缺少列 {}", job.column),
             "preflight:missing_column",
         )
         .await;
     };
     let live_type = col_info.coltype.clone();
 
-    // 3a) 列已是目标类型：no-op（首跑直接完成；续跑视为外部已完成，跳 Verifying）。
-    if let (Some(live), Some(target)) =
-        (canonical_type(&live_type), canonical_type(&job.target_type))
-    {
-        if live == target {
-            let job = hub
-                .update_typechange(job_id, |job| {
-                    job.status = MigrationStatus::Completed;
-                    job.phase = TypeChangePhase::Done;
-                    job.finished_at = Some(now());
-                    job.last_error = None;
-                    job.verify.live_type = Some(live_type.clone());
-                    job.notes.push("列已是目标类型，无需执行（no-op）".into());
-                })
-                .await?;
-            let _ = append_typechange_audit(
+    let live_is_target = canonical_type(&live_type)
+        .zip(canonical_type(&job.target_type))
+        .map(|(live, target)| live == target)
+        .unwrap_or(false);
+    let fk_pending = job.fk_plan.iter().any(|entry| !entry.validated);
+
+    // 3a) 列已是目标类型且无未完成 FK 编排：no-op 完成。
+    //     （若 FK 编排中断在 ALTER 之后，则不能 no-op，必须继续重建 FK。）
+    if live_is_target && !fk_pending {
+        let job = hub
+            .update_typechange(job_id, |job| {
+                job.status = MigrationStatus::Completed;
+                job.phase = TypeChangePhase::Done;
+                job.finished_at = Some(now());
+                job.last_error = None;
+                job.verify.live_type = Some(live_type.clone());
+                job.notes.push("列已是目标类型，无需执行（no-op）".into());
+            })
+            .await?;
+        let _ = append_typechange_audit(
+            ctx,
+            "field_migration.typechange.completed",
+            "ok",
+            &job,
+            json!({ "job_id": job_id, "noop": true, "live_type": live_type }),
+        );
+        return Ok(());
+    }
+
+    // 3b) freeform USING 解析干跑（S5 门 1）：只解析/计划，不执行、不评估数据。
+    if let Some(expr) = job.using_expr.clone() {
+        if let Err(err) = dry_run_using(ctx, &schema, &job.table, &expr).await {
+            return block_typechange(
                 ctx,
-                "field_migration.typechange.completed",
-                "ok",
-                &job,
-                json!({ "job_id": job_id, "noop": true, "live_type": live_type }),
-            );
-            return Ok(());
+                hub,
+                job_id,
+                &format!("USING 表达式无法解析或引用无效（{err}）：{expr}"),
+                "preflight:bad_using_expr",
+            )
+            .await;
+        }
+        if !job.fk_plan.is_empty() {
+            return block_typechange(
+                ctx,
+                hub,
+                job_id,
+                "FK 编排与自定义 USING 不能同时使用：对端列无法安全复用同一表达式，\
+                 请先做类型变更、再单独编排 FK",
+                "preflight:fk_with_custom_using",
+            )
+            .await;
         }
     }
 
-    // 3b) 首跑记录 source_type 与指纹；续跑校验漂移与指纹。
+    // 3c) FK 拆装计划：首跑枚举并校验对端声明；续跑复用已存计划。
     let mut job = job;
+    let plan = match plan_fk_or_block(
+        ctx,
+        &schema,
+        &job.table,
+        &job.column,
+        &job.source_type,
+        &live_type,
+        &job.target_type,
+        &job.fk_plan,
+        &job.fk_counterparts,
+        col_info.attnum,
+    )
+    .await?
+    {
+        FkPlanOutcome::Ready(plan) => plan,
+        FkPlanOutcome::Blocked(message, phase) => {
+            return block_typechange(ctx, hub, job_id, &message, &phase).await
+        }
+    };
+    if plan != job.fk_plan {
+        job = hub
+            .update_typechange(job_id, |job| job.fk_plan = plan.clone())
+            .await?;
+    }
+
+    // 3d) 首跑记录 source_type 与指纹（含 using_expr / fk_plan）；续跑校验。
     if job.source_type.is_empty() {
         let fingerprint = spec_hash(
             &schema,
@@ -458,6 +657,8 @@ pub async fn run_job(
             &job.column,
             &live_type,
             &job.target_type,
+            job.using_expr.as_deref(),
+            &job.fk_plan,
         );
         job = hub
             .update_typechange(job_id, |job| {
@@ -473,6 +674,8 @@ pub async fn run_job(
             json!({
                 "job_id": job_id,
                 "source_type": live_type,
+                "using_expr": job.using_expr,
+                "fk_constraints": job.fk_plan.iter().map(|entry| entry.constraint.clone()).collect::<Vec<_>>(),
                 "spec_hash": fingerprint,
             }),
         );
@@ -483,18 +686,22 @@ pub async fn run_job(
             &job.column,
             &job.source_type,
             &job.target_type,
+            job.using_expr.as_deref(),
+            &job.fk_plan,
         );
         if job.spec_hash != expected {
             return block_typechange(
                 ctx,
                 hub,
                 job_id,
-                "任务规格与指纹不一致（表/列/源类型/目标类型被篡改），拒绝续跑",
+                "任务规格与指纹不一致（表/列/源类型/目标类型/USING/FK 计划被篡改），拒绝续跑",
                 "preflight:spec_mismatch",
             )
             .await;
         }
-        if live_type != job.source_type {
+        // 中断在 ALTER 之后：live 已等于目标且 FK 未完成，允许继续重建 FK。
+        let interrupted_after_alter = live_is_target && fk_pending;
+        if live_type != job.source_type && !interrupted_after_alter {
             return block_typechange(
                 ctx,
                 hub,
@@ -509,8 +716,12 @@ pub async fn run_job(
         }
     }
 
-    // 4) 分类 + 开闸门。
-    let classification = classify_type_change(&job.source_type, &job.target_type);
+    // 4) 分类 + 开闸门。自定义 USING 无法静态判定免重写，一律按 Rewrite 处理。
+    let classification = if job.using_expr.is_some() {
+        TypeChangeClass::Rewrite
+    } else {
+        classify_type_change(&job.source_type, &job.target_type)
+    };
     hub.update_typechange(job_id, |job| job.classification = classification)
         .await?;
     if classification == TypeChangeClass::Rewrite && !job.allow_rewrite {
@@ -531,20 +742,20 @@ pub async fn run_job(
         .await;
     }
 
-    // 5) 非确定性转换硬阻断（即使开闸）。
-    if is_nondeterministic_cast(&job.source_type, &job.target_type) {
+    // 5) 非确定性转换硬阻断（提供自定义 USING 时由用户显式承担时区语义）。
+    if job.using_expr.is_none() && is_nondeterministic_cast(&job.source_type, &job.target_type) {
         return block_typechange(
             ctx,
             hub,
             job_id,
             "转换依赖会话时区（TimeZone），结果不确定：拒绝执行；\
-             S5 提供显式 AT TIME ZONE 方案",
+             请提供显式 USING（如 col AT TIME ZONE 'UTC'）并开闸",
             "preflight:non_deterministic_cast",
         )
         .await;
     }
 
-    // 6) 依赖：视图/规则。
+    // 6) 依赖：视图/规则（外键由 3c 的拆装计划处理）。
     let views = dependent_views(ctx, &schema, &job.table).await?;
     if !views.is_empty() {
         return block_typechange(
@@ -556,21 +767,6 @@ pub async fn run_job(
                 views.join(", ")
             ),
             "preflight:dependent_views",
-        )
-        .await;
-    }
-    // 6b) 依赖：外键（任一方向）。
-    let fks = foreign_key_constraints(ctx, &schema, &job.table, col_info.attnum).await?;
-    if !fks.is_empty() {
-        return block_typechange(
-            ctx,
-            hub,
-            job_id,
-            &format!(
-                "列参与外键（任一方向），S4 一律阻断（S5 候选）: {}",
-                fks.join(", ")
-            ),
-            "preflight:foreign_keys",
         )
         .await;
     }
@@ -603,88 +799,164 @@ pub async fn run_job(
     }
     hub.update_typechange(job_id, |job| job.phase = TypeChangePhase::Applying)
         .await?;
-    let sql = build_alter_sql(&schema, &job.table, &job.column, &rendered_target);
-    let result = exec_ddl_raw(ctx, policy, &sql).await;
+    if job.fk_plan.is_empty() {
+        // 单列路径（S4 行为）：一条 ALTER，可选 freeform USING。
+        let sql = build_alter_sql_with_using(
+            &schema,
+            &job.table,
+            &job.column,
+            &rendered_target,
+            job.using_expr.as_deref(),
+        );
+        if let Err(err) = exec_ddl_raw(ctx, policy, &sql).await {
+            return handle_apply_failure(ctx, hub, job_id, "alter_column", err).await;
+        }
+    } else {
+        // S5 FK 编排：DROP FK → ALTER 主列 → ALTER 对端列 → ADD NOT VALID → VALIDATE。
+        for entry in job.fk_plan.clone() {
+            let sql = format!(
+                "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+                qualified(Some(&entry.referencing_schema), &entry.referencing_table),
+                quote_ident_pg(&entry.constraint)
+            );
+            if let Err(err) = exec_ddl_raw(ctx, policy, &sql).await {
+                return handle_apply_failure(
+                    ctx,
+                    hub,
+                    job_id,
+                    &format!("fk_drop:{}", entry.constraint),
+                    err,
+                )
+                .await;
+            }
+            hub.update_typechange(job_id, |job| {
+                if let Some(item) = job
+                    .fk_plan
+                    .iter_mut()
+                    .find(|item| item.constraint == entry.constraint)
+                {
+                    item.dropped = true;
+                }
+            })
+            .await?;
+        }
 
-    if let Err(err) = result {
-        let message = err.to_string();
-        let (code, detail) = database_error_parts(&err);
-        return match classify_apply_failure(&code, &message) {
-            ApplyFailure::LockTimeout => {
-                block_typechange(
-                    ctx,
-                    hub,
-                    job_id,
-                    &format!("获取锁超时（lock_timeout），可续跑: {message}"),
-                    "apply:lock_timeout",
-                )
-                .await
+        if !live_is_target {
+            let sql = build_alter_sql(&schema, &job.table, &job.column, &rendered_target);
+            if let Err(err) = exec_ddl_raw(ctx, policy, &sql).await {
+                return handle_apply_failure(ctx, hub, job_id, "alter_column", err).await;
             }
-            ApplyFailure::Conversion => {
-                let extra = if detail.is_empty() {
-                    String::new()
+        }
+
+        for entry in job.fk_plan.clone() {
+            // 主列是引用侧还是被引用侧决定对端列位置。
+            let (cp_schema, cp_table, cp_column) =
+                if entry.referenced_table == job.table && entry.referenced_column == job.column {
+                    (
+                        entry.referencing_schema.clone(),
+                        entry.referencing_table.clone(),
+                        entry.referencing_column.clone(),
+                    )
                 } else {
-                    format!("（PG DETAIL: {detail}）")
+                    (
+                        entry.referenced_schema.clone(),
+                        entry.referenced_table.clone(),
+                        entry.referenced_column.clone(),
+                    )
                 };
-                block_typechange(
+            let cp_live = column_info(ctx, &cp_schema, &cp_table, &cp_column)
+                .await?
+                .map(|info| info.coltype)
+                .unwrap_or_default();
+            if canonical_type(&cp_live) != canonical_type(&rendered_target) {
+                let sql = build_alter_sql(&cp_schema, &cp_table, &cp_column, &rendered_target);
+                if let Err(err) = exec_ddl_raw(ctx, policy, &sql).await {
+                    return handle_apply_failure(
+                        ctx,
+                        hub,
+                        job_id,
+                        &format!("alter_counterpart:{cp_table}.{cp_column}"),
+                        err,
+                    )
+                    .await;
+                }
+            }
+            hub.update_typechange(job_id, |job| {
+                if let Some(item) = job
+                    .fk_plan
+                    .iter_mut()
+                    .find(|item| item.constraint == entry.constraint)
+                {
+                    item.altered = true;
+                }
+            })
+            .await?;
+        }
+
+        for entry in job.fk_plan.clone() {
+            if entry.recreated {
+                continue;
+            }
+            let sql = format!(
+                "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) NOT VALID",
+                qualified(Some(&entry.referencing_schema), &entry.referencing_table),
+                quote_ident_pg(&entry.constraint),
+                quote_ident_pg(&entry.referencing_column),
+                qualified(Some(&entry.referenced_schema), &entry.referenced_table),
+                quote_ident_pg(&entry.referenced_column)
+            );
+            if let Err(err) = exec_ddl_raw(ctx, policy, &sql).await {
+                return handle_apply_failure(
                     ctx,
                     hub,
                     job_id,
-                    &format!("类型转换失败，存在无法转换的值{extra}: {message}"),
-                    "apply:conversion_failed",
+                    &format!("fk_readd:{}", entry.constraint),
+                    err,
                 )
-                .await
+                .await;
             }
-            ApplyFailure::NoCast => {
-                block_typechange(
+            hub.update_typechange(job_id, |job| {
+                if let Some(item) = job
+                    .fk_plan
+                    .iter_mut()
+                    .find(|item| item.constraint == entry.constraint)
+                {
+                    item.recreated = true;
+                }
+            })
+            .await?;
+        }
+
+        for entry in job.fk_plan.clone() {
+            if entry.validated {
+                continue;
+            }
+            let sql = format!(
+                "ALTER TABLE {} VALIDATE CONSTRAINT {}",
+                qualified(Some(&entry.referencing_schema), &entry.referencing_table),
+                quote_ident_pg(&entry.constraint)
+            );
+            if let Err(err) = exec_ddl_raw(ctx, policy, &sql).await {
+                return handle_apply_failure(
                     ctx,
                     hub,
                     job_id,
-                    &format!("无可行转换路径: {message}"),
-                    "apply:no_cast",
+                    &format!("fk_validate:{}", entry.constraint),
+                    err,
                 )
-                .await
+                .await;
             }
-            ApplyFailure::DependentObjects => {
-                block_typechange(
-                    ctx,
-                    hub,
-                    job_id,
-                    &format!("存在依赖对象（约束/索引等）阻碍变更: {message}"),
-                    "apply:dependent_objects",
-                )
-                .await
-            }
-            ApplyFailure::Privilege => {
-                block_typechange(
-                    ctx,
-                    hub,
-                    job_id,
-                    &format!("权限不足: {message}"),
-                    "apply:insufficient_privilege",
-                )
-                .await
-            }
-            ApplyFailure::Other => {
-                // 连接中断/未知错误：DDL 原子回滚列本身，续跑 = 重跑语句。
-                let job = hub
-                    .update_typechange(job_id, |job| {
-                        job.status = MigrationStatus::Interrupted;
-                        job.finished_at = Some(now());
-                        job.last_error = Some(format!("ALTER TYPE 失败: {message}"));
-                        job.notes.push("失败：可重新执行（续跑 = 重跑语句）".into());
-                    })
-                    .await?;
-                let _ = append_typechange_audit(
-                    ctx,
-                    "field_migration.typechange.interrupted",
-                    "interrupted",
-                    &job,
-                    json!({ "job_id": job_id, "error": message }),
-                );
-                Ok(())
-            }
-        };
+            hub.update_typechange(job_id, |job| {
+                if let Some(item) = job
+                    .fk_plan
+                    .iter_mut()
+                    .find(|item| item.constraint == entry.constraint)
+                {
+                    item.validated = true;
+                }
+            })
+            .await?;
+        }
     }
 
     // ── Verifying ──────────────────────────────────────
@@ -710,6 +982,10 @@ pub async fn run_job(
         .unwrap_or(false);
     let rows_ok = rows_after == rows_before;
     let indexes_ok = index_after.total == index_before.total && index_after.invalid == 0;
+    // S5：FK 编排结果（约束存在 + convalidated + 对端同型）。
+    let fk_problems =
+        fk_plan_problems(ctx, &job.fk_plan, &job.table, &job.column, &job.target_type).await?;
+    let fk_ok = fk_problems.is_empty();
 
     hub.update_typechange(job_id, |job| {
         job.verify.live_type = Some(live_after.clone());
@@ -718,7 +994,7 @@ pub async fn run_job(
         job.verify.default_after = default_after;
     })
     .await?;
-    if !(type_ok && rows_ok && indexes_ok) {
+    if !(type_ok && rows_ok && indexes_ok && fk_ok) {
         let mut problems = Vec::new();
         if !type_ok {
             problems.push(format!("类型不符: live={live_after}"));
@@ -732,6 +1008,7 @@ pub async fn run_job(
                 index_before.total, index_before.invalid, index_after.total, index_after.invalid
             ));
         }
+        problems.extend(fk_problems);
         return block_typechange(
             ctx,
             hub,
@@ -916,16 +1193,41 @@ async fn dependent_views(
         .collect())
 }
 
-async fn foreign_key_constraints(
+struct FkDetail {
+    constraint: String,
+    referencing_schema: String,
+    referencing_table: String,
+    referencing_column: String,
+    referenced_schema: String,
+    referenced_table: String,
+    referenced_column: String,
+    key_count: i64,
+    /// 本表是该 FK 的被引用侧（true）还是引用侧（false）。
+    our_side_referenced: bool,
+}
+
+async fn foreign_key_details(
     ctx: &OpsContext,
     schema: &str,
     table: &str,
     attnum: i16,
-) -> Result<Vec<String>, OpsError> {
+) -> Result<Vec<FkDetail>, OpsError> {
     let qualified = qualified(Some(schema), table);
     let rows = sqlx::query(
-        "SELECT con.conname::text AS name \
+        "SELECT con.conname::text AS name, \
+                rn.nspname::text AS referencing_schema, rc.relname::text AS referencing_table, \
+                ra.attname::text AS referencing_column, \
+                fn.nspname::text AS referenced_schema, fc.relname::text AS referenced_table, \
+                fa.attname::text AS referenced_column, \
+                COALESCE(array_length(con.conkey, 1), 0)::text AS key_count, \
+                (con.confrelid = to_regclass($1))::text AS our_side_referenced \
          FROM pg_constraint con \
+         JOIN pg_class rc ON rc.oid = con.conrelid \
+         JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
+         JOIN pg_class fc ON fc.oid = con.confrelid \
+         JOIN pg_namespace fn ON fn.oid = fc.relnamespace \
+         JOIN pg_attribute ra ON ra.attrelid = con.conrelid AND ra.attnum = con.conkey[1] \
+         JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = con.confkey[1] \
          WHERE con.contype = 'f' \
            AND ((con.conrelid = to_regclass($1) AND $2 = ANY (con.conkey)) \
              OR (con.confrelid = to_regclass($1) AND $2 = ANY (con.confkey)))",
@@ -937,8 +1239,216 @@ async fn foreign_key_constraints(
     let rows = convert_pg_rows(&rows);
     Ok(rows
         .iter()
-        .filter_map(|row| row.get("name").cloned())
+        .map(|row| FkDetail {
+            constraint: row.get("name").cloned().unwrap_or_default(),
+            referencing_schema: row.get("referencing_schema").cloned().unwrap_or_default(),
+            referencing_table: row.get("referencing_table").cloned().unwrap_or_default(),
+            referencing_column: row.get("referencing_column").cloned().unwrap_or_default(),
+            referenced_schema: row.get("referenced_schema").cloned().unwrap_or_default(),
+            referenced_table: row.get("referenced_table").cloned().unwrap_or_default(),
+            referenced_column: row.get("referenced_column").cloned().unwrap_or_default(),
+            key_count: row
+                .get("key_count")
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .unwrap_or(0),
+            our_side_referenced: matches!(
+                row.get("our_side_referenced").map(String::as_str),
+                Some("true") | Some("t")
+            ),
+        })
         .collect())
+}
+
+pub(crate) enum FkPlanOutcome {
+    Ready(Vec<FkPlanEntry>),
+    Blocked(String, String),
+}
+
+/// 首跑：枚举 FK 并校验对端声明/类型/属主；续跑：复用已存计划（幂等步骤自愈）。
+#[allow(clippy::too_many_arguments)]
+async fn plan_fk_or_block(
+    ctx: &OpsContext,
+    schema: &str,
+    table: &str,
+    column: &str,
+    source_type: &str,
+    live_type: &str,
+    target_type: &str,
+    existing: &[FkPlanEntry],
+    counterparts: &[FkCounterpartSpec],
+    attnum: i16,
+) -> Result<FkPlanOutcome, OpsError> {
+    if !existing.is_empty() {
+        // 续跑：主列可能已被改到目标类型，对端允许 source 或 target。
+        for entry in existing {
+            let (cp_schema, cp_table, cp_column) = counterpart_of(entry, table, column);
+            let cp_live = column_info(ctx, &cp_schema, &cp_table, &cp_column)
+                .await?
+                .map(|info| info.coltype)
+                .unwrap_or_default();
+            let cp_canonical = canonical_type(&cp_live);
+            let source_canonical = canonical_type(source_type);
+            let target_canonical = canonical_type(target_type);
+            if cp_canonical != source_canonical && cp_canonical != target_canonical {
+                return Ok(FkPlanOutcome::Blocked(
+                    format!(
+                        "FK {} 对端列 {cp_table}.{cp_column} 类型漂移：{}（期望 {} 或 {}）",
+                        entry.constraint, cp_live, source_type, target_type
+                    ),
+                    "preflight:fk_type_mismatch".into(),
+                ));
+            }
+        }
+        return Ok(FkPlanOutcome::Ready(existing.to_vec()));
+    }
+
+    let details = foreign_key_details(ctx, schema, table, attnum).await?;
+    if details.is_empty() {
+        return Ok(FkPlanOutcome::Ready(Vec::new()));
+    }
+    if let Some(composite) = details.iter().find(|detail| detail.key_count > 1) {
+        return Ok(FkPlanOutcome::Blocked(
+            format!(
+                "外键 {} 是复合外键（{} 列）：S5 仅编排单列 FK",
+                composite.constraint, composite.key_count
+            ),
+            "preflight:composite_fk".into(),
+        ));
+    }
+
+    let mut plan = Vec::new();
+    let mut missing = Vec::new();
+    for detail in details {
+        let (cp_schema, cp_table, cp_column) = if detail.our_side_referenced {
+            (
+                detail.referencing_schema.clone(),
+                detail.referencing_table.clone(),
+                detail.referencing_column.clone(),
+            )
+        } else {
+            (
+                detail.referenced_schema.clone(),
+                detail.referenced_table.clone(),
+                detail.referenced_column.clone(),
+            )
+        };
+        let declared = counterparts.iter().any(|spec| {
+            spec.table.eq_ignore_ascii_case(&cp_table)
+                && spec.column.eq_ignore_ascii_case(&cp_column)
+                && spec
+                    .schema
+                    .as_deref()
+                    .map(|value| value.eq_ignore_ascii_case(&cp_schema))
+                    .unwrap_or(true)
+        });
+        if !declared {
+            missing.push(format!(
+                "{} -> {cp_schema}.{cp_table}.{cp_column}",
+                detail.constraint
+            ));
+            continue;
+        }
+        let cp_live = column_info(ctx, &cp_schema, &cp_table, &cp_column)
+            .await?
+            .map(|info| info.coltype)
+            .unwrap_or_default();
+        if canonical_type(&cp_live) != canonical_type(live_type) {
+            return Ok(FkPlanOutcome::Blocked(
+                format!(
+                    "FK {} 对端列 {cp_table}.{cp_column} 类型 {cp_live} 与主列 {live_type} 不一致：\
+                     双端必须同型才能重建 FK",
+                    detail.constraint
+                ),
+                "preflight:fk_type_mismatch".into(),
+            ));
+        }
+        if !is_table_owner(ctx, &cp_schema, &cp_table).await? {
+            return Ok(FkPlanOutcome::Blocked(
+                format!("当前用户不是对端表 {cp_table} 的属主，无法 ALTER 对端列"),
+                "preflight:not_owner".into(),
+            ));
+        }
+        plan.push(FkPlanEntry {
+            constraint: detail.constraint,
+            referencing_schema: detail.referencing_schema,
+            referencing_table: detail.referencing_table,
+            referencing_column: detail.referencing_column,
+            referenced_schema: detail.referenced_schema,
+            referenced_table: detail.referenced_table,
+            referenced_column: detail.referenced_column,
+            target_type: target_type.to_string(),
+            dropped: false,
+            altered: false,
+            recreated: false,
+            validated: false,
+        });
+    }
+    if !missing.is_empty() {
+        return Ok(FkPlanOutcome::Blocked(
+            format!(
+                "列参与外键但未声明对端列（fk_counterparts），禁止无声明拆装：{}",
+                missing.join("; ")
+            ),
+            "preflight:fk_counterparts_missing".into(),
+        ));
+    }
+    Ok(FkPlanOutcome::Ready(plan))
+}
+
+fn counterpart_of(entry: &FkPlanEntry, table: &str, column: &str) -> (String, String, String) {
+    if entry.referenced_table == table && entry.referenced_column == column {
+        (
+            entry.referencing_schema.clone(),
+            entry.referencing_table.clone(),
+            entry.referencing_column.clone(),
+        )
+    } else {
+        (
+            entry.referenced_schema.clone(),
+            entry.referenced_table.clone(),
+            entry.referenced_column.clone(),
+        )
+    }
+}
+
+/// 校验 FK 编排结果：约束存在、`convalidated=true`、对端列类型等于目标。
+async fn fk_plan_problems(
+    ctx: &OpsContext,
+    plan: &[FkPlanEntry],
+    table: &str,
+    column: &str,
+    target_type: &str,
+) -> Result<Vec<String>, OpsError> {
+    let mut problems = Vec::new();
+    for entry in plan {
+        let validated: Option<String> = sqlx::query_scalar(
+            "SELECT con.convalidated::text FROM pg_constraint con \
+             WHERE con.conname = $1 AND con.conrelid = to_regclass($2) AND con.contype = 'f'",
+        )
+        .bind(&entry.constraint)
+        .bind(qualified(
+            Some(&entry.referencing_schema),
+            &entry.referencing_table,
+        ))
+        .fetch_optional(ctx.db_client.pool.pg()?)
+        .await?;
+        match validated.as_deref() {
+            Some("true") | Some("t") => {}
+            Some(_) => problems.push(format!("FK {} 未完成 VALIDATE", entry.constraint)),
+            None => problems.push(format!("FK {} 不存在（重建失败）", entry.constraint)),
+        }
+        let (cp_schema, cp_table, cp_column) = counterpart_of(entry, table, column);
+        let cp_live = column_info(ctx, &cp_schema, &cp_table, &cp_column)
+            .await?
+            .map(|info| info.coltype)
+            .unwrap_or_default();
+        if canonical_type(&cp_live) != canonical_type(target_type) {
+            problems.push(format!(
+                "对端列 {cp_table}.{cp_column} 类型为 {cp_live}，期望 {target_type}"
+            ));
+        }
+    }
+    Ok(problems)
 }
 
 async fn is_table_owner(ctx: &OpsContext, schema: &str, table: &str) -> Result<bool, OpsError> {
@@ -1002,9 +1512,14 @@ async fn index_health(
     table: &str,
 ) -> Result<IndexHealth, OpsError> {
     let rows = sqlx::query(
-        "SELECT COUNT(*)::text AS total, \
-                COUNT(*) FILTER (WHERE NOT i.indisvalid)::text AS invalid \
-         FROM pg_index i WHERE i.indrelid = to_regclass($1)",
+        "WITH RECURSIVE tree AS ( \
+             SELECT c.oid FROM pg_class c WHERE c.oid = to_regclass($1) \
+             UNION ALL \
+             SELECT i.inhrelid FROM pg_inherits i JOIN tree parent ON parent.oid = i.inhparent \
+         ) \
+         SELECT COUNT(*)::text AS total, \
+                COUNT(*) FILTER (WHERE NOT ix.indisvalid)::text AS invalid \
+         FROM pg_index ix JOIN tree t ON ix.indrelid = t.oid",
     )
     .bind(&qualified(Some(schema), table))
     .fetch_one(ctx.db_client.pool.pg()?)
@@ -1070,6 +1585,96 @@ async fn abort_typechange(
         json!({ "job_id": job_id }),
     );
     Ok(())
+}
+
+/// Applying 失败映射：SQLSTATE 优先；`step` 标注失败步骤（FK 编排五步之一）。
+async fn handle_apply_failure(
+    ctx: &OpsContext,
+    hub: &MigrationHub,
+    job_id: &str,
+    step: &str,
+    err: sqlx::Error,
+) -> Result<(), OpsError> {
+    let message = err.to_string();
+    let (code, detail) = database_error_parts(&err);
+    let prefix = format!("[{step}] ");
+    match classify_apply_failure(&code, &message) {
+        ApplyFailure::LockTimeout => {
+            block_typechange(
+                ctx,
+                hub,
+                job_id,
+                &format!("{prefix}获取锁超时（lock_timeout），可续跑: {message}"),
+                "apply:lock_timeout",
+            )
+            .await
+        }
+        ApplyFailure::Conversion => {
+            let extra = if detail.is_empty() {
+                String::new()
+            } else {
+                format!("（PG DETAIL: {detail}）")
+            };
+            block_typechange(
+                ctx,
+                hub,
+                job_id,
+                &format!("{prefix}类型转换失败，存在无法转换的值{extra}: {message}"),
+                "apply:conversion_failed",
+            )
+            .await
+        }
+        ApplyFailure::NoCast => {
+            block_typechange(
+                ctx,
+                hub,
+                job_id,
+                &format!("{prefix}无可行转换路径: {message}"),
+                "apply:no_cast",
+            )
+            .await
+        }
+        ApplyFailure::DependentObjects => {
+            block_typechange(
+                ctx,
+                hub,
+                job_id,
+                &format!("{prefix}存在依赖对象（约束/索引等）阻碍变更: {message}"),
+                "apply:dependent_objects",
+            )
+            .await
+        }
+        ApplyFailure::Privilege => {
+            block_typechange(
+                ctx,
+                hub,
+                job_id,
+                &format!("{prefix}权限不足: {message}"),
+                "apply:insufficient_privilege",
+            )
+            .await
+        }
+        ApplyFailure::Other => {
+            // 连接中断/未知错误：DDL 原子回滚当前语句，续跑由进度位自愈。
+            let job = hub
+                .update_typechange(job_id, |job| {
+                    job.status = MigrationStatus::Interrupted;
+                    job.finished_at = Some(now());
+                    job.last_error = Some(format!("{prefix}执行失败: {message}"));
+                    job.notes
+                        .push("失败：可重新执行（按 fk_plan 进度位续跑）".into());
+                })
+                .await?;
+            let _ = append_typechange_audit(
+                ctx,
+                "field_migration.typechange.interrupted",
+                "interrupted",
+                &job,
+                json!({ "job_id": job_id, "step": step, "error": message }),
+            );
+            Ok(())
+        }
+    }
 }
 
 async fn block_typechange(
@@ -1352,24 +1957,105 @@ mod tests {
         );
     }
 
+    /// S5：`spec_hash` 由四要素扩为六要素（加 `using_expr` 与 `fk_plan`）。
+    /// 依据 specs/pg-field-governance-s5/spec.md §8「门 3 指纹绑定」——
+    /// 篡改 USING 表达式或对端声明必须让指纹失配，否则续跑会按新语义改生产列。
     #[test]
-    fn spec_hash_binds_all_four_identifiers() {
-        let base = spec_hash("public", "orders", "payload", "text", "varchar(200)");
-        assert_ne!(
-            base,
-            spec_hash("public", "orders", "other", "text", "varchar(200)")
+    fn spec_hash_binds_all_six_identifiers() {
+        let base = spec_hash(
+            "public",
+            "orders",
+            "payload",
+            "text",
+            "varchar(200)",
+            None,
+            &[],
         );
         assert_ne!(
             base,
-            spec_hash("public", "orders", "payload", "varchar(50)", "varchar(200)")
+            spec_hash(
+                "public",
+                "orders",
+                "other",
+                "text",
+                "varchar(200)",
+                None,
+                &[]
+            )
         );
         assert_ne!(
             base,
-            spec_hash("public", "orders", "payload", "text", "varchar(100)")
+            spec_hash(
+                "public",
+                "orders",
+                "payload",
+                "varchar(50)",
+                "varchar(200)",
+                None,
+                &[]
+            )
         );
         assert_ne!(
             base,
-            spec_hash("other", "orders", "payload", "text", "varchar(200)")
+            spec_hash(
+                "public",
+                "orders",
+                "payload",
+                "text",
+                "varchar(100)",
+                None,
+                &[]
+            )
+        );
+        assert_ne!(
+            base,
+            spec_hash(
+                "other",
+                "orders",
+                "payload",
+                "text",
+                "varchar(200)",
+                None,
+                &[]
+            )
+        );
+        assert_ne!(
+            base,
+            spec_hash(
+                "public",
+                "orders",
+                "payload",
+                "text",
+                "varchar(200)",
+                Some("payload::text"),
+                &[]
+            )
+        );
+        let fk = FkPlanEntry {
+            constraint: "children_parent_id_fkey".into(),
+            referencing_schema: "public".into(),
+            referencing_table: "children".into(),
+            referencing_column: "parent_id".into(),
+            referenced_schema: "public".into(),
+            referenced_table: "orders".into(),
+            referenced_column: "payload".into(),
+            target_type: "varchar(200)".into(),
+            dropped: false,
+            altered: false,
+            recreated: false,
+            validated: false,
+        };
+        assert_ne!(
+            base,
+            spec_hash(
+                "public",
+                "orders",
+                "payload",
+                "text",
+                "varchar(200)",
+                None,
+                std::slice::from_ref(&fk)
+            )
         );
     }
 }

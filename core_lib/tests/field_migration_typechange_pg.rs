@@ -14,7 +14,7 @@ use sqlx::Executor;
 
 use core_lib::db::client::DbClient;
 use core_lib::ops::field_migration::migration_store::{
-    MigrationHub, MigrationStatus, TypeChangeClass, TypeChangeJob,
+    FkCounterpartSpec, MigrationHub, MigrationStatus, TypeChangeClass, TypeChangeJob,
 };
 use core_lib::ops::field_migration::pg_typechange;
 use core_lib::ops::policy::OpsPolicy;
@@ -172,6 +172,8 @@ async fn new_job(
             target_type: target.into(),
             allow_rewrite,
             production_confirmed: false,
+            using_expr: None,
+            fk_counterparts: Vec::new(),
         },
     )
     .await
@@ -317,12 +319,11 @@ async fn metadata_only_numeric_relax() {
         .await
         .unwrap();
     assert_eq!(amount, "12345.6700");
-    let numeric_equal: bool = sqlx::query_scalar(
-        "SELECT (amount = 12345.67::numeric)::bool FROM prices WHERE id = 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let numeric_equal: bool =
+        sqlx::query_scalar("SELECT (amount = 12345.67::numeric)::bool FROM prices WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(numeric_equal, "数值必须等于原值 12345.67");
 
     cleanup_database(&admin, &db).await;
@@ -511,11 +512,15 @@ async fn foreign_key_block() {
     let hub = MigrationHub::new(None);
     let policy = OpsPolicy::default();
     // 被引用主键 int -> bigint，开闸也阻断（外键）。
+    // 断言依据 specs/pg-field-governance-s5/spec.md §7：S5 起外键由「一律阻断」改为
+    // 「显式对端编排」，阻断条件收窄为「列参与外键且未声明 fk_counterparts」，
+    // 故 phase 由 preflight:foreign_keys 改为 preflight:fk_counterparts_missing；
+    // 约束名仍必须进入 detail，否则用户无从知道该声明哪个对端。
     let job = new_job(&ctx, &hub, "parents", "id", "bigint", true).await;
     pg_typechange::run_job(&job.job_id, &ctx, &hub, &policy)
         .await
         .expect("执行失败");
-    let blocked = expect_blocked(&hub, &job.job_id, "preflight:foreign_keys").await;
+    let blocked = expect_blocked(&hub, &job.job_id, "preflight:fk_counterparts_missing").await;
     let message = blocked.last_error.unwrap_or_default();
     assert!(
         message.contains("children_parent_id_fkey"),
@@ -752,6 +757,455 @@ async fn not_owner_block() {
     );
 
     exec(&pool, &format!("DROP ROLE \"{role}\"")).await;
+
+    cleanup_database(&admin, &db).await;
+}
+
+// ── S5：freeform USING / 分区表 / FK 编排 ──────────────────────
+
+/// 带 `using_expr` 的创建入口（S5 新增两个入参）。
+#[allow(clippy::too_many_arguments)]
+async fn new_job_ex(
+    ctx: &OpsContext,
+    hub: &MigrationHub,
+    table: &str,
+    column: &str,
+    target: &str,
+    allow_rewrite: bool,
+    using_expr: Option<&str>,
+    fk_counterparts: Vec<FkCounterpartSpec>,
+) -> TypeChangeJob {
+    pg_typechange::new_job(
+        ctx,
+        hub,
+        pg_typechange::TypeChangeRequest {
+            schema: None,
+            table: table.into(),
+            column: column.into(),
+            target_type: target.into(),
+            allow_rewrite,
+            production_confirmed: false,
+            using_expr: using_expr.map(str::to_string),
+            fk_counterparts,
+        },
+    )
+    .await
+    .expect("创建改类型任务失败")
+}
+
+async fn fk_validated(pool: &PgPool, table: &str, constraint: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT c.convalidated::text FROM pg_constraint c \
+         WHERE c.conrelid = ($1 || '.\"' || $2 || '\"')::regclass AND c.conname = $3",
+    )
+    .bind("public")
+    .bind(table)
+    .bind(constraint)
+    .fetch_one(pool)
+    .await
+    .map(|v: String| v == "true")
+    .unwrap_or(false)
+}
+
+/// 自定义 USING：空串经 NULLIF 归一后转 bigint。
+/// 依据 specs/pg-field-governance-s5/spec.md §8（门 1 解析干跑 + 门 2 强制开闸）。
+#[tokio::test]
+async fn custom_using_expr() {
+    let Some(base_url) = env_url() else { return };
+    let (db, admin) = isolated_database(&base_url, "it_tc_using").await;
+    let url = with_database(&base_url, &db);
+    let pool = PgPool::connect(&url).await.expect("连接失败");
+    exec(
+        &pool,
+        "CREATE TABLE orders (id bigint PRIMARY KEY, amount text)",
+    )
+    .await;
+    exec(
+        &pool,
+        "INSERT INTO orders (id, amount) VALUES (1, '10'), (2, '20'), (3, ''), (4, NULL)",
+    )
+    .await;
+
+    let ctx = ctx_for(&url, &db).await;
+    let hub = MigrationHub::new(None);
+    let policy = OpsPolicy::default();
+    let job = new_job_ex(
+        &ctx,
+        &hub,
+        "orders",
+        "amount",
+        "bigint",
+        true,
+        Some("NULLIF(amount, '')::bigint"),
+        Vec::new(),
+    )
+    .await;
+    pg_typechange::run_job(&job.job_id, &ctx, &hub, &policy)
+        .await
+        .expect("执行失败");
+
+    let done = hub.get_typechange(&job.job_id).await.unwrap();
+    assert_eq!(
+        done.status,
+        MigrationStatus::Completed,
+        "notes={:?} err={:?}",
+        done.notes,
+        done.last_error
+    );
+    assert_eq!(done.classification, TypeChangeClass::Rewrite);
+    assert_eq!(
+        done.using_expr.as_deref(),
+        Some("NULLIF(amount, '')::bigint")
+    );
+    assert_eq!(column_type(&pool, "orders", "amount").await, "bigint");
+    let sum: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(amount), 0)::bigint FROM orders")
+        .fetch_one(&pool)
+        .await
+        .expect("求和失败");
+    assert_eq!(sum, 30, "10 + 20，空串与 NULL 都转成 NULL");
+    assert_eq!(row_count(&pool, "orders").await, 4);
+
+    cleanup_database(&admin, &db).await;
+}
+
+/// USING 表达式解析失败：门 1 干跑必须拦在写之前。
+/// 依据 specs/pg-field-governance-s5/spec.md §8。
+#[tokio::test]
+async fn bad_using_expr_blocks() {
+    let Some(base_url) = env_url() else { return };
+    let (db, admin) = isolated_database(&base_url, "it_tc_badusing").await;
+    let url = with_database(&base_url, &db);
+    let pool = PgPool::connect(&url).await.expect("连接失败");
+    exec(
+        &pool,
+        "CREATE TABLE orders (id bigint PRIMARY KEY, amount text)",
+    )
+    .await;
+    exec(&pool, "INSERT INTO orders VALUES (1, '10')").await;
+
+    let ctx = ctx_for(&url, &db).await;
+    let hub = MigrationHub::new(None);
+    let policy = OpsPolicy::default();
+    let job = new_job_ex(
+        &ctx,
+        &hub,
+        "orders",
+        "amount",
+        "bigint",
+        true,
+        Some("amount::no_such_type"),
+        Vec::new(),
+    )
+    .await;
+    pg_typechange::run_job(&job.job_id, &ctx, &hub, &policy)
+        .await
+        .expect("执行失败");
+
+    let blocked = expect_blocked(&hub, &job.job_id, "preflight:bad_using_expr").await;
+    let message = blocked.last_error.unwrap_or_default();
+    assert!(
+        message.contains("USING"),
+        "错误信息需指向 USING 表达式: {message}"
+    );
+    // 类型必须保持原样，且数据未被触碰。
+    assert_eq!(column_type(&pool, "orders", "amount").await, "text");
+    assert_eq!(row_count(&pool, "orders").await, 1);
+
+    cleanup_database(&admin, &db).await;
+}
+
+/// timestamp -> timestamptz：无 USING 时非确定性拦截，显式 AT TIME ZONE 后放行。
+/// 依据 specs/pg-field-governance-s5/spec.md §8。
+#[tokio::test]
+async fn timestamp_tz_explicit() {
+    let Some(base_url) = env_url() else { return };
+    let (db, admin) = isolated_database(&base_url, "it_tc_tz2").await;
+    let url = with_database(&base_url, &db);
+    let pool = PgPool::connect(&url).await.expect("连接失败");
+    exec(
+        &pool,
+        "CREATE TABLE events (id bigint PRIMARY KEY, at timestamp without time zone)",
+    )
+    .await;
+    exec(
+        &pool,
+        "INSERT INTO events VALUES (1, '2024-01-01 12:00:00')",
+    )
+    .await;
+
+    let ctx = ctx_for(&url, &db).await;
+    let hub = MigrationHub::new(None);
+    let policy = OpsPolicy::default();
+
+    // 第一次：不带 USING，开闸也挡在非确定性判定上。
+    let blocked_job = new_job_ex(
+        &ctx,
+        &hub,
+        "events",
+        "at",
+        "timestamptz",
+        true,
+        None,
+        Vec::new(),
+    )
+    .await;
+    pg_typechange::run_job(&blocked_job.job_id, &ctx, &hub, &policy)
+        .await
+        .expect("执行失败");
+    expect_blocked(
+        &hub,
+        &blocked_job.job_id,
+        "preflight:non_deterministic_cast",
+    )
+    .await;
+    assert_eq!(
+        column_type(&pool, "events", "at").await,
+        "timestamp without time zone"
+    );
+
+    // 第二次：显式 AT TIME ZONE，三重门全过。
+    let job = new_job_ex(
+        &ctx,
+        &hub,
+        "events",
+        "at",
+        "timestamptz",
+        true,
+        Some("at AT TIME ZONE 'UTC'"),
+        Vec::new(),
+    )
+    .await;
+    pg_typechange::run_job(&job.job_id, &ctx, &hub, &policy)
+        .await
+        .expect("执行失败");
+    let done = hub.get_typechange(&job.job_id).await.unwrap();
+    assert_eq!(
+        done.status,
+        MigrationStatus::Completed,
+        "notes={:?} err={:?}",
+        done.notes,
+        done.last_error
+    );
+    assert_eq!(
+        column_type(&pool, "events", "at").await,
+        "timestamp with time zone"
+    );
+    let hour: i32 = sqlx::query_scalar(
+        "SELECT EXTRACT(HOUR FROM at AT TIME ZONE 'UTC')::int FROM events WHERE id = 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("取值失败");
+    assert_eq!(hour, 12, "UTC 解释下小时不变");
+
+    cleanup_database(&admin, &db).await;
+}
+
+/// FK 显式对端编排：DROP → ALTER 双端 → ADD NOT VALID → VALIDATE。
+/// 依据 specs/pg-field-governance-s5/spec.md §9。
+#[tokio::test]
+async fn fk_orchestration() {
+    let Some(base_url) = env_url() else { return };
+    let (db, admin) = isolated_database(&base_url, "it_tc_fkok").await;
+    let url = with_database(&base_url, &db);
+    let pool = PgPool::connect(&url).await.expect("连接失败");
+    exec(
+        &pool,
+        "CREATE TABLE parents (id integer PRIMARY KEY, note text)",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE children (id bigint PRIMARY KEY, \
+         parent_id integer REFERENCES parents(id))",
+    )
+    .await;
+    exec(
+        &pool,
+        "INSERT INTO parents (id, note) VALUES (1, 'a'), (2, 'b')",
+    )
+    .await;
+    exec(
+        &pool,
+        "INSERT INTO children (id, parent_id) VALUES (10, 1), (11, 2)",
+    )
+    .await;
+
+    let ctx = ctx_for(&url, &db).await;
+    let hub = MigrationHub::new(None);
+    let policy = OpsPolicy::default();
+    let job = new_job_ex(
+        &ctx,
+        &hub,
+        "parents",
+        "id",
+        "bigint",
+        true,
+        None,
+        vec![FkCounterpartSpec {
+            schema: Some("public".into()),
+            table: "children".into(),
+            column: "parent_id".into(),
+        }],
+    )
+    .await;
+    pg_typechange::run_job(&job.job_id, &ctx, &hub, &policy)
+        .await
+        .expect("执行失败");
+
+    let done = hub.get_typechange(&job.job_id).await.unwrap();
+    assert_eq!(
+        done.status,
+        MigrationStatus::Completed,
+        "notes={:?} err={:?}",
+        done.notes,
+        done.last_error
+    );
+    assert_eq!(done.fk_plan.len(), 1, "必须编排一个外键");
+    let entry = &done.fk_plan[0];
+    assert_eq!(entry.constraint, "children_parent_id_fkey");
+    assert!(entry.dropped && entry.altered && entry.recreated && entry.validated);
+    // 双端同型、数据与约束都在。
+    assert_eq!(column_type(&pool, "parents", "id").await, "bigint");
+    assert_eq!(column_type(&pool, "children", "parent_id").await, "bigint");
+    assert_eq!(row_count(&pool, "parents").await, 2);
+    assert_eq!(row_count(&pool, "children").await, 2);
+    assert!(
+        fk_validated(&pool, "children", "children_parent_id_fkey").await,
+        "外键必须以 VALIDATE 收尾（convalidated=true）"
+    );
+
+    cleanup_database(&admin, &db).await;
+}
+
+/// 分区父表改类型：单语句级联全部分区。
+/// 依据 specs/pg-field-governance-s5/spec.md §7.4。
+#[tokio::test]
+async fn partitioned_table_typechange() {
+    let Some(base_url) = env_url() else { return };
+    let (db, admin) = isolated_database(&base_url, "it_tc_part").await;
+    let url = with_database(&base_url, &db);
+    let pool = PgPool::connect(&url).await.expect("连接失败");
+    exec(
+        &pool,
+        "CREATE TABLE parted (id integer NOT NULL, note text, PRIMARY KEY (id)) \
+         PARTITION BY RANGE (id)",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE parted_p1 PARTITION OF parted FOR VALUES FROM (0) TO (800)",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE parted_p2 PARTITION OF parted FOR VALUES FROM (800) TO (2000)",
+    )
+    .await;
+    exec(
+        &pool,
+        "INSERT INTO parted SELECT g, 'n' || g FROM generate_series(1, 1500) g",
+    )
+    .await;
+
+    let ctx = ctx_for(&url, &db).await;
+    let hub = MigrationHub::new(None);
+    let policy = OpsPolicy::default();
+
+    // 非分区键列（note）走单语句级联：父表与两个分区同步改型。
+    let job = new_job(&ctx, &hub, "parted", "note", "varchar(200)", true).await;
+    pg_typechange::run_job(&job.job_id, &ctx, &hub, &policy)
+        .await
+        .expect("执行失败");
+    let done = hub.get_typechange(&job.job_id).await.unwrap();
+    assert_eq!(
+        done.status,
+        MigrationStatus::Completed,
+        "notes={:?} err={:?}",
+        done.notes,
+        done.last_error
+    );
+    assert_eq!(
+        column_type(&pool, "parted", "note").await,
+        "character varying(200)"
+    );
+    assert_eq!(
+        column_type(&pool, "parted_p1", "note").await,
+        "character varying(200)"
+    );
+    assert_eq!(
+        column_type(&pool, "parted_p2", "note").await,
+        "character varying(200)"
+    );
+    assert_eq!(row_count(&pool, "parted").await, 1_500);
+    assert!(done.verify.indexes_valid, "分区索引必须全部有效");
+
+    // 分区键列（id）PG 硬禁止改类型：必须挡在 preflight，不进入 Applying。
+    // 依据：实测 `cannot alter column "id" because it is part of the partition key`。
+    let blocked = new_job(&ctx, &hub, "parted", "id", "bigint", true).await;
+    pg_typechange::run_job(&blocked.job_id, &ctx, &hub, &policy)
+        .await
+        .expect("执行失败");
+    expect_blocked(&hub, &blocked.job_id, "preflight:partition_key").await;
+    assert_eq!(column_type(&pool, "parted", "id").await, "integer");
+    assert_eq!(row_count(&pool, "parted").await, 1_500);
+    assert!(pkey_valid(&pool, "parted").await);
+
+    cleanup_database(&admin, &db).await;
+}
+
+/// 对端声明与实际 FK 不匹配：有声明也不能放行，必须逐个 FK 覆盖。
+/// 依据 specs/pg-field-governance-s5/spec.md §9（显式对端编排的前置条件）。
+#[tokio::test]
+async fn fk_counterparts_mismatch_blocks() {
+    let Some(base_url) = env_url() else { return };
+    let (db, admin) = isolated_database(&base_url, "it_tc_fkmm").await;
+    let url = with_database(&base_url, &db);
+    let pool = PgPool::connect(&url).await.expect("连接失败");
+    exec(
+        &pool,
+        "CREATE TABLE parents (id integer PRIMARY KEY, note text)",
+    )
+    .await;
+    exec(
+        &pool,
+        "CREATE TABLE children (id bigint PRIMARY KEY, \
+         parent_id integer REFERENCES parents(id))",
+    )
+    .await;
+
+    let ctx = ctx_for(&url, &db).await;
+    let hub = MigrationHub::new(None);
+    let policy = OpsPolicy::default();
+    // 声明的是 children.id（错的列），真实 FK 在 children.parent_id。
+    let job = new_job_ex(
+        &ctx,
+        &hub,
+        "parents",
+        "id",
+        "bigint",
+        true,
+        None,
+        vec![FkCounterpartSpec {
+            schema: Some("public".into()),
+            table: "children".into(),
+            column: "id".into(),
+        }],
+    )
+    .await;
+    pg_typechange::run_job(&job.job_id, &ctx, &hub, &policy)
+        .await
+        .expect("执行失败");
+
+    let blocked = expect_blocked(&hub, &job.job_id, "preflight:fk_counterparts_missing").await;
+    let message = blocked.last_error.unwrap_or_default();
+    assert!(
+        message.contains("children.parent_id"),
+        "错误信息需指出真实对端列: {message}"
+    );
+    // 双端类型都不能变。
+    assert_eq!(column_type(&pool, "parents", "id").await, "integer");
+    assert_eq!(column_type(&pool, "children", "parent_id").await, "integer");
 
     cleanup_database(&admin, &db).await;
 }

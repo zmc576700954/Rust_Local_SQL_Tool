@@ -32,8 +32,7 @@ use super::migration_store::{
 };
 use super::pg_scripts::value_expr;
 use super::pg_verify::{
-    self, bind_value, cast_clause, fetch_on_pool, order_expr, push_range, PgBind,
-    VALIDATION_MODE_SNAPSHOT,
+    self, bind_value, cast_clause, fetch_on_pool, PgBind, VALIDATION_MODE_SNAPSHOT,
 };
 use super::types::ColumnProfile;
 use crate::ops::pg_rows::{convert_pg_rows, fetch_rows};
@@ -178,24 +177,44 @@ pub(crate) async fn run_inner(
         )
         .await;
     }
-    let pk_column = source_snapshot
-        .find_column(&spec.pk_column)
-        .ok_or_else(|| OpsError::Validation(format!("源表缺少主键列 {}", spec.pk_column)))?;
-    let pk_kind = pk_kind_from_column_type(&pk_column.column_type);
-    let pk_kind = match pk_kind {
-        Ok(kind) => kind,
-        Err(err) => {
-            return block_message(ctx, hub, job_id, &err.to_string(), "preflight:pk_type").await
+    // 复合主键（S5）：`pk_columns` 非空时逐列确定类型；单列沿用 `pk_column`。
+    let pk_columns = pg_verify::pk_columns_of(&spec);
+    let mut pk_kinds = Vec::with_capacity(pk_columns.len());
+    for column in &pk_columns {
+        let Some(snapshot_column) = source_snapshot.find_column(column) else {
+            return block_message(
+                ctx,
+                hub,
+                job_id,
+                &format!("源表缺少主键列 {column}"),
+                "preflight",
+            )
+            .await;
+        };
+        match pk_kind_from_column_type(&snapshot_column.column_type) {
+            Ok(kind) => pk_kinds.push(kind),
+            Err(err) => {
+                return block_message(ctx, hub, job_id, &err.to_string(), "preflight:pk_type").await
+            }
         }
-    };
+    }
+    let pk_kind = pk_kinds
+        .first()
+        .copied()
+        .ok_or_else(|| OpsError::Validation("缺少主键列，无法回填".into()))?;
     if let Some(checkpoint) = job.checkpoint.as_ref() {
-        if let Some(previous) = checkpoint.pk_kind {
-            if previous != pk_kind {
+        let previous = if checkpoint.pk_kinds.is_empty() {
+            checkpoint.pk_kind.map(|kind| vec![kind])
+        } else {
+            Some(checkpoint.pk_kinds.clone())
+        };
+        if let Some(previous) = previous {
+            if previous != pk_kinds {
                 return block_message(
                     ctx,
                     hub,
                     job_id,
-                    &format!("checkpoint 主键类型为 {previous:?}，当前为 {pk_kind:?}，拒绝续跑"),
+                    &format!("checkpoint 主键类型为 {previous:?}，当前为 {pk_kinds:?}，拒绝续跑"),
                     "preflight:pk_kind_mismatch",
                 )
                 .await;
@@ -203,20 +222,30 @@ pub(crate) async fn run_inner(
         }
     }
     job = hub
-        .update(job_id, |job| job.spec.pk_kind = Some(pk_kind))
+        .update(job_id, |job| {
+            job.spec.pk_kind = Some(pk_kind);
+            if pk_kinds.len() > 1 {
+                job.spec.pk_kinds = pk_kinds.clone();
+            }
+        })
         .await?;
     spec.pk_kind = Some(pk_kind);
-    if pk_kind == PkKind::Text
-        && !pk_collation_deterministic(ctx, &schema, &spec.source_table, &spec.pk_column).await?
-    {
-        return block_message(
-            ctx,
-            hub,
-            job_id,
-            "主键使用非确定性排序规则，禁止按 COLLATE \"C\" 分页",
-            "preflight:pk_collation",
-        )
-        .await;
+    if pk_kinds.len() > 1 {
+        spec.pk_kinds = pk_kinds.clone();
+    }
+    for (column, kind) in pk_columns.iter().zip(&pk_kinds) {
+        if *kind == PkKind::Text
+            && !pk_collation_deterministic(ctx, &schema, &spec.source_table, column).await?
+        {
+            return block_message(
+                ctx,
+                hub,
+                job_id,
+                &format!("主键列 {column} 使用非确定性排序规则，禁止按 COLLATE \"C\" 分页"),
+                "preflight:pk_collation",
+            )
+            .await;
+        }
     }
 
     // ── 目标表（只允许 CREATE） ───────────────────────────
@@ -285,19 +314,56 @@ pub(crate) async fn run_inner(
         }
     }
 
-    // ON CONFLICT 目标索引预检。
-    if !has_on_conflict_target(ctx, &schema, &spec.target_table, &spec.pk_column).await? {
+    // 分区表（S5）：源分区表经父表 keyset 分页透明；目标分区表 PG 全版本不支持
+    // `ON CONFLICT DO UPDATE`，维持阻断并给手工路径。
+    let target_relkind = relation_kind(ctx, &schema, &spec.target_table).await?;
+    if target_relkind.as_deref() == Some("p") {
         return block_message(
             ctx,
             hub,
             job_id,
             &format!(
-                "目标表 {} 没有可用于 ON CONFLICT ({}) 的单列主键或唯一索引",
-                spec.target_table, spec.pk_column
+                "目标表 {} 是分区表：PostgreSQL 不支持分区表 ON CONFLICT DO UPDATE，\
+                 无法复用分批回填；请按分区逐个子表执行 INSERT ... SELECT ... ON CONFLICT，\
+                 或改用 S1 脚本",
+                spec.target_table
+            ),
+            "preflight:partitioned_target",
+        )
+        .await;
+    }
+
+    // ON CONFLICT 目标索引预检（S5：接受部分唯一索引，表达式索引仍不支持）。
+    let Some(conflict_target) =
+        on_conflict_target(ctx, &schema, &spec.target_table, &pk_columns).await?
+    else {
+        return block_message(
+            ctx,
+            hub,
+            job_id,
+            &format!(
+                "目标表 {} 没有可用于 ON CONFLICT ({}) 的唯一索引（表达式唯一索引不支持）",
+                spec.target_table,
+                pk_columns.join(", ")
             ),
             "preflight:on_conflict_target",
         )
         .await;
+    };
+    if let Some(predicate) = conflict_target.predicate.clone() {
+        // 部分唯一索引的残余风险写审计（MigrationJob 没有 notes 字段）。
+        let _ = append_audit(
+            ctx,
+            "field_migration.backfill.on_conflict_partial",
+            "warn",
+            &job,
+            json!({
+                "job_id": job_id,
+                "target_table": spec.target_table,
+                "predicate": predicate,
+                "note": "ON CONFLICT 使用部分唯一索引：谓词外的行不参与冲突处理，重复主键由批后 V1/V2 校验拦截",
+            }),
+        );
     }
 
     // 目标表已存在且非空、又不是本任务创建的，拒绝覆盖。
@@ -364,11 +430,14 @@ pub(crate) async fn run_inner(
         .as_ref()
         .map(|checkpoint| checkpoint.completed_batches)
         .unwrap_or(0);
-    let checkpoint_pk = job
-        .checkpoint
-        .as_ref()
-        .and_then(|checkpoint| checkpoint.last_pk.clone());
-    if completed_batches > 0 && checkpoint_pk.is_none() {
+    // 复合主键优先读 `last_pks`；旧 checkpoint（单列）回退到 `last_pk`。
+    let checkpoint_key: Option<Vec<String>> = job.checkpoint.as_ref().and_then(|checkpoint| {
+        checkpoint
+            .last_pks
+            .clone()
+            .or_else(|| checkpoint.last_pk.clone().map(|value| vec![value]))
+    });
+    if completed_batches > 0 && checkpoint_key.is_none() {
         return block_message(
             ctx,
             hub,
@@ -377,6 +446,22 @@ pub(crate) async fn run_inner(
             "preflight:checkpoint_invalid",
         )
         .await;
+    }
+    if let Some(key) = checkpoint_key.as_ref() {
+        if key.len() != pk_columns.len() {
+            return block_message(
+                ctx,
+                hub,
+                job_id,
+                &format!(
+                    "checkpoint 边界主键有 {} 列，任务主键有 {} 列，拒绝续跑",
+                    key.len(),
+                    pk_columns.len()
+                ),
+                "preflight:checkpoint_invalid",
+            )
+            .await;
+        }
     }
 
     // 续跑只读抽检最后一批。
@@ -387,19 +472,23 @@ pub(crate) async fn run_inner(
             .find(|record| record.batch_no == completed_batches)
             .cloned()
         {
-            let spot = pg_verify::verify_range(
-                ctx,
-                &spec,
-                record.last_pk.as_deref(),
-                Some(&record.end_pk),
-            )
-            .await?;
+            let record_last: Option<Vec<String>> = record
+                .last_pks
+                .clone()
+                .or_else(|| record.last_pk.clone().map(|value| vec![value]));
+            let record_end: Vec<String> = record
+                .end_pks
+                .clone()
+                .unwrap_or_else(|| vec![record.end_pk.clone()]);
+            let spot =
+                pg_verify::verify_range(ctx, &spec, record_last.as_deref(), Some(&record_end))
+                    .await?;
             if !spot.passed() {
                 let diffs = collect_range_diffs(
                     ctx,
                     &spec,
-                    record.last_pk.as_deref(),
-                    &record.end_pk,
+                    record_last.as_deref(),
+                    Some(&record_end),
                     &spot,
                     false,
                 )
@@ -427,7 +516,7 @@ pub(crate) async fn run_inner(
         .map(|checkpoint| checkpoint.written_rows)
         .unwrap_or(0);
     let mut batch_index: u64 = completed_batches;
-    let mut last_pk: Option<String> = checkpoint_pk;
+    let mut last_key: Option<Vec<String>> = checkpoint_key;
     let batch_size = job.config.batch_size;
 
     if job.config.single_transaction {
@@ -444,13 +533,15 @@ pub(crate) async fn run_inner(
             hub,
             job_id,
             &spec,
+            &pk_columns,
+            &conflict_target,
             &source,
             &destination,
             policy,
             batch_size,
             success_rows,
             &mut batch_index,
-            &mut last_pk,
+            &mut last_key,
             Some(&mut conn),
         )
         .await;
@@ -462,17 +553,28 @@ pub(crate) async fn run_inner(
                     return Ok(());
                 }
                 sqlx::query("COMMIT").execute(&mut *conn).await?;
-                let checkpoint_rows = last_pk.clone();
+                let checkpoint_key = last_key.clone();
+                let checkpoint_display = checkpoint_key
+                    .as_ref()
+                    .map(|values| pg_verify::format_key(&pk_columns, values));
                 job = hub
                     .update(job_id, |job| {
                         let checkpoint = job
                             .checkpoint
                             .get_or_insert_with(|| empty_checkpoint(&target_hash, pk_kind));
                         checkpoint.completed_batches = batch_index;
-                        checkpoint.last_pk = checkpoint_rows.clone();
+                        checkpoint.last_pk = checkpoint_display.clone();
+                        checkpoint.last_pks = if pk_columns.len() > 1 {
+                            checkpoint_key.clone()
+                        } else {
+                            None
+                        };
                         checkpoint.written_rows = final_rows;
                         checkpoint.engine = ENGINE.to_string();
                         checkpoint.pk_kind = Some(pk_kind);
+                        if pk_columns.len() > 1 {
+                            checkpoint.pk_kinds = pk_kinds.clone();
+                        }
                         checkpoint.target_fingerprint = Some(target_hash.clone());
                         checkpoint.updated_at = now();
                     })
@@ -500,13 +602,15 @@ pub(crate) async fn run_inner(
             hub,
             job_id,
             &spec,
+            &pk_columns,
+            &conflict_target,
             &source,
             &destination,
             policy,
             batch_size,
             success_rows,
             &mut batch_index,
-            &mut last_pk,
+            &mut last_key,
             None,
         )
         .await?;
@@ -520,6 +624,9 @@ pub(crate) async fn run_inner(
     job = hub
         .update(job_id, |job| job.phase = MigrationPhase::Verifying)
         .await?;
+    let last_display = last_key
+        .as_ref()
+        .map(|values| pg_verify::format_key(&pk_columns, values));
     let final_verify = pg_verify::verify_full(ctx, &spec).await?;
     if !final_verify.passed() {
         let diffs = collect_full_diffs(ctx, &spec, &final_verify).await?;
@@ -545,7 +652,7 @@ pub(crate) async fn run_inner(
                     hub,
                     job_id,
                     job.progress.total_batches.max(batch_index),
-                    last_pk.clone(),
+                    last_display.clone(),
                     None,
                     "final",
                     final_verify,
@@ -577,9 +684,15 @@ pub(crate) async fn run_inner(
             checkpoint.updated_at = now();
             checkpoint.engine = ENGINE.to_string();
             checkpoint.pk_kind = Some(pk_kind);
+            if pk_columns.len() > 1 {
+                checkpoint.pk_kinds = pk_kinds.clone();
+                if checkpoint.last_pks.is_none() {
+                    checkpoint.last_pks = last_key.clone();
+                }
+            }
             checkpoint.target_fingerprint = Some(target_hash.clone());
             if checkpoint.last_pk.is_none() {
-                checkpoint.last_pk = last_pk.clone();
+                checkpoint.last_pk = last_display.clone();
             }
         })
         .await?;
@@ -604,11 +717,13 @@ fn empty_checkpoint(target_hash: &str, pk_kind: PkKind) -> Checkpoint {
     Checkpoint {
         completed_batches: 0,
         last_pk: None,
+        last_pks: None,
         written_rows: 0,
         verified: false,
         verify: None,
         engine: ENGINE.to_string(),
         pk_kind: Some(pk_kind),
+        pk_kinds: Vec::new(),
         target_fingerprint: Some(target_hash.to_string()),
         updated_at: now(),
     }
@@ -622,18 +737,23 @@ async fn run_loop(
     hub: &MigrationHub,
     job_id: &str,
     spec: &BackfillSpec,
+    pk_columns: &[String],
+    conflict: &ConflictTarget,
     source: &str,
     destination: &str,
     policy: &OpsPolicy,
     batch_size: u64,
     mut success_rows: u64,
     batch_index: &mut u64,
-    last_pk: &mut Option<String>,
+    last_key: &mut Option<Vec<String>>,
     mut single_conn: Option<&mut PoolConnection<sqlx::Postgres>>,
 ) -> Result<u64, OpsError> {
-    let kind = spec
-        .pk_kind
+    let kinds = pg_verify::pk_kinds_of(spec)?;
+    let kind = kinds
+        .first()
+        .copied()
         .ok_or_else(|| OpsError::Validation("缺少主键类型，无法回填".into()))?;
+    let composite = pk_columns.len() > 1;
     let job = hub.get(job_id).await?;
     let single = single_conn.is_some();
     let target_fingerprint = job.target_schema_hash.clone();
@@ -659,38 +779,44 @@ async fn run_loop(
             return Ok(success_rows);
         }
 
-        let pks = fetch_pk_page(ctx, spec, source, last_pk.as_deref(), batch_size).await?;
-        if pks.is_empty() {
+        let keys = fetch_pk_page(ctx, spec, source, last_key.as_deref(), batch_size).await?;
+        if keys.is_empty() {
             break;
         }
         let batch_no = *batch_index + 1;
-        let first_pk = pks.first().cloned().unwrap_or_default();
-        let end_pk = pks.last().cloned().unwrap_or_default();
-        let source_rows = pks.len() as u64;
+        let first_key = keys.first().cloned().unwrap_or_default();
+        let end_key = keys.last().cloned().unwrap_or_default();
+        let first_display = pg_verify::format_key(pk_columns, &first_key);
+        let end_display = pg_verify::format_key(pk_columns, &end_key);
+        let last_display = last_key
+            .as_ref()
+            .map(|values| pg_verify::format_key(pk_columns, values));
+        let source_rows = keys.len() as u64;
         let started = Instant::now();
 
         hub.update(job_id, |job| {
             job.progress.current_batch = batch_no;
-            job.progress.current_first_pk = Some(first_pk.clone());
-            job.progress.last_pk = last_pk.clone();
+            job.progress.current_first_pk = Some(first_display.clone());
+            job.progress.last_pk = last_display.clone();
         })
         .await?;
 
         let pre = if let Some(conn) = single_conn.as_deref_mut() {
-            pg_verify::run_verify(conn, spec, last_pk.as_deref(), Some(&end_pk)).await?
+            pg_verify::run_verify(conn, spec, last_key.as_deref(), Some(&end_key)).await?
         } else {
-            pg_verify::verify_range(ctx, spec, last_pk.as_deref(), Some(&end_pk)).await?
+            pg_verify::verify_range(ctx, spec, last_key.as_deref(), Some(&end_key)).await?
         };
         if pre.v3 > 0 || pre.v4 > 0 {
             let diffs =
-                collect_range_diffs(ctx, spec, last_pk.as_deref(), &end_pk, &pre, true).await?;
+                collect_range_diffs(ctx, spec, last_key.as_deref(), Some(&end_key), &pre, true)
+                    .await?;
             block_on_verify(
                 ctx,
                 hub,
                 job_id,
                 batch_no,
-                last_pk.clone(),
-                Some(end_pk.clone()),
+                last_display.clone(),
+                Some(end_display.clone()),
                 "precheck",
                 pre,
                 diffs,
@@ -708,10 +834,11 @@ async fn run_loop(
                     hub,
                     job_id,
                     spec,
+                    conflict,
                     source,
                     destination,
-                    last_pk.as_deref(),
-                    &end_pk,
+                    last_key.as_deref(),
+                    &end_key,
                     source_rows,
                     batch_no,
                     success_rows,
@@ -724,10 +851,11 @@ async fn run_loop(
                     hub,
                     job_id,
                     spec,
+                    conflict,
                     source,
                     destination,
-                    last_pk.as_deref(),
-                    &end_pk,
+                    last_key.as_deref(),
+                    &end_key,
                     source_rows,
                     batch_no,
                     success_rows,
@@ -741,20 +869,27 @@ async fn run_loop(
         }
 
         let verify = if let Some(conn) = single_conn.as_deref_mut() {
-            pg_verify::run_verify(conn, spec, last_pk.as_deref(), Some(&end_pk)).await?
+            pg_verify::run_verify(conn, spec, last_key.as_deref(), Some(&end_key)).await?
         } else {
-            pg_verify::verify_range(ctx, spec, last_pk.as_deref(), Some(&end_pk)).await?
+            pg_verify::verify_range(ctx, spec, last_key.as_deref(), Some(&end_key)).await?
         };
         if !verify.passed() {
-            let diffs =
-                collect_range_diffs(ctx, spec, last_pk.as_deref(), &end_pk, &verify, false).await?;
+            let diffs = collect_range_diffs(
+                ctx,
+                spec,
+                last_key.as_deref(),
+                Some(&end_key),
+                &verify,
+                false,
+            )
+            .await?;
             block_on_verify(
                 ctx,
                 hub,
                 job_id,
                 batch_no,
-                last_pk.clone(),
-                Some(end_pk.clone()),
+                last_display.clone(),
+                Some(end_display.clone()),
                 "postcheck",
                 verify,
                 diffs,
@@ -774,7 +909,7 @@ async fn run_loop(
             json!({
                 "job_id": job_id,
                 "batch_no": batch_no,
-                "range": { "last_pk": last_pk, "end_pk": end_pk },
+                "range": { "last_pk": last_display, "end_pk": end_display },
                 "written_rows": written_rows,
                 "source_rows": source_rows,
                 "verify": &verify,
@@ -785,18 +920,23 @@ async fn run_loop(
 
         // 单事务模式在 COMMIT 前不推进 checkpoint；失败由整体回滚兜底。
         if !single {
-            let end_for_checkpoint = end_pk.clone();
+            let end_for_checkpoint = end_display.clone();
+            let end_keys_for_checkpoint = composite.then(|| end_key.clone());
+            let kinds_for_checkpoint = composite.then(|| kinds.clone());
             let verify_for_checkpoint = verify.clone();
-            let last_for_record = last_pk.clone();
+            let last_for_record = last_display.clone();
+            let last_keys_for_record = if composite { last_key.clone() } else { None };
             hub.update(job_id, |job| {
                 job.checkpoint = Some(Checkpoint {
                     completed_batches: batch_no,
                     last_pk: Some(end_for_checkpoint.clone()),
+                    last_pks: end_keys_for_checkpoint.clone(),
                     written_rows: success_rows,
                     verified: true,
                     verify: Some(verify_for_checkpoint.clone()),
                     engine: ENGINE.to_string(),
                     pk_kind: Some(kind),
+                    pk_kinds: kinds_for_checkpoint.clone().unwrap_or_default(),
                     target_fingerprint: Some(target_fingerprint.clone()),
                     updated_at: now(),
                 });
@@ -812,7 +952,9 @@ async fn run_loop(
                     BatchRecord {
                         batch_no,
                         last_pk: last_for_record,
+                        last_pks: last_keys_for_record,
                         end_pk: end_for_checkpoint,
+                        end_pks: end_keys_for_checkpoint,
                         source_rows,
                         written_rows,
                         verified: true,
@@ -829,14 +971,14 @@ async fn run_loop(
                 job.progress.processed_rows = success_rows;
                 job.progress.remaining_rows = job.expected_rows.saturating_sub(success_rows);
                 job.progress.current_batch = batch_no;
-                job.progress.last_pk = Some(end_pk.clone());
+                job.progress.last_pk = Some(end_display.clone());
                 job.progress.connection_id = None;
             })
             .await?;
         }
 
         *batch_index += 1;
-        *last_pk = Some(end_pk);
+        *last_key = Some(end_key);
     }
 
     Ok(success_rows)
@@ -850,10 +992,11 @@ async fn execute_batch_in_tx(
     hub: &MigrationHub,
     job_id: &str,
     spec: &BackfillSpec,
+    conflict: &ConflictTarget,
     source: &str,
     destination: &str,
-    last_pk: Option<&str>,
-    end_pk: &str,
+    last_key: Option<&[String]>,
+    end_key: &[String],
     rows: u64,
     batch_no: u64,
     committed_rows: u64,
@@ -865,22 +1008,26 @@ async fn execute_batch_in_tx(
     let result = execute_in_transaction(
         &mut conn,
         spec,
+        conflict,
         source,
         destination,
-        last_pk,
-        end_pk,
+        last_key,
+        end_key,
         rows,
         policy,
     )
     .await;
     hub.update(job_id, |job| job.progress.connection_id = None)
         .await?;
+    let columns = pg_verify::pk_columns_of(spec);
+    let range_start = last_key
+        .map(|values| pg_verify::format_key(&columns, values))
+        .unwrap_or_else(|| "<start>".to_string());
+    let range_end = pg_verify::format_key(&columns, end_key);
     match result {
         Ok(()) => Ok(()),
         Err(err) => Err(OpsError::Validation(format!(
-            "批次 {batch_no} 失败（rollback_scope=batch）：范围 ({}, {}]，已提交 {committed_rows} 行；{err}",
-            last_pk.unwrap_or("<start>"),
-            end_pk
+            "批次 {batch_no} 失败（rollback_scope=batch）：范围 ({range_start}, {range_end}]，已提交 {committed_rows} 行；{err}"
         ))),
     }
 }
@@ -888,10 +1035,11 @@ async fn execute_batch_in_tx(
 async fn execute_in_transaction(
     conn: &mut PgConnection,
     spec: &BackfillSpec,
+    conflict: &ConflictTarget,
     source: &str,
     destination: &str,
-    last_pk: Option<&str>,
-    end_pk: &str,
+    last_key: Option<&[String]>,
+    end_key: &[String],
     rows: u64,
     policy: &OpsPolicy,
 ) -> Result<(), OpsError> {
@@ -899,7 +1047,18 @@ async fn execute_in_transaction(
     for statement in pg_timeout_statements(policy) {
         sqlx::query(&statement).execute(&mut *tx).await?;
     }
-    match run_insert(&mut tx, spec, source, destination, last_pk, end_pk, rows).await {
+    match run_insert(
+        &mut tx,
+        spec,
+        conflict,
+        source,
+        destination,
+        last_key,
+        end_key,
+        rows,
+    )
+    .await
+    {
         Ok(()) => {
             tx.commit().await?;
             Ok(())
@@ -916,25 +1075,31 @@ async fn execute_batch_on_conn(
     hub: &MigrationHub,
     job_id: &str,
     spec: &BackfillSpec,
+    conflict: &ConflictTarget,
     source: &str,
     destination: &str,
-    last_pk: Option<&str>,
-    end_pk: &str,
+    last_key: Option<&[String]>,
+    end_key: &[String],
     rows: u64,
     batch_no: u64,
     committed_rows: u64,
     conn: &mut PgConnection,
 ) -> Result<(), OpsError> {
     set_connection_id(hub, job_id, conn).await?;
-    run_insert(conn, spec, source, destination, last_pk, end_pk, rows)
-        .await
-        .map_err(|err| {
-            OpsError::Validation(format!(
-                "批次 {batch_no} 失败（rollback_scope=job）：范围 ({}, {}]，本事务回滚，之前 {committed_rows} 行未提交；{err}",
-                last_pk.unwrap_or("<start>"),
-                end_pk
-            ))
-        })
+    run_insert(
+        conn, spec, conflict, source, destination, last_key, end_key, rows,
+    )
+    .await
+    .map_err(|err| {
+        let columns = pg_verify::pk_columns_of(spec);
+        let range_start = last_key
+            .map(|values| pg_verify::format_key(&columns, values))
+            .unwrap_or_else(|| "<start>".to_string());
+        let range_end = pg_verify::format_key(&columns, end_key);
+        OpsError::Validation(format!(
+            "批次 {batch_no} 失败（rollback_scope=job）：范围 ({range_start}, {range_end}]，本事务回滚，之前 {committed_rows} 行未提交；{err}"
+        ))
+    })
 }
 
 async fn set_connection_id(
@@ -950,24 +1115,28 @@ async fn set_connection_id(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_insert(
     conn: &mut PgConnection,
     spec: &BackfillSpec,
+    conflict: &ConflictTarget,
     source: &str,
     destination: &str,
-    last_pk: Option<&str>,
-    end_pk: &str,
+    last_key: Option<&[String]>,
+    end_key: &[String],
     rows: u64,
 ) -> Result<(), OpsError> {
-    let kind = spec
-        .pk_kind
-        .ok_or_else(|| OpsError::Validation("缺少主键类型，无法回填".into()))?;
-    let (sql, expected) = batch_sql_parts(spec, source, destination, last_pk.is_some())?;
+    let kinds = pg_verify::pk_kinds_of(spec)?;
+    let (sql, expected) = batch_sql_parts(spec, conflict, source, destination, last_key.is_some())?;
     let mut binds = Vec::new();
-    if let Some(value) = last_pk {
-        binds.push(bind_value(kind, value)?);
+    if let Some(values) = last_key {
+        for (kind, value) in kinds.iter().zip(values) {
+            binds.push(bind_value(*kind, value)?);
+        }
     }
-    binds.push(bind_value(kind, end_pk)?);
+    for (kind, value) in kinds.iter().zip(end_key) {
+        binds.push(bind_value(*kind, value)?);
+    }
     binds.push(PgBind::Int(rows.max(1) as i64));
     if binds.len() != expected {
         return Err(OpsError::Validation("回填绑定参数数量不一致".into()));
@@ -985,30 +1154,48 @@ pub fn build_batch_sql(
     destination: &str,
     has_last: bool,
 ) -> Result<String, OpsError> {
-    batch_sql_parts(spec, source, destination, has_last).map(|(sql, _)| sql)
+    let conflict = ConflictTarget {
+        columns: pg_verify::pk_columns_of(spec),
+        predicate: None,
+    };
+    batch_sql_parts(spec, &conflict, source, destination, has_last).map(|(sql, _)| sql)
+}
+
+fn tuple_placeholders(kinds: &[PkKind], bind_count: &mut usize) -> String {
+    kinds
+        .iter()
+        .map(|kind| {
+            *bind_count += 1;
+            cast_clause(*kind, *bind_count)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn batch_sql_parts(
     spec: &BackfillSpec,
+    conflict: &ConflictTarget,
     source: &str,
     destination: &str,
     has_last: bool,
 ) -> Result<(String, usize), OpsError> {
-    let kind = spec
-        .pk_kind
-        .ok_or_else(|| OpsError::Validation("缺少主键类型，无法生成回填语句".into()))?;
+    let kinds = pg_verify::pk_kinds_of(spec)?;
     if spec.target_columns.is_empty() {
         return Err(OpsError::Validation("缺少目标列，无法生成回填语句".into()));
     }
-    let pk = quote_ident_pg(&spec.pk_column);
+    let pk_columns = pg_verify::pk_columns_of(spec);
+    let pk_quoted = pk_columns
+        .iter()
+        .map(|column| quote_ident_pg(column))
+        .collect::<Vec<_>>();
     let profile = ColumnProfile {
         data_type: spec.source_data_type.clone(),
         column_type: spec.source_data_type.clone(),
         ..Default::default()
     };
     let source_column = quote_ident_pg(&spec.source_column);
-    let mut columns = vec![pk.clone()];
-    let mut values = vec![pk.clone()];
+    let mut columns = pk_quoted.clone();
+    let mut values = pk_quoted.clone();
     for column in &spec.target_columns {
         columns.push(quote_ident_pg(&column.name));
         values.push(value_expr(
@@ -1034,16 +1221,57 @@ fn batch_sql_parts(
         values.join(", ")
     );
     let mut bind_count = 0usize;
+    let single = pk_quoted.len() == 1;
     if has_last {
-        bind_count += 1;
-        sql.push_str(&format!(" AND {pk} > {}", cast_clause(kind, bind_count)));
+        if single {
+            bind_count += 1;
+            sql.push_str(&format!(
+                " AND {} > {}",
+                pk_quoted[0],
+                cast_clause(kinds[0], bind_count)
+            ));
+        } else {
+            let tuple = tuple_placeholders(&kinds, &mut bind_count);
+            sql.push_str(&format!(
+                " AND {} > ({tuple})",
+                pg_verify::row_expr(&pk_quoted, &kinds)
+            ));
+        }
     }
-    bind_count += 1;
-    sql.push_str(&format!(" AND {pk} <= {}", cast_clause(kind, bind_count)));
-    sql.push_str(&format!(" ORDER BY {}", order_expr(&pk, kind)));
+    if single {
+        bind_count += 1;
+        sql.push_str(&format!(
+            " AND {} <= {}",
+            pk_quoted[0],
+            cast_clause(kinds[0], bind_count)
+        ));
+    } else {
+        let tuple = tuple_placeholders(&kinds, &mut bind_count);
+        sql.push_str(&format!(
+            " AND {} <= ({tuple})",
+            pg_verify::row_expr(&pk_quoted, &kinds)
+        ));
+    }
+    sql.push_str(&format!(
+        " ORDER BY {}",
+        pg_verify::order_key(&pk_quoted, &kinds)
+    ));
     bind_count += 1;
     sql.push_str(&format!(" LIMIT ${bind_count}"));
-    sql.push_str(&format!(" ON CONFLICT ({pk}) DO UPDATE SET {updates}"));
+    let conflict_columns = conflict
+        .columns
+        .iter()
+        .map(|column| quote_ident_pg(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match conflict.predicate.as_deref() {
+        Some(predicate) => sql.push_str(&format!(
+            " ON CONFLICT ({conflict_columns}) WHERE {predicate} DO UPDATE SET {updates}"
+        )),
+        None => sql.push_str(&format!(
+            " ON CONFLICT ({conflict_columns}) DO UPDATE SET {updates}"
+        )),
+    }
     Ok((sql, bind_count))
 }
 
@@ -1053,44 +1281,67 @@ async fn count_rows(
     ctx: &OpsContext,
     spec: &BackfillSpec,
     table: &str,
-    last_pk: Option<&str>,
-    end_pk: Option<&str>,
+    last_key: Option<&[String]>,
+    end_key: Option<&[String]>,
 ) -> Result<u64, OpsError> {
-    let kind = spec
-        .pk_kind
-        .ok_or_else(|| OpsError::Validation("缺少主键类型，无法计数".into()))?;
-    let pk = quote_ident_pg(&spec.pk_column);
+    let columns = pg_verify::pk_columns_of(spec);
+    let kinds = pg_verify::pk_kinds_of(spec)?;
+    let refs: Vec<String> = columns
+        .iter()
+        .map(|column| quote_ident_pg(column))
+        .collect();
     let mut binds = Vec::new();
     let mut sql = format!("SELECT COUNT(*) AS count FROM {table} WHERE TRUE");
-    push_range(&mut sql, &pk, kind, last_pk, end_pk, &mut binds)?;
+    pg_verify::push_key_range(&mut sql, &refs, &kinds, last_key, end_key, &mut binds)?;
     let pool = ctx.db_client.pool.pg()?;
     let rows = fetch_on_pool(pool, &sql, &binds).await?;
     Ok(pg_verify::count_of(&rows, "count"))
+}
+
+/// keyset 分页取主键 tuple；返回按主键列顺序排列的值。
+async fn fetch_key_page(
+    ctx: &OpsContext,
+    spec: &BackfillSpec,
+    table: &str,
+    last_key: Option<&[String]>,
+    limit: u64,
+) -> Result<Vec<Vec<String>>, OpsError> {
+    let columns = pg_verify::pk_columns_of(spec);
+    let kinds = pg_verify::pk_kinds_of(spec)?;
+    let refs: Vec<String> = columns
+        .iter()
+        .map(|column| quote_ident_pg(column))
+        .collect();
+    let mut binds = Vec::new();
+    let mut sql = format!("SELECT {} FROM {table} WHERE TRUE", refs.join(", "));
+    pg_verify::push_key_range(&mut sql, &refs, &kinds, last_key, None, &mut binds)?;
+    sql.push_str(&format!(
+        " ORDER BY {}",
+        pg_verify::order_key(&refs, &kinds)
+    ));
+    binds.push(PgBind::Int(limit.max(1) as i64));
+    sql.push_str(&format!(" LIMIT ${}", binds.len()));
+    let pool = ctx.db_client.pool.pg()?;
+    let rows = fetch_on_pool(pool, &sql, &binds).await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            columns
+                .iter()
+                .map(|column| row.get(column).cloned().unwrap_or_default())
+                .collect()
+        })
+        .collect())
 }
 
 async fn fetch_pk_page(
     ctx: &OpsContext,
     spec: &BackfillSpec,
     source: &str,
-    last_pk: Option<&str>,
+    last_key: Option<&[String]>,
     batch_size: u64,
-) -> Result<Vec<String>, OpsError> {
-    let kind = spec
-        .pk_kind
-        .ok_or_else(|| OpsError::Validation("缺少主键类型，无法分页".into()))?;
-    let pk = quote_ident_pg(&spec.pk_column);
-    let mut binds = Vec::new();
-    let mut sql = format!("SELECT {pk} AS pk_value FROM {source} WHERE TRUE");
-    push_range(&mut sql, &pk, kind, last_pk, None, &mut binds)?;
-    sql.push_str(&format!(" ORDER BY {}", order_expr(&pk, kind)));
-    binds.push(PgBind::Int(batch_size.max(1) as i64));
-    sql.push_str(&format!(" LIMIT ${}", binds.len()));
-    let pool = ctx.db_client.pool.pg()?;
-    let rows = fetch_on_pool(pool, &sql, &binds).await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| row.get("pk_value").cloned())
-        .collect())
+) -> Result<Vec<Vec<String>>, OpsError> {
+    fetch_key_page(ctx, spec, source, last_key, batch_size).await
 }
 
 // ── 差异定位 ───────────────────────────────────────────────
@@ -1109,61 +1360,58 @@ async fn locate_first_failed_batch(
     )>,
     OpsError,
 > {
-    let mut last_pk: Option<String> = None;
+    let columns = pg_verify::pk_columns_of(spec);
+    let mut last_key: Option<Vec<String>> = None;
     let mut batch_no = 0u64;
     loop {
-        let pks = fetch_pk_page_with_limit(ctx, spec, last_pk.as_deref(), batch_size).await?;
-        if pks.is_empty() {
+        let keys = fetch_pk_page_with_limit(ctx, spec, last_key.as_deref(), batch_size).await?;
+        if keys.is_empty() {
             return Ok(None);
         }
         batch_no += 1;
-        let end_pk = pks.last().cloned().unwrap_or_default();
-        let verify = pg_verify::verify_range(ctx, spec, last_pk.as_deref(), Some(&end_pk)).await?;
+        let end_key = keys.last().cloned().unwrap_or_default();
+        let verify =
+            pg_verify::verify_range(ctx, spec, last_key.as_deref(), Some(&end_key)).await?;
         if !verify.passed() {
-            let diffs =
-                collect_range_diffs(ctx, spec, last_pk.as_deref(), &end_pk, &verify, false).await?;
+            let diffs = collect_range_diffs(
+                ctx,
+                spec,
+                last_key.as_deref(),
+                Some(&end_key),
+                &verify,
+                false,
+            )
+            .await?;
+            let last_display = last_key
+                .as_ref()
+                .map(|values| pg_verify::format_key(&columns, values));
             return Ok(Some((
                 batch_no,
-                last_pk.clone(),
-                Some(end_pk),
+                last_display,
+                Some(pg_verify::format_key(&columns, &end_key)),
                 verify,
                 diffs,
             )));
         }
-        last_pk = Some(end_pk);
+        last_key = Some(end_key);
     }
 }
 
 async fn fetch_pk_page_with_limit(
     ctx: &OpsContext,
     spec: &BackfillSpec,
-    last_pk: Option<&str>,
+    last_key: Option<&[String]>,
     limit: u64,
-) -> Result<Vec<String>, OpsError> {
-    let kind = spec
-        .pk_kind
-        .ok_or_else(|| OpsError::Validation("缺少主键类型，无法分页".into()))?;
-    let pk = quote_ident_pg(&spec.pk_column);
+) -> Result<Vec<Vec<String>>, OpsError> {
     let source = pg_verify::qualified(spec.schema.as_deref(), &spec.source_table);
-    let mut binds = Vec::new();
-    let mut sql = format!("SELECT {pk} AS pk_value FROM {source} WHERE TRUE");
-    push_range(&mut sql, &pk, kind, last_pk, None, &mut binds)?;
-    sql.push_str(&format!(" ORDER BY {}", order_expr(&pk, kind)));
-    binds.push(PgBind::Int(limit as i64));
-    sql.push_str(&format!(" LIMIT ${}", binds.len()));
-    let pool = ctx.db_client.pool.pg()?;
-    let rows = fetch_on_pool(pool, &sql, &binds).await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| row.get("pk_value").cloned())
-        .collect())
+    fetch_key_page(ctx, spec, &source, last_key, limit).await
 }
 
 async fn collect_range_diffs(
     ctx: &OpsContext,
     spec: &BackfillSpec,
-    last_pk: Option<&str>,
-    end_pk: &str,
+    last_key: Option<&[String]>,
+    end_key: Option<&[String]>,
     verify: &BatchVerify,
     precheck: bool,
 ) -> Result<Vec<DiffDetail>, OpsError> {
@@ -1186,8 +1434,8 @@ async fn collect_range_diffs(
             continue;
         }
         if count > 0 {
-            let pks = pg_verify::diff_page(ctx, spec, phase, last_pk, Some(end_pk), DIFF_PAGE_SIZE)
-                .await?;
+            let pks =
+                pg_verify::diff_page(ctx, spec, phase, last_key, end_key, DIFF_PAGE_SIZE).await?;
             diffs.push(DiffDetail {
                 phase: phase.into(),
                 total: count,
@@ -1285,30 +1533,101 @@ pub(crate) async fn pk_collation_deterministic(
         .unwrap_or(true))
 }
 
-/// 目标表必须存在单列主键或唯一索引，供 `ON CONFLICT (pk)` 使用。
-pub async fn has_on_conflict_target(
+/// `ON CONFLICT` 推断目标：键列 + 可选部分索引谓词。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictTarget {
+    pub columns: Vec<String>,
+    pub predicate: Option<String>,
+}
+
+/// 目标表必须存在唯一索引供 `ON CONFLICT (cols)` 使用。
+///
+/// S5：键列集合等于主键列（顺序无关，PG 推断不要求顺序）；表达式索引不参与推断；
+/// 非部分索引优先，只有部分索引时取其谓词作为推断条件。
+pub async fn on_conflict_target(
     ctx: &OpsContext,
     schema: &str,
     table: &str,
-    column: &str,
-) -> Result<bool, OpsError> {
+    columns: &[String],
+) -> Result<Option<ConflictTarget>, OpsError> {
     let qualified = pg_verify::qualified(Some(schema), table);
     let pool = ctx.db_client.pool.pg()?;
     let rows = sqlx::query(
-        "SELECT COUNT(*) AS count \
-         FROM pg_index i \
-         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] \
-         WHERE i.indrelid = to_regclass($1) \
-           AND i.indisunique AND i.indnkeyatts = 1 \
-           AND i.indpred IS NULL AND i.indexprs IS NULL \
-           AND a.attname = $2",
+        "SELECT ic.relname::text AS index_name, \
+                (ix.indpred IS NULL)::text AS full_index, \
+                pg_get_expr(ix.indpred, ix.indrelid)::text AS predicate, \
+                a.attname::text AS column_name, \
+                k.ord::text AS ord \
+         FROM pg_index ix \
+         JOIN pg_class ic ON ic.oid = ix.indexrelid \
+         JOIN generate_series(0, ix.indnkeyatts - 1) AS k(ord) ON true \
+         JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = ix.indkey[k.ord] \
+         WHERE ix.indrelid = to_regclass($1) \
+           AND ix.indisunique AND ix.indexprs IS NULL AND ix.indnkeyatts = $2 \
+         ORDER BY ic.relname, k.ord",
     )
     .bind(&qualified)
-    .bind(column)
+    .bind(columns.len() as i16)
     .fetch_all(pool)
     .await?;
     let rows = convert_pg_rows(&rows);
-    Ok(pg_verify::count_of(&rows, "count") > 0)
+    let mut candidates: Vec<(String, bool, Option<String>, Vec<String>)> = Vec::new();
+    for row in &rows {
+        let Some(name) = row.get("index_name").cloned() else {
+            continue;
+        };
+        let full = matches!(
+            row.get("full_index").map(String::as_str),
+            Some("true") | Some("t")
+        );
+        let predicate = row
+            .get("predicate")
+            .filter(|value| !value.trim().is_empty())
+            .cloned();
+        let column = row.get("column_name").cloned().unwrap_or_default();
+        match candidates.iter_mut().find(|(index, ..)| *index == name) {
+            Some((_, _, _, cols)) => cols.push(column),
+            None => candidates.push((name, full, predicate, vec![column])),
+        }
+    }
+    let wanted: std::collections::BTreeSet<&str> = columns.iter().map(String::as_str).collect();
+    let mut partial: Option<ConflictTarget> = None;
+    for (_, full, predicate, cols) in candidates {
+        let actual: std::collections::BTreeSet<&str> = cols.iter().map(String::as_str).collect();
+        if actual != wanted {
+            continue;
+        }
+        let target = ConflictTarget {
+            columns: columns.to_vec(),
+            predicate: if full { None } else { predicate },
+        };
+        if target.predicate.is_none() {
+            return Ok(Some(target));
+        }
+        if partial.is_none() {
+            partial = Some(target);
+        }
+    }
+    Ok(partial)
+}
+
+/// 目标表 relkind（'r' 普通表 / 'p' 分区表 / 'v' 视图 ...）。
+async fn relation_kind(
+    ctx: &OpsContext,
+    schema: &str,
+    table: &str,
+) -> Result<Option<String>, OpsError> {
+    let rows = sqlx::query(
+        "SELECT c.relkind::text AS relkind \
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(ctx.db_client.pool.pg()?)
+    .await?;
+    let rows = convert_pg_rows(&rows);
+    Ok(rows.first().and_then(|row| row.get("relkind").cloned()))
 }
 
 /// 事务内超时映射；S2 固定三条 `SET LOCAL`。
@@ -1386,6 +1705,7 @@ pub(crate) async fn load_snapshot(
          LEFT JOIN pg_collation co ON co.oid = a.attcollation \
          WHERE n.nspname = '{schema_lit}' AND c.relname = '{table_lit}' \
            AND a.attnum > 0 AND NOT a.attisdropped \
+           AND d.datname = current_database() \
          ORDER BY a.attnum"
     );
     let rows = fetch_rows(ctx, &columns_sql).await?;
@@ -1470,4 +1790,103 @@ pub(crate) async fn load_snapshot(
         indexes,
         create_table_sql: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::field_migration::migration_store::PkKind;
+    use crate::ops::field_migration::schema::TargetColumn;
+    use crate::ops::field_migration::types::EmptyStringPolicy;
+
+    fn spec_for(pk_columns: &[&str], kinds: Vec<PkKind>, pk_kind: Option<PkKind>) -> BackfillSpec {
+        let columns: Vec<String> = pk_columns.iter().map(|name| name.to_string()).collect();
+        BackfillSpec {
+            source_table: "src".into(),
+            source_column: "payload".into(),
+            target_table: "dst".into(),
+            pk_column: columns.first().cloned().unwrap_or_else(|| "id".to_string()),
+            // 约定：单列主键时 pk_columns 为空（存了才是复合）。
+            pk_columns: if columns.len() > 1 {
+                columns
+            } else {
+                Vec::new()
+            },
+            pk_kind,
+            pk_kinds: kinds,
+            target_columns: vec![TargetColumn {
+                name: "theme".into(),
+                source_key: Some("theme".into()),
+                sql_type: "text".into(),
+                nullable: true,
+                required: false,
+                note: None,
+            }],
+            empty_string_policy: EmptyStringPolicy::Preserve,
+            create_table_sql: None,
+            schema: Some("public".into()),
+            source_data_type: "jsonb".into(),
+        }
+    }
+
+    /// S2 形态必须逐字保持：单列主键不带行构造器、不带 COLLATE（整型）。
+    #[test]
+    fn single_pk_batch_sql_keeps_s2_shape() {
+        let spec = spec_for(&["id"], Vec::new(), Some(PkKind::Integer));
+        let sql =
+            build_batch_sql(&spec, "public.src", "public.dst", false).expect("生成批 SQL 失败");
+        assert!(sql.contains("AND \"id\" <= $1::bigint"), "{sql}");
+        assert!(sql.contains("ORDER BY \"id\""), "{sql}");
+        assert!(sql.contains("LIMIT $2"), "{sql}");
+        assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE SET"), "{sql}");
+        assert!(!sql.contains("(\"id\") >"), "单列不得使用行构造器: {sql}");
+    }
+
+    /// S5：复合主键改用行比较，绑定顺序为 [last.., end.., limit]。
+    #[test]
+    fn composite_pk_batch_sql_uses_row_comparison() {
+        let spec = spec_for(
+            &["tenant_id", "seq"],
+            vec![PkKind::Integer, PkKind::Integer],
+            Some(PkKind::Integer),
+        );
+        let sql =
+            build_batch_sql(&spec, "public.src", "public.dst", true).expect("生成批 SQL 失败");
+        assert!(
+            sql.contains("AND (\"tenant_id\", \"seq\") > ($1::bigint, $2::bigint)"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("AND (\"tenant_id\", \"seq\") <= ($3::bigint, $4::bigint)"),
+            "{sql}"
+        );
+        assert!(sql.contains("ORDER BY \"tenant_id\", \"seq\""), "{sql}");
+        assert!(sql.contains("LIMIT $5"), "{sql}");
+        assert!(
+            sql.contains("ON CONFLICT (\"tenant_id\", \"seq\") DO UPDATE SET"),
+            "{sql}"
+        );
+    }
+
+    /// 文本列的复合键：行构造器内与 ORDER BY 都必须带 `COLLATE "C"`。
+    #[test]
+    fn composite_text_pk_collates_in_row_and_order() {
+        let spec = spec_for(
+            &["region", "seq"],
+            vec![PkKind::Text, PkKind::Integer],
+            Some(PkKind::Text),
+        );
+        let sql =
+            build_batch_sql(&spec, "public.src", "public.dst", false).expect("生成批 SQL 失败");
+        assert!(
+            sql.contains(
+                "(\"region\" COLLATE \"C\", \"seq\") <= (($1::text COLLATE \"C\"), $2::bigint)"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY \"region\" COLLATE \"C\", \"seq\""),
+            "{sql}"
+        );
+    }
 }

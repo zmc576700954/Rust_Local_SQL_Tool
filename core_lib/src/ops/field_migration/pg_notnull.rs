@@ -259,17 +259,6 @@ pub async fn run_job(
         );
         return Ok(());
     }
-    if is_partitioned(ctx, &schema, &job.table).await? {
-        return block_notnull(
-            ctx,
-            hub,
-            job_id,
-            "分区表不在支持范围（沿用 S2 边界）",
-            "preflight:partitioned",
-            0,
-        )
-        .await;
-    }
     // 直接查 pg_index：快照里的 column_key 依赖 indkey 转换，PG 上不可靠。
     let pk_columns = primary_key_columns(ctx, &schema, &job.table).await?;
     if pk_columns.len() != 1 {
@@ -533,27 +522,54 @@ async fn validate(
     policy: &OpsPolicy,
 ) -> Result<Option<NotNullPhase>, OpsError> {
     let job = hub.get_notnull(job_id).await?;
+
+    // S5：分区父表逐叶子分区 VALIDATE（PG 11+ 支持单分区验证），
+    // 完成后父表 VALIDATE 变为瞬时（所有分区已验证）。已完成分区幂等跳过。
+    if is_partitioned(ctx, schema, &job.table).await? {
+        let partitions = leaf_partitions(ctx, schema, &job.table).await?;
+        let total = partitions.len();
+        for (index, (part_schema, part)) in partitions.iter().enumerate() {
+            if constraint_validated(ctx, part_schema, part, &job.constraint_name).await?
+                == Some(true)
+            {
+                continue;
+            }
+            let sql = format!(
+                "ALTER TABLE {} VALIDATE CONSTRAINT {}",
+                qualified(Some(part_schema), part),
+                quote_ident_pg(&job.constraint_name)
+            );
+            if let Err(err) = exec_ddl(ctx, policy, &sql).await {
+                reset_to_scan(
+                    ctx,
+                    hub,
+                    job_id,
+                    &format!("分区 {part} VALIDATE 失败（扫描后出现 NULL？）: {err}"),
+                )
+                .await?;
+                return Ok(None);
+            }
+            hub.update_notnull(job_id, |job| {
+                job.notes.push(format!(
+                    "validate: partition {part} ({}/{total})",
+                    index + 1
+                ));
+            })
+            .await?;
+        }
+    }
+
     let sql = format!(
         "ALTER TABLE {} VALIDATE CONSTRAINT {}",
         qualified(Some(schema), &job.table),
         quote_ident_pg(&job.constraint_name)
     );
     if let Err(err) = exec_ddl(ctx, policy, &sql).await {
-        // 扫描后又有 NULL 写入：保留 NOT VALID 约束，退回 Scan 重扫。
-        hub.update_notnull(job_id, |job| {
-            job.phase = NotNullPhase::Scan;
-            job.scan.last_pk = None;
-            job.scan.scanned_rows = 0;
-            job.scan.null_count = 0;
-        })
-        .await?;
-        block_notnull(
+        reset_to_scan(
             ctx,
             hub,
             job_id,
             &format!("VALIDATE CONSTRAINT 失败（扫描后出现 NULL？）: {err}"),
-            "validate:violations",
-            0,
         )
         .await?;
         return Ok(None);
@@ -564,6 +580,95 @@ async fn validate(
     })
     .await?;
     Ok(Some(NotNullPhase::SetNotNull))
+}
+
+/// 扫描后又有 NULL 写入：保留 NOT VALID 约束，退回 Scan 重扫。
+async fn reset_to_scan(
+    ctx: &OpsContext,
+    hub: &MigrationHub,
+    job_id: &str,
+    message: &str,
+) -> Result<(), OpsError> {
+    hub.update_notnull(job_id, |job| {
+        job.phase = NotNullPhase::Scan;
+        job.scan.last_pk = None;
+        job.scan.scanned_rows = 0;
+        job.scan.null_count = 0;
+    })
+    .await?;
+    block_notnull(ctx, hub, job_id, message, "validate:violations", 0).await?;
+    Ok(())
+}
+
+async fn is_partitioned(ctx: &OpsContext, schema: &str, table: &str) -> Result<bool, OpsError> {
+    let rows = sqlx::query(
+        "SELECT c.relkind::text AS relkind FROM pg_class c \
+         WHERE c.oid = to_regclass($1)",
+    )
+    .bind(qualified(Some(schema), table))
+    .fetch_all(ctx.db_client.pool.pg()?)
+    .await?;
+    let rows = convert_pg_rows(&rows);
+    Ok(rows
+        .first()
+        .and_then(|row| row.get("relkind"))
+        .map(|value| value == "p")
+        .unwrap_or(false))
+}
+
+/// 递归枚举叶子分区（普通表叶子），返回 (schema, table)。
+pub(crate) async fn leaf_partitions(
+    ctx: &OpsContext,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<(String, String)>, OpsError> {
+    let rows = sqlx::query(
+        "WITH RECURSIVE tree AS ( \
+             SELECT c.oid, c.relkind FROM pg_class c WHERE c.oid = to_regclass($1) \
+             UNION ALL \
+             SELECT child.oid, child.relkind FROM pg_inherits i \
+             JOIN pg_class child ON child.oid = i.inhrelid \
+             JOIN tree parent ON parent.oid = i.inhparent \
+         ) \
+         SELECT n.nspname::text AS schema_name, c.relname::text AS table_name \
+         FROM tree t JOIN pg_class c ON c.oid = t.oid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE t.relkind = 'r' ORDER BY n.nspname, c.relname",
+    )
+    .bind(qualified(Some(schema), table))
+    .fetch_all(ctx.db_client.pool.pg()?)
+    .await?;
+    let rows = convert_pg_rows(&rows);
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row.get("schema_name")?.clone(),
+                row.get("table_name")?.clone(),
+            ))
+        })
+        .collect())
+}
+
+async fn constraint_validated(
+    ctx: &OpsContext,
+    schema: &str,
+    table: &str,
+    constraint: &str,
+) -> Result<Option<bool>, OpsError> {
+    let rows = sqlx::query(
+        "SELECT con.convalidated::text AS validated FROM pg_constraint con \
+         WHERE con.conname = $1 AND con.conrelid = to_regclass($2)",
+    )
+    .bind(constraint)
+    .bind(qualified(Some(schema), table))
+    .fetch_all(ctx.db_client.pool.pg()?)
+    .await?;
+    let rows = convert_pg_rows(&rows);
+    Ok(rows
+        .first()
+        .and_then(|row| row.get("validated"))
+        .map(|value| matches!(value.as_str(), "true" | "t")))
 }
 
 async fn set_not_null(
@@ -790,20 +895,6 @@ async fn primary_key_columns(
             )
         })
         .collect())
-}
-
-async fn is_partitioned(ctx: &OpsContext, schema: &str, table: &str) -> Result<bool, OpsError> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pg_partitioned_table pt \
-         JOIN pg_class c ON c.oid = pt.partrelid \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relname = $2",
-    )
-    .bind(schema)
-    .bind(table)
-    .fetch_one(ctx.db_client.pool.pg()?)
-    .await?;
-    Ok(count > 0)
 }
 
 async fn wait_control(

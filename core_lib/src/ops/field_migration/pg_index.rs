@@ -69,6 +69,285 @@ pub fn build_create_index_sql(schema: &str, spec: &IndexSpec) -> String {
     )
 }
 
+/// 分区表配方执行（S5）：
+/// 1. 父表 `CREATE INDEX ... ON ONLY`（无数据占位）；
+/// 2. 逐叶子分区 `CREATE INDEX CONCURRENTLY`；
+/// 3. `ALTER INDEX parent ATTACH PARTITION part`。
+/// 每步幂等：已 attach/已有效/INVALID 残留都会跳过或清理后重建。
+async fn run_partitioned_index(
+    ctx: &OpsContext,
+    hub: &MigrationHub,
+    job_id: &str,
+    schema: &str,
+    policy: &OpsPolicy,
+    job: &IndexJob,
+) -> Result<(), OpsError> {
+    let parent_index = qualified(Some(schema), &job.spec.index_name);
+    let parent_table = qualified(Some(schema), &job.spec.table);
+    let columns = job
+        .spec
+        .columns
+        .iter()
+        .map(|column| quote_ident_pg(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // 父索引状态：约束同名 → 冲突；INVALID 残留 → 清理后重建；有效 → 保留继续配方。
+    match index_state(ctx, schema, &job.spec.index_name).await? {
+        Some(state) if state.is_constraint => {
+            return block_index(
+                ctx,
+                hub,
+                job_id,
+                "同名对象是约束而非普通索引，请更换索引名",
+                "preflight:name_conflict",
+            )
+            .await
+        }
+        Some(state) if !state.valid || !state.ready => {
+            exec_index_ddl(ctx, policy, &format!("DROP INDEX IF EXISTS {parent_index}")).await?;
+            let _ = hub
+                .update_index(job_id, |job| {
+                    job.notes.push("已清理残留 INVALID 父索引".into())
+                })
+                .await?;
+        }
+        _ => {}
+    }
+    if index_state(ctx, schema, &job.spec.index_name)
+        .await?
+        .is_none()
+    {
+        let sql = format!(
+            "CREATE {}INDEX {} ON ONLY {parent_table} ({columns})",
+            if job.spec.unique { "UNIQUE " } else { "" },
+            quote_ident_pg(&job.spec.index_name)
+        );
+        exec_index_ddl(ctx, policy, &sql).await?;
+        let _ = hub
+            .update_index(job_id, |job| {
+                job.notes.push("父索引已创建（ON ONLY 占位）".into())
+            })
+            .await?;
+    }
+
+    if !wait_control(hub, job_id).await? {
+        return abort_index(ctx, hub, job_id).await;
+    }
+    hub.update_index(job_id, |job| job.phase = IndexPhase::Building)
+        .await?;
+
+    let partitions = super::pg_notnull::leaf_partitions(ctx, schema, &job.spec.table).await?;
+    let total = partitions.len() as u64;
+    hub.update_index(job_id, |job| {
+        let progress = job.progress.get_or_insert_with(IndexProgress::default);
+        progress.partitions_total = total;
+        progress.partitions_done = 0;
+    })
+    .await?;
+
+    for (index, (part_schema, part_table)) in partitions.iter().enumerate() {
+        if !wait_control(hub, job_id).await? {
+            return abort_index(ctx, hub, job_id).await;
+        }
+        let part_index_name = partition_index_name(&job.spec.index_name, part_table);
+        let part_index = qualified(Some(part_schema), &part_index_name);
+        hub.update_index(job_id, |job| {
+            let progress = job.progress.get_or_insert_with(IndexProgress::default);
+            progress.current_partition = Some(format!("{part_schema}.{part_table}"));
+        })
+        .await?;
+
+        if !index_attached(ctx, &parent_index, &part_index).await? {
+            // INVALID 残留先清理。
+            if let Some(state) = index_state(ctx, part_schema, &part_index_name).await? {
+                if !state.valid || !state.ready {
+                    exec_index_ddl(
+                        ctx,
+                        policy,
+                        &format!("DROP INDEX CONCURRENTLY IF EXISTS {part_index}"),
+                    )
+                    .await?;
+                }
+            }
+            if index_state(ctx, part_schema, &part_index_name)
+                .await?
+                .is_none()
+            {
+                let sql = format!(
+                    "CREATE {}INDEX CONCURRENTLY {} ON {} ({columns})",
+                    if job.spec.unique { "UNIQUE " } else { "" },
+                    quote_ident_pg(&part_index_name),
+                    qualified(Some(part_schema), part_table)
+                );
+                if let Err(err) = exec_index_ddl(ctx, policy, &sql).await {
+                    let message = err.to_string();
+                    let _ = cleanup_invalid(ctx, part_schema, &part_index_name, policy).await;
+                    if message.contains("duplicate key value")
+                        || message.contains("could not create unique index")
+                        || message.contains("23505")
+                    {
+                        return block_index(
+                            ctx,
+                            hub,
+                            job_id,
+                            &format!(
+                                "分区 {part_schema}.{part_table} 唯一索引构建失败（存在重复值）: {message}"
+                            ),
+                            "build:unique_violation",
+                        )
+                        .await;
+                    }
+                    let job = hub
+                        .update_index(job_id, |job| {
+                            job.status = MigrationStatus::Interrupted;
+                            job.finished_at = Some(now());
+                            job.last_error = Some(format!(
+                                "分区 {part_schema}.{part_table} CREATE INDEX CONCURRENTLY 失败: {message}"
+                            ));
+                            job.notes.push("失败：可重新执行（已 attach 的分区会跳过）".into());
+                        })
+                        .await?;
+                    let _ = append_index_audit(
+                        ctx,
+                        "field_migration.index.interrupted",
+                        "interrupted",
+                        &job,
+                        json!({
+                            "job_id": job_id,
+                            "partition": format!("{part_schema}.{part_table}"),
+                            "error": message,
+                        }),
+                    );
+                    return Ok(());
+                }
+            }
+            let attach_sql = format!("ALTER INDEX {parent_index} ATTACH PARTITION {part_index}");
+            if let Err(err) = exec_index_ddl(ctx, policy, &attach_sql).await {
+                let message = err.to_string();
+                let job = hub
+                    .update_index(job_id, |job| {
+                        job.status = MigrationStatus::Interrupted;
+                        job.finished_at = Some(now());
+                        job.last_error = Some(format!(
+                            "分区 {part_schema}.{part_table} ATTACH 失败: {message}"
+                        ));
+                    })
+                    .await?;
+                let _ = append_index_audit(
+                    ctx,
+                    "field_migration.index.interrupted",
+                    "interrupted",
+                    &job,
+                    json!({
+                        "job_id": job_id,
+                        "partition": format!("{part_schema}.{part_table}"),
+                        "step": "attach",
+                        "error": message,
+                    }),
+                );
+                return Ok(());
+            }
+        }
+        hub.update_index(job_id, |job| {
+            let progress = job.progress.get_or_insert_with(IndexProgress::default);
+            progress.partitions_done = index as u64 + 1;
+        })
+        .await?;
+    }
+
+    // 校验：全部分区索引有效且已 attach；父索引有效。
+    hub.update_index(job_id, |job| {
+        job.phase = IndexPhase::Verifying;
+        if let Some(progress) = job.progress.as_mut() {
+            progress.current_partition = None;
+        }
+    })
+    .await?;
+    for (part_schema, part_table) in &partitions {
+        let part_index_name = partition_index_name(&job.spec.index_name, part_table);
+        let part_index = qualified(Some(part_schema), &part_index_name);
+        let state = index_state(ctx, part_schema, &part_index_name).await?;
+        let attached = index_attached(ctx, &parent_index, &part_index).await?;
+        let healthy = matches!(state, Some(state) if state.valid && state.ready);
+        if !healthy || !attached {
+            return block_index(
+                ctx,
+                hub,
+                job_id,
+                &format!(
+                    "分区 {part_schema}.{part_table} 索引不健康（exists={}, attached={attached}）",
+                    state.is_some()
+                ),
+                "verify:mismatch",
+            )
+            .await;
+        }
+    }
+    let parent_state = index_state(ctx, schema, &job.spec.index_name)
+        .await?
+        .ok_or_else(|| {
+            OpsError::Validation(format!("索引 {} 执行后不可见", job.spec.index_name))
+        })?;
+    if !(parent_state.valid && parent_state.ready) {
+        return block_index(
+            ctx,
+            hub,
+            job_id,
+            "父索引执行后仍非 valid/ready",
+            "verify:mismatch",
+        )
+        .await;
+    }
+
+    let job = hub
+        .update_index(job_id, |job| {
+            job.status = MigrationStatus::Completed;
+            job.phase = IndexPhase::Done;
+            job.finished_at = Some(now());
+            job.last_error = None;
+            job.notes
+                .push(format!("partitioned: {total} partitions attached"));
+        })
+        .await?;
+    let _ = append_index_audit(
+        ctx,
+        "field_migration.index.completed",
+        "ok",
+        &job,
+        json!({ "job_id": job_id, "partitioned": true, "partitions": total }),
+    );
+    Ok(())
+}
+
+/// 分区索引名：`{base}_p_{hash8}`，超出 63 字节时先截断 base。
+fn partition_index_name(base: &str, partition: &str) -> String {
+    let digest = hash_json(&json!({ "index": base, "partition": partition }));
+    let suffix = format!("_p_{}", &digest[..8]);
+    let mut trimmed: String = base.to_string();
+    while trimmed.len() + suffix.len() > NAME_MAX_BYTES {
+        trimmed.pop();
+    }
+    format!("{trimmed}{suffix}")
+}
+
+/// 分区索引是否已挂到父索引（`pg_inherits` 的索引父子关系）。
+async fn index_attached(
+    ctx: &OpsContext,
+    parent_index: &str,
+    part_index: &str,
+) -> Result<bool, OpsError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_inherits \
+         WHERE inhparent = to_regclass($1) AND inhrelid = to_regclass($2)",
+    )
+    .bind(parent_index)
+    .bind(part_index)
+    .fetch_one(ctx.db_client.pool.pg()?)
+    .await?;
+    Ok(count > 0)
+}
+
 pub async fn new_job(
     ctx: &OpsContext,
     hub: &MigrationHub,
@@ -251,14 +530,8 @@ pub async fn run_job(
         }
     }
     if is_partitioned(ctx, &schema, &job.spec.table).await? {
-        return block_index(
-            ctx,
-            hub,
-            job_id,
-            "PG 不支持对分区表执行 CREATE INDEX CONCURRENTLY",
-            "preflight:partitioned",
-        )
-        .await;
+        // S5：分区表配方（ON ONLY 占位 → 逐分区 CONCURRENTLY → ATTACH）。
+        return run_partitioned_index(ctx, hub, job_id, &schema, policy, &job).await;
     }
 
     // 同名索引状态：valid → no-op；invalid → 清理后重建；约束 → 冲突。
@@ -534,12 +807,22 @@ fn spawn_progress_poller(
             let Ok(rows) = rows else { continue };
             let rows = convert_pg_rows(&rows);
             let Some(row) = rows.first() else { continue };
+            // 分区配方进度位由执行器维护，轮询只覆盖统计字段。
+            let existing = hub
+                .get_index(&job_id)
+                .await
+                .ok()
+                .and_then(|job| job.progress)
+                .unwrap_or_default();
             let progress = IndexProgress {
                 phase: row.get("phase").cloned().unwrap_or_default(),
                 blocks_done: parse_u64(row.get("blocks_done")),
                 blocks_total: parse_u64(row.get("blocks_total")),
                 tuples_done: parse_u64(row.get("tuples_done")),
                 tuples_total: parse_u64(row.get("tuples_total")),
+                partitions_total: existing.partitions_total,
+                partitions_done: existing.partitions_done,
+                current_partition: existing.current_partition,
                 updated_at: now(),
             };
             let _ = hub
@@ -679,6 +962,22 @@ mod tests {
         assert!(sql.contains("\"public\".\"orders\""));
         assert!(sql.contains("(\"payload\", \"created_at\")"));
         assert!(!sql.to_ascii_uppercase().contains("BEGIN"));
+    }
+
+    /// S5：分区索引名必须稳定、唯一、且不超 63 字节（PG 标识符上限）。
+    #[test]
+    fn partition_index_name_is_stable_and_bounded() {
+        let base = "idx_orders_payload_created_at_with_a_very_long_suffix_for_testing";
+        let a = partition_index_name(base, "orders_p1");
+        let b = partition_index_name(base, "orders_p1");
+        assert_eq!(a, b, "同名分区必须得到同名索引（幂等）");
+        assert!(a.len() <= NAME_MAX_BYTES, "索引名超长: {} 字节", a.len());
+        assert_ne!(
+            a,
+            partition_index_name(base, "orders_p2"),
+            "不同分区必须得到不同索引名"
+        );
+        assert!(a.contains("_p_"), "必须带分区标识: {a}");
     }
 
     #[test]

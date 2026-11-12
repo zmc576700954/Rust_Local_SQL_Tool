@@ -111,8 +111,15 @@ pub struct BackfillSpec {
     pub target_table: String,
     /// 源与目标主键列名必须一致；S2 暂不支持重命名主键。
     pub pk_column: String,
+    /// 复合主键列（顺序即行比较顺序）；空 = 单列，沿用 `pk_column`。
+    /// 仅 PG 任务写入，MySQL 任务恒为空（JSON 字节不变）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pk_columns: Vec<String>,
     #[serde(default)]
     pub pk_kind: Option<PkKind>,
+    /// 与 `pk_columns` 等长的逐列比较方式；单列任务为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pk_kinds: Vec<PkKind>,
     pub target_columns: Vec<TargetColumn>,
     pub empty_string_policy: EmptyStringPolicy,
     /// L2 建表脚本；仅在目标表不存在时执行一次（CREATE TABLE IF NOT EXISTS）。
@@ -151,6 +158,9 @@ pub struct Checkpoint {
     /// 已完成的批边界主键；下一批严格大于该主键。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_pk: Option<String>,
+    /// 复合主键边界（与 `pk_columns` 同序）；单列任务为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pks: Option<Vec<String>>,
     /// 累计成功写入/校验行数。
     pub written_rows: u64,
     pub verified: bool,
@@ -162,6 +172,9 @@ pub struct Checkpoint {
     /// 主键比较方式；续跑时不一致即拒绝。
     #[serde(default)]
     pub pk_kind: Option<PkKind>,
+    /// 复合主键逐列比较方式；单列任务为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pk_kinds: Vec<PkKind>,
     /// 目标表结构指纹；续跑时用于确认目标未被替换。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_fingerprint: Option<String>,
@@ -174,7 +187,13 @@ pub struct BatchRecord {
     pub batch_no: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_pk: Option<String>,
+    /// 复合主键批首边界（与 `pk_columns` 同序）；单列任务为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pks: Option<Vec<String>>,
     pub end_pk: String,
+    /// 复合主键批尾（与 `pk_columns` 同序）；单列任务为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_pks: Option<Vec<String>>,
     pub source_rows: u64,
     pub written_rows: u64,
     pub verified: bool,
@@ -504,6 +523,13 @@ pub struct IndexProgress {
     pub tuples_done: u64,
     #[serde(default)]
     pub tuples_total: u64,
+    /// 分区表配方：叶子分区总数/已完成数，以及当前分区名。
+    #[serde(default)]
+    pub partitions_total: u64,
+    #[serde(default)]
+    pub partitions_done: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_partition: Option<String>,
     #[serde(default)]
     pub updated_at: i64,
 }
@@ -623,6 +649,36 @@ pub struct TypeChangeVerify {
     pub default_after: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FkCounterpartSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table: String,
+    pub column: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FkPlanEntry {
+    pub constraint: String,
+    pub referencing_schema: String,
+    pub referencing_table: String,
+    pub referencing_column: String,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_column: String,
+    /// 与主列目标类型一致（双端同型是 FK 重建前提）。
+    pub target_type: String,
+    /// 编排进度位（幂等续跑）。
+    #[serde(default)]
+    pub dropped: bool,
+    #[serde(default)]
+    pub altered: bool,
+    #[serde(default)]
+    pub recreated: bool,
+    #[serde(default)]
+    pub validated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeChangeJob {
     pub job_id: String,
@@ -638,6 +694,12 @@ pub struct TypeChangeJob {
     pub source_type: String,
     /// 请求的目标类型（用户原始串，执行前经 ::regtype 验证）。
     pub target_type: String,
+    /// freeform USING 表达式（S5）；进 spec_hash，续跑篡改即拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub using_expr: Option<String>,
+    /// 请求声明的 FK 对端列（S5）；与 `fk_plan` 一起进指纹。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fk_counterparts: Vec<FkCounterpartSpec>,
     /// 表/列/源类型/目标类型指纹；续跑不一致即拒绝。
     pub spec_hash: String,
     #[serde(default = "default_engine_mysql")]
@@ -654,6 +716,9 @@ pub struct TypeChangeJob {
     pub execution: TypeChangeExecution,
     #[serde(default)]
     pub verify: TypeChangeVerify,
+    /// FK 拆装编排清单（S5）；进 spec_hash。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fk_plan: Vec<FkPlanEntry>,
     #[serde(default)]
     pub run_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1130,6 +1195,8 @@ mod tests {
                 target_table: "orders_ext".into(),
                 pk_column: "id".into(),
                 pk_kind: None,
+                pk_columns: Vec::new(),
+                pk_kinds: Vec::new(),
                 target_columns: Vec::new(),
                 empty_string_policy: EmptyStringPolicy::Preserve,
                 create_table_sql: None,
@@ -1181,6 +1248,8 @@ mod tests {
                 verify: None,
                 engine: default_engine_mysql(),
                 pk_kind: None,
+                last_pks: None,
+                pk_kinds: Vec::new(),
                 target_fingerprint: None,
                 updated_at: now(),
             });
@@ -1229,6 +1298,65 @@ mod tests {
         assert!(!hub.is_active("j1").await);
     }
 
+    /// S5：单列任务序列化不得出现 `pk_columns` / `pk_kinds`，否则存量 store 字节会变。
+    #[test]
+    fn single_pk_spec_omits_s5_fields() {
+        let spec = job("j1").spec;
+        let raw = serde_json::to_string(&spec).unwrap();
+        assert!(!raw.contains("pk_columns"), "{raw}");
+        assert!(!raw.contains("pk_kinds"), "{raw}");
+    }
+
+    /// S5：复合主键 + USING + FK 计划必须能完整回环，且旧 JSON（缺字段）仍可解析。
+    #[test]
+    fn s5_fields_round_trip_and_legacy_json_parses() {
+        let mut spec = job("j1").spec;
+        spec.pk_columns = vec!["tenant_id".into(), "seq".into()];
+        spec.pk_kinds = vec![PkKind::Integer, PkKind::Integer];
+        let raw = serde_json::to_string(&spec).unwrap();
+        let back: BackfillSpec = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.pk_columns, spec.pk_columns);
+        assert_eq!(back.pk_kinds, spec.pk_kinds);
+
+        // 模拟 S4 及以前的 store：删掉 S5 新字段后仍必须能反序列化。
+        let mut value = serde_json::to_value(&spec).unwrap();
+        for key in ["pk_columns", "pk_kinds"] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        let legacy: BackfillSpec = serde_json::from_value(value).unwrap();
+        assert!(legacy.pk_columns.is_empty());
+        assert!(legacy.pk_kinds.is_empty());
+
+        let mut tc = typechange_job("t1");
+        tc.using_expr = Some("payload::text".into());
+        tc.fk_counterparts = vec![FkCounterpartSpec {
+            schema: Some("public".into()),
+            table: "children".into(),
+            column: "parent_id".into(),
+        }];
+        tc.fk_plan = vec![FkPlanEntry {
+            constraint: "children_parent_id_fkey".into(),
+            referencing_schema: "public".into(),
+            referencing_table: "children".into(),
+            referencing_column: "parent_id".into(),
+            referenced_schema: "public".into(),
+            referenced_table: "orders".into(),
+            referenced_column: "id".into(),
+            target_type: "bigint".into(),
+            dropped: true,
+            altered: false,
+            recreated: false,
+            validated: false,
+        }];
+        let raw = serde_json::to_string(&tc).unwrap();
+        let back: TypeChangeJob = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.using_expr.as_deref(), Some("payload::text"));
+        assert_eq!(back.fk_counterparts.len(), 1);
+        assert_eq!(back.fk_plan.len(), 1);
+        assert!(back.fk_plan[0].dropped);
+        assert!(!back.fk_plan[0].altered);
+    }
+
     #[test]
     fn recent_batch_records_are_capped() {
         let mut j = job("j1");
@@ -1238,6 +1366,8 @@ mod tests {
                 BatchRecord {
                     batch_no: index as u64,
                     last_pk: None,
+                    last_pks: None,
+                    end_pks: None,
                     end_pk: index.to_string(),
                     source_rows: 1,
                     written_rows: 1,
@@ -1377,6 +1507,9 @@ mod tests {
             source_type: "character varying(50)".into(),
             target_type: "text".into(),
             spec_hash: "th".into(),
+            using_expr: None,
+            fk_counterparts: Vec::new(),
+            fk_plan: Vec::new(),
             engine: String::new(),
             status: MigrationStatus::Running,
             phase: TypeChangePhase::Applying,

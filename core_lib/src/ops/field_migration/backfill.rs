@@ -103,17 +103,24 @@ pub fn prepare(
     if !analysis.dependencies.source_triggers.is_empty() {
         return Err(OpsError::Validation("源表存在触发器，禁止自动回填".into()));
     }
-    let pk_column = analysis
-        .dependencies
-        .single_column_pk
-        .clone()
-        .filter(|c| !c.trim().is_empty())
-        .ok_or_else(|| OpsError::Validation("源表没有单列主键，禁止自动回填".into()))?;
-    if analysis.dependencies.primary_key_columns.len() != 1 {
+    // S5：PG 支持复合主键 keyset；MySQL 保持单列（行为/SQL 零变化）。
+    let mut pk_columns: Vec<String> = analysis.dependencies.primary_key_columns.clone();
+    if pk_columns.is_empty() {
+        if let Some(single) = analysis.dependencies.single_column_pk.clone() {
+            if !single.trim().is_empty() {
+                pk_columns.push(single);
+            }
+        }
+    }
+    if pk_columns.is_empty() {
+        return Err(OpsError::Validation("源表没有主键，禁止自动回填".into()));
+    }
+    if !is_pg && pk_columns.len() != 1 {
         return Err(OpsError::Validation(
-            "源表主键不是单列，禁止自动回填".into(),
+            "源表主键不是单列，MySQL 回填仅支持单列主键".into(),
         ));
     }
+    let pk_column = pk_columns[0].clone();
     if !is_pg {
         if let Some(engine) = analysis.environment.engine.as_deref() {
             if !engine.eq_ignore_ascii_case("innodb") {
@@ -123,7 +130,8 @@ pub fn prepare(
             }
         }
     }
-    if analysis.environment.partitioned {
+    // S5：PG 源分区表经父表 keyset 分页透明；MySQL 分区表仍拦截。
+    if analysis.environment.partitioned && !is_pg {
         return Err(OpsError::Validation("源表是分区表，禁止自动回填".into()));
     }
     if analysis.environment.read_only {
@@ -166,12 +174,12 @@ pub fn prepare(
         validate_create_statement(sql)?;
     }
 
-    // S2 只支持源/目标主键列名一致；跨列名映射必须回到 S1 重新生成脚本。
-    if analysis
-        .target_columns
-        .iter()
-        .any(|column| column.name.eq_ignore_ascii_case(&pk_column))
-    {
+    // S2/S5 只支持源/目标主键列名一致；跨列名映射必须回到 S1 重新生成脚本。
+    if analysis.target_columns.iter().any(|column| {
+        pk_columns
+            .iter()
+            .any(|pk| column.name.eq_ignore_ascii_case(pk))
+    }) {
         return Err(OpsError::Validation("目标列映射不能覆盖主键列".into()));
     }
 
@@ -188,8 +196,15 @@ pub fn prepare(
         source_column: column,
         target_table: analysis.target_table.clone(),
         pk_column,
+        // 复合主键仅 PG 路径写入；单列与 MySQL 恒为空（JSON 字节不变）。
+        pk_columns: if is_pg && pk_columns.len() > 1 {
+            pk_columns.clone()
+        } else {
+            Vec::new()
+        },
         // 实际类型在 preflight 用源表快照确定。
         pk_kind: None,
+        pk_kinds: Vec::new(),
         target_columns: analysis.target_columns.clone(),
         empty_string_policy: empty_policy,
         create_table_sql,
@@ -806,6 +821,7 @@ async fn run_inner(
                 job.checkpoint = Some(Checkpoint {
                     completed_batches: batch_no,
                     last_pk: Some(end_pk.clone()),
+                    last_pks: None,
                     written_rows: success_rows,
                     verified: true,
                     verify: Some(verify.clone()),
@@ -815,6 +831,7 @@ async fn run_inner(
                         job.engine.clone()
                     },
                     pk_kind: job.spec.pk_kind,
+                    pk_kinds: Vec::new(),
                     target_fingerprint: None,
                     updated_at: now(),
                 });
@@ -830,7 +847,9 @@ async fn run_inner(
                     BatchRecord {
                         batch_no,
                         last_pk: last_pk.clone(),
+                        last_pks: None,
                         end_pk: end_pk.clone(),
+                        end_pks: None,
                         source_rows,
                         written_rows,
                         verified: true,
@@ -923,6 +942,7 @@ async fn run_inner(
             let checkpoint = job.checkpoint.get_or_insert_with(|| Checkpoint {
                 completed_batches: job.progress.total_batches,
                 last_pk: None,
+                last_pks: None,
                 written_rows: job.expected_rows,
                 verified: true,
                 verify: None,
@@ -932,6 +952,7 @@ async fn run_inner(
                     job.engine.clone()
                 },
                 pk_kind: job.spec.pk_kind,
+                pk_kinds: Vec::new(),
                 target_fingerprint: None,
                 updated_at: now(),
             });

@@ -1031,6 +1031,14 @@ pub(crate) async fn ops_field_index_list(
 // ── S4：PG 改类型 ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct FieldFkCounterpartBody {
+    #[serde(default)]
+    pub schema: Option<String>,
+    pub table: String,
+    pub column: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct FieldTypeChangeBody {
     #[serde(default)]
     pub db_id: Option<String>,
@@ -1043,6 +1051,12 @@ pub(crate) struct FieldTypeChangeBody {
     pub allow_rewrite: Option<bool>,
     #[serde(default)]
     pub production_confirmed: Option<bool>,
+    /// S5：freeform USING（提供即按 Rewrite 开闸，解析干跑在 preflight）。
+    #[serde(default)]
+    pub using_expr: Option<String>,
+    /// S5：FK 拆装编排的对端列。
+    #[serde(default)]
+    pub fk_counterparts: Vec<FieldFkCounterpartBody>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1071,6 +1085,18 @@ pub(crate) async fn ops_field_typechange_create(
             target_type: body.target_type,
             allow_rewrite: body.allow_rewrite.unwrap_or(false),
             production_confirmed,
+            using_expr: body.using_expr,
+            fk_counterparts: body
+                .fk_counterparts
+                .into_iter()
+                .map(
+                    |item| core_lib::ops::field_migration::migration_store::FkCounterpartSpec {
+                        schema: item.schema,
+                        table: item.table,
+                        column: item.column,
+                    },
+                )
+                .collect(),
         },
     )
     .await?;
