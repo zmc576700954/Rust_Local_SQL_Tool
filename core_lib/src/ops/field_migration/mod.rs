@@ -16,6 +16,7 @@ pub mod pg_index;
 pub mod pg_notnull;
 pub mod pg_risk;
 pub mod pg_scripts;
+pub mod pg_typechange;
 pub mod pg_verify;
 pub mod read_only;
 pub mod retire;

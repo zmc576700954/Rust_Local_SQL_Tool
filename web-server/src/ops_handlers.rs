@@ -17,10 +17,10 @@ use core_lib::ops::executor;
 use core_lib::ops::field_migration::backfill::{self, PreparedBackfill};
 use core_lib::ops::field_migration::migration_store::{
     BackfillConfig, IndexJob, MigrationJob, MigrationPhase, MigrationStatus, NotNullJob,
-    CONTROL_ABORT, CONTROL_PAUSE, CONTROL_RUN,
+    TypeChangeJob, CONTROL_ABORT, CONTROL_PAUSE, CONTROL_RUN,
 };
 use core_lib::ops::field_migration::types::FieldGovernanceAnalysis;
-use core_lib::ops::field_migration::{pg_index, pg_notnull};
+use core_lib::ops::field_migration::{pg_index, pg_notnull, pg_typechange};
 use core_lib::ops::index_advisor::IndexAdvisorInput;
 use core_lib::ops::local_token::HEADER as OPS_TOKEN_HEADER;
 use core_lib::ops::perf_diagnostics::{self, SlowQueryScan};
@@ -1026,6 +1026,126 @@ pub(crate) async fn ops_field_index_list(
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let jobs = state.ops.migrations.list_index(limit).await;
     Ok(Json(FieldIndexListResponse { jobs }))
+}
+
+// ── S4：PG 改类型 ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FieldTypeChangeBody {
+    #[serde(default)]
+    pub db_id: Option<String>,
+    #[serde(default)]
+    pub schema: Option<String>,
+    pub table: String,
+    pub column: String,
+    pub target_type: String,
+    #[serde(default)]
+    pub allow_rewrite: Option<bool>,
+    #[serde(default)]
+    pub production_confirmed: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FieldTypeChangeListResponse {
+    pub jobs: Vec<TypeChangeJob>,
+}
+
+pub(crate) async fn ops_field_typechange_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<FieldTypeChangeBody>,
+) -> Result<Json<TypeChangeJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let ctx = build_ctx(&state, body.db_id.as_deref(), Some(session_id(&headers))).await?;
+    ensure_scenario_engine(&ctx, "field-governance")?;
+    let policy = state.ops.policy.read().await.clone();
+    let production_confirmed = body.production_confirmed.unwrap_or(false);
+    policy.authorize_backfill(ctx.is_read_only, production_confirmed)?;
+    let job = pg_typechange::new_job(
+        &ctx,
+        &state.ops.migrations,
+        pg_typechange::TypeChangeRequest {
+            schema: body.schema,
+            table: body.table,
+            column: body.column,
+            target_type: body.target_type,
+            allow_rewrite: body.allow_rewrite.unwrap_or(false),
+            production_confirmed,
+        },
+    )
+    .await?;
+    audit_event(
+        &state,
+        "field_migration.typechange.created",
+        "ok",
+        serde_json::json!({
+            "job_id": job.job_id,
+            "table": job.table,
+            "column": job.column,
+            "target_type": job.target_type,
+            "allow_rewrite": job.allow_rewrite,
+        }),
+    );
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_typechange_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<Json<TypeChangeJob>, AppError> {
+    authorize_write(&state, &headers)?;
+    let hub = state.ops.migrations.clone();
+    let job = hub.get_typechange(&job_id).await?;
+    if hub.is_active(&job_id).await {
+        return Err(AppError::BadRequest(format!("任务 {job_id} 正在运行")));
+    }
+    let ctx = build_ctx(&state, Some(&job.db_id), Some(session_id(&headers))).await?;
+    ensure_scenario_engine(&ctx, "field-governance")?;
+    let policy = state.ops.policy.read().await.clone();
+    policy.authorize_backfill(ctx.is_read_only, job.production_confirmed)?;
+    hub.set_control(&job_id, CONTROL_RUN).await;
+    hub.mark_active(&job_id).await;
+    let spawn_hub = hub.clone();
+    let spawn_id = job_id.clone();
+    tokio::spawn(async move {
+        if let Err(err) = pg_typechange::run_job(&spawn_id, &ctx, &spawn_hub, &policy).await {
+            let _ = spawn_hub
+                .update_typechange(&spawn_id, |job| {
+                    job.status = MigrationStatus::Interrupted;
+                    job.last_error = Some(err.to_string());
+                })
+                .await;
+        }
+        spawn_hub.mark_inactive(&spawn_id).await;
+    });
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_typechange_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<TypeChangeJob>, AppError> {
+    let hub = state.ops.migrations.clone();
+    let mut job = hub.get_typechange(&job_id).await?;
+    if job.status == MigrationStatus::Running && !hub.is_active(&job_id).await {
+        job = hub
+            .update_typechange(&job_id, |job| {
+                job.status = MigrationStatus::Interrupted;
+                job.last_error = Some("后台任务已停止，可重新执行（续跑 = 重跑语句）".into());
+            })
+            .await?;
+    }
+    Ok(Json(job))
+}
+
+pub(crate) async fn ops_field_typechange_list(
+    State(state): State<AppState>,
+    Query(query): Query<FieldDdlListQuery>,
+) -> Result<Json<FieldTypeChangeListResponse>, AppError> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let jobs = state.ops.migrations.list_typechange(limit).await;
+    Ok(Json(FieldTypeChangeListResponse { jobs }))
 }
 
 pub(crate) async fn ops_field_backfill_pause(

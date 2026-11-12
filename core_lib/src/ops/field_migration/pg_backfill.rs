@@ -1323,6 +1323,45 @@ pub fn pg_timeout_statements(policy: &OpsPolicy) -> Vec<String> {
     ]
 }
 
+/// DDL 单语句自动提交（不进事务块）；session 级锁超时、语句不限时，执行后 RESET。
+/// S3 起为 notnull/index/typechange 三个执行器共用的唯一实现；
+/// `exec_ddl_raw` 保留原始 sqlx 错误（供 typechange 读 SQLSTATE/DETAIL）。
+pub async fn exec_ddl_raw(
+    ctx: &OpsContext,
+    policy: &OpsPolicy,
+    sql: &str,
+) -> Result<(), sqlx::Error> {
+    let pool = ctx.db_client.pool.pg().map_err(|err| {
+        sqlx::Error::Configuration(Box::new(std::io::Error::other(err.to_string())))
+    })?;
+    let mut conn = pool.acquire().await?;
+    sqlx::query(&format!(
+        "SET lock_timeout = '{}s'",
+        policy.lock_wait_timeout_secs.max(1)
+    ))
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("SET statement_timeout = '0'")
+        .execute(&mut *conn)
+        .await?;
+    let result = sqlx::query(sql).execute(&mut *conn).await;
+    let _ = sqlx::query("RESET lock_timeout").execute(&mut *conn).await;
+    let _ = sqlx::query("RESET statement_timeout")
+        .execute(&mut *conn)
+        .await;
+    result?;
+    Ok(())
+}
+
+/// DDL 单语句自动提交（不进事务块）；S4 起收敛到共享实现，行为不变。
+pub async fn exec_ddl_auto_commit(
+    ctx: &OpsContext,
+    policy: &OpsPolicy,
+    sql: &str,
+) -> Result<(), OpsError> {
+    exec_ddl_raw(ctx, policy, sql).await.map_err(OpsError::from)
+}
+
 pub(crate) async fn load_snapshot(
     ctx: &OpsContext,
     schema: &str,

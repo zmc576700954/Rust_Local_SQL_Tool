@@ -541,6 +541,135 @@ pub struct IndexJob {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypeChangePhase {
+    Preflight,
+    Applying,
+    Verifying,
+    Done,
+}
+
+impl TypeChangePhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::Applying => "applying",
+            Self::Verifying => "verifying",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// 白名单（PG 保证不触发表重写的组合）之外一律 `Rewrite`，走开闸门。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypeChangeClass {
+    MetadataOnly,
+    Rewrite,
+}
+
+impl TypeChangeClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MetadataOnly => "metadata_only",
+            Self::Rewrite => "rewrite",
+        }
+    }
+}
+
+/// DDL 单语句失败由 PG 原子回滚列本身（无半成品），续跑 = 重跑语句。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeChangeExecution {
+    #[serde(default)]
+    pub atomic: bool,
+    #[serde(default = "default_statement_scope")]
+    pub rollback_scope: String,
+    #[serde(default = "default_resumable")]
+    pub resumable: bool,
+}
+
+fn default_statement_scope() -> String {
+    "statement".to_string()
+}
+
+impl Default for TypeChangeExecution {
+    fn default() -> Self {
+        Self {
+            atomic: false,
+            rollback_scope: default_statement_scope(),
+            resumable: default_resumable(),
+        }
+    }
+}
+
+/// 前置快照 + 执行后核对：类型、行数、索引健康、默认值表达式（只记录不判败）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TypeChangeVerify {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_type: Option<String>,
+    #[serde(default)]
+    pub rows_before: u64,
+    #[serde(default)]
+    pub rows_after: u64,
+    /// 表上索引数量（前置快照）。
+    #[serde(default)]
+    pub index_count: u64,
+    #[serde(default)]
+    pub indexes_valid: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_after: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeChangeJob {
+    pub job_id: String,
+    pub plan_id: String,
+    pub db_id: String,
+    pub db_name: String,
+    pub db_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table: String,
+    pub column: String,
+    /// 首跑记录的列类型（format_type）；续跑做漂移校验。
+    pub source_type: String,
+    /// 请求的目标类型（用户原始串，执行前经 ::regtype 验证）。
+    pub target_type: String,
+    /// 表/列/源类型/目标类型指纹；续跑不一致即拒绝。
+    pub spec_hash: String,
+    #[serde(default = "default_engine_mysql")]
+    pub engine: String,
+    pub status: MigrationStatus,
+    pub phase: TypeChangePhase,
+    pub classification: TypeChangeClass,
+    /// 重写路径的显式开闸；`MetadataOnly` 恒不需要。
+    #[serde(default)]
+    pub allow_rewrite: bool,
+    #[serde(default)]
+    pub production_confirmed: bool,
+    #[serde(default)]
+    pub execution: TypeChangeExecution,
+    #[serde(default)]
+    pub verify: TypeChangeVerify,
+    #[serde(default)]
+    pub run_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking: Option<BlockingDetail>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
 const RECENT_BATCH_LIMIT: usize = 80;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -551,6 +680,8 @@ struct MigrationFile {
     notnull_jobs: HashMap<String, NotNullJob>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     index_jobs: HashMap<String, IndexJob>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    typechange_jobs: HashMap<String, TypeChangeJob>,
 }
 
 #[derive(Debug)]
@@ -558,6 +689,7 @@ pub struct MigrationStore {
     jobs: HashMap<String, MigrationJob>,
     notnull_jobs: HashMap<String, NotNullJob>,
     index_jobs: HashMap<String, IndexJob>,
+    typechange_jobs: HashMap<String, TypeChangeJob>,
     path: Option<PathBuf>,
 }
 
@@ -567,6 +699,7 @@ impl MigrationStore {
             jobs: HashMap::new(),
             notnull_jobs: HashMap::new(),
             index_jobs: HashMap::new(),
+            typechange_jobs: HashMap::new(),
             path,
         };
         store.load();
@@ -588,6 +721,7 @@ impl MigrationStore {
             self.jobs = file.jobs;
             self.notnull_jobs = file.notnull_jobs;
             self.index_jobs = file.index_jobs;
+            self.typechange_jobs = file.typechange_jobs;
         }
     }
 
@@ -602,6 +736,7 @@ impl MigrationStore {
             jobs: self.jobs.clone(),
             notnull_jobs: self.notnull_jobs.clone(),
             index_jobs: self.index_jobs.clone(),
+            typechange_jobs: self.typechange_jobs.clone(),
         };
         let raw = serde_json::to_string_pretty(&file)?;
         let tmp = path.with_extension("tmp");
@@ -634,6 +769,14 @@ impl MigrationStore {
                 job.status = MigrationStatus::Interrupted;
                 job.updated_at = now();
                 job.last_error = Some("进程重启：任务可重新执行".into());
+                changed = true;
+            }
+        }
+        for job in self.typechange_jobs.values_mut() {
+            if job.status == MigrationStatus::Running {
+                job.status = MigrationStatus::Interrupted;
+                job.updated_at = now();
+                job.last_error = Some("进程重启：任务可重新执行（DDL 失败原子回滚列本身）".into());
                 changed = true;
             }
         }
@@ -768,6 +911,45 @@ impl MigrationStore {
         jobs.truncate(limit);
         jobs
     }
+
+    // ── S4：改类型任务 ──────────────────────────────────
+
+    pub fn insert_typechange(&mut self, job: TypeChangeJob) -> Result<(), OpsError> {
+        if self.typechange_jobs.contains_key(&job.job_id) {
+            return Err(OpsError::Validation(format!(
+                "改类型任务 {} 已存在",
+                job.job_id
+            )));
+        }
+        self.typechange_jobs.insert(job.job_id.clone(), job);
+        self.save()
+    }
+
+    pub fn typechange(&self, job_id: &str) -> Option<&TypeChangeJob> {
+        self.typechange_jobs.get(job_id)
+    }
+
+    pub fn update_typechange<F>(&mut self, job_id: &str, f: F) -> Result<TypeChangeJob, OpsError>
+    where
+        F: FnOnce(&mut TypeChangeJob),
+    {
+        let job = self
+            .typechange_jobs
+            .get_mut(job_id)
+            .ok_or_else(|| OpsError::NotFound(format!("改类型任务 {job_id} 不存在")))?;
+        f(job);
+        job.updated_at = now();
+        let snapshot = job.clone();
+        self.save()?;
+        Ok(snapshot)
+    }
+
+    pub fn list_typechange(&self, limit: usize) -> Vec<TypeChangeJob> {
+        let mut jobs: Vec<_> = self.typechange_jobs.values().cloned().collect();
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.created_at));
+        jobs.truncate(limit);
+        jobs
+    }
 }
 
 // ── 控制信号 ───────────────────────────────────────────────
@@ -867,6 +1049,30 @@ impl MigrationHub {
 
     pub async fn list_index(&self, limit: usize) -> Vec<IndexJob> {
         self.store.read().await.list_index(limit)
+    }
+
+    pub async fn insert_typechange(&self, job: TypeChangeJob) -> Result<(), OpsError> {
+        self.store.write().await.insert_typechange(job)
+    }
+
+    pub async fn get_typechange(&self, job_id: &str) -> Result<TypeChangeJob, OpsError> {
+        self.store
+            .read()
+            .await
+            .typechange(job_id)
+            .cloned()
+            .ok_or_else(|| OpsError::NotFound(format!("改类型任务 {job_id} 不存在")))
+    }
+
+    pub async fn update_typechange<F>(&self, job_id: &str, f: F) -> Result<TypeChangeJob, OpsError>
+    where
+        F: FnOnce(&mut TypeChangeJob),
+    {
+        self.store.write().await.update_typechange(job_id, f)
+    }
+
+    pub async fn list_typechange(&self, limit: usize) -> Vec<TypeChangeJob> {
+        self.store.read().await.list_typechange(limit)
     }
 
     /// 取得（必要时创建）任务控制信号。
@@ -1156,5 +1362,91 @@ mod tests {
         assert!(!raw.contains("notnull_jobs"));
         assert!(!raw.contains("index_jobs"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn typechange_job(id: &str) -> TypeChangeJob {
+        TypeChangeJob {
+            job_id: id.into(),
+            plan_id: "p1".into(),
+            db_id: "db".into(),
+            db_name: "app".into(),
+            db_fingerprint: "fp".into(),
+            schema: Some("public".into()),
+            table: "orders".into(),
+            column: "payload".into(),
+            source_type: "character varying(50)".into(),
+            target_type: "text".into(),
+            spec_hash: "th".into(),
+            engine: String::new(),
+            status: MigrationStatus::Running,
+            phase: TypeChangePhase::Applying,
+            classification: TypeChangeClass::MetadataOnly,
+            allow_rewrite: false,
+            production_confirmed: false,
+            execution: TypeChangeExecution::default(),
+            verify: TypeChangeVerify::default(),
+            run_count: 1,
+            blocking: None,
+            notes: Vec::new(),
+            created_at: now(),
+            updated_at: now(),
+            started_at: now(),
+            finished_at: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn s4_typechange_round_trips_and_running_marks_interrupted() {
+        let dir = std::env::temp_dir().join(format!("fm-store-s4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jobs.json");
+        {
+            let mut store = MigrationStore::new(Some(path.clone()));
+            store.insert_typechange(typechange_job("t1")).unwrap();
+        }
+        let mut store = MigrationStore::new(Some(path));
+        // 重启后 running 视为 interrupted，job 字段完整保留。
+        let loaded = store.typechange("t1").unwrap();
+        assert_eq!(loaded.status, MigrationStatus::Interrupted);
+        assert_eq!(loaded.phase, TypeChangePhase::Applying);
+        assert_eq!(loaded.source_type, "character varying(50)");
+        assert_eq!(loaded.classification, TypeChangeClass::MetadataOnly);
+        store
+            .update_typechange("t1", |job| {
+                job.verify.rows_before = 10;
+                job.notes.push("retry".into());
+            })
+            .unwrap();
+        assert_eq!(store.typechange("t1").unwrap().verify.rows_before, 10);
+        assert_eq!(store.typechange("t1").unwrap().notes, vec!["retry"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_store_file_without_s4_map_keeps_byte_compatible() {
+        let dir = std::env::temp_dir().join(format!("fm-store-s4l-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jobs.json");
+        // S3 时期老文件：没有 typechange_jobs 字段。
+        std::fs::write(&path, r#"{"jobs":{},"notnull_jobs":{},"index_jobs":{}}"#).unwrap();
+        let mut store = MigrationStore::new(Some(path.clone()));
+        assert!(store.typechange("t1").is_none());
+        // 无 S4 任务时保存不得新增空映射（S3 存量文件字节不变）。
+        store.insert(job("j9")).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("typechange_jobs"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typechange_execution_defaults_are_statement_scoped_and_resumable() {
+        let execution = TypeChangeExecution::default();
+        assert!(!execution.atomic);
+        assert_eq!(execution.rollback_scope, "statement");
+        assert!(execution.resumable);
+        // 老文件缺省反序列化后也是同一语义。
+        let legacy: TypeChangeExecution = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy, execution);
     }
 }

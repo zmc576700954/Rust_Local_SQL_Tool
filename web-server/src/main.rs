@@ -1419,6 +1419,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(ops_handlers::ops_field_index_run),
         )
         .route(
+            "/ops/field-governance/type-change",
+            get(ops_handlers::ops_field_typechange_list).post(ops_handlers::ops_field_typechange_create),
+        )
+        .route(
+            "/ops/field-governance/type-change/:job_id",
+            get(ops_handlers::ops_field_typechange_status),
+        )
+        .route(
+            "/ops/field-governance/type-change/:job_id/run",
+            post(ops_handlers::ops_field_typechange_run),
+        )
+        .route(
             "/ops/slow-queries",
             get(ops_handlers::ops_slow_queries),
         )
@@ -3913,6 +3925,18 @@ mod tests {
             .route(
                 "/ops/field-governance/index/:job_id/run",
                 post(ops_handlers::ops_field_index_run),
+            )
+            .route(
+                "/ops/field-governance/type-change",
+                get(ops_handlers::ops_field_typechange_list).post(ops_handlers::ops_field_typechange_create),
+            )
+            .route(
+                "/ops/field-governance/type-change/:job_id",
+                get(ops_handlers::ops_field_typechange_status),
+            )
+            .route(
+                "/ops/field-governance/type-change/:job_id/run",
+                post(ops_handlers::ops_field_typechange_run),
             )
             .route(
                 "/ops/plans/:plan_id/approve",

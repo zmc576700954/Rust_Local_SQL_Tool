@@ -479,26 +479,9 @@ async fn index_size(ctx: &OpsContext, schema: &str, name: &str) -> Result<u64, O
     Ok(size.max(0) as u64)
 }
 
-/// 单语句自动提交（不进事务块）；session 级超时，执行后 RESET。
+/// 单语句自动提交（不进事务块）；S4 起收敛到共享实现，行为不变。
 async fn exec_index_ddl(ctx: &OpsContext, policy: &OpsPolicy, sql: &str) -> Result<(), OpsError> {
-    let pool: &PgPool = ctx.db_client.pool.pg()?;
-    let mut conn = pool.acquire().await?;
-    sqlx::query(&format!(
-        "SET lock_timeout = '{}s'",
-        policy.lock_wait_timeout_secs.max(1)
-    ))
-    .execute(&mut *conn)
-    .await?;
-    sqlx::query("SET statement_timeout = '0'")
-        .execute(&mut *conn)
-        .await?;
-    let result = sqlx::query(sql).execute(&mut *conn).await;
-    let _ = sqlx::query("RESET lock_timeout").execute(&mut *conn).await;
-    let _ = sqlx::query("RESET statement_timeout")
-        .execute(&mut *conn)
-        .await;
-    result?;
-    Ok(())
+    super::pg_backfill::exec_ddl_auto_commit(ctx, policy, sql).await
 }
 
 /// 清理失败残留的 INVALID 索引；返回是否确实清理了一个。

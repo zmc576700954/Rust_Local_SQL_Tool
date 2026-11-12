@@ -118,6 +118,10 @@ CORE_LIB_TARGET_GUARDS = {
         "core_lib/field_migration_index_pg",
         ["FIELD_MIGRATION_PG_URL"],
     ),
+    "field_migration_typechange_pg": (
+        "core_lib/field_migration_typechange_pg",
+        ["FIELD_MIGRATION_PG_URL"],
+    ),
     "inspection_mysql": ("core_lib/inspection_mysql", ["INSPECTION_MYSQL_URL"]),
     "perf_diagnostics_mysql": ("core_lib/perf_diagnostics_mysql", ["PERF_MYSQL_URL"]),
 }
